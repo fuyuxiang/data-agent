@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     MAX_QUERY_ROWS: int = 10000
     QUERY_TIMEOUT_SECONDS: int = 60
 
+    # Trace / SQL Cache
+    TRACE_DB_PATH: str = "./data/traces.db"
+    TRACE_FILE_LOG_ENABLED: bool = True
+    TRACE_LOG_DIR: str = "./logs/traces"
+
     # 加密配置
     ENCRYPTION_KEY: Optional[bytes] = None
 

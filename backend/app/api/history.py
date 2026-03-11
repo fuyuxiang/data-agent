@@ -10,9 +10,42 @@ from sqlalchemy import select, desc
 from app.core.database import get_db
 from app.api.auth import get_current_user
 from app.models.models import User, QueryHistory
-from app.schemas.schemas import QueryHistoryResponse
+from app.schemas.schemas import QueryHistoryResponse, QueryHistoryCreate
 
 router = APIRouter()
+
+
+@router.post("", response_model=QueryHistoryResponse)
+async def create_query_history(
+    history_data: QueryHistoryCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建查询历史记录"""
+    history = QueryHistory(
+        user_id=current_user.id,
+        workspace_id=history_data.workspace_id,
+        dataset_id=history_data.dataset_id,
+        question=history_data.question,
+        normalized_question=history_data.normalized_question,
+        intent=history_data.intent,
+        semantic_sql=history_data.semantic_sql,
+        executable_sql=history_data.executable_sql,
+        sql_params=history_data.sql_params,
+        result_schema=history_data.result_schema,
+        result_rows=history_data.result_rows,
+        row_count=history_data.row_count,
+        execution_time_ms=history_data.execution_time_ms,
+        status=history_data.status,
+        error_message=history_data.error_message,
+        warnings=history_data.warnings,
+        trace_id=history_data.trace_id,
+        audit_id=history_data.audit_id,
+    )
+    db.add(history)
+    await db.commit()
+    await db.refresh(history)
+    return history
 
 
 @router.get("", response_model=List[QueryHistoryResponse])

@@ -1,0 +1,35 @@
+.DS_Store
+
+# Local tool settings
+.claude/
+.idea/
+.vscode/
+
+# Python caches
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Local env files
+.env
+.env.*
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Runtime logs and pid files
+logs/
+backend/logs/
+*.log
+*.pid
+
+# Local runtime data
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+backend/data/*.duckdb
+backend/data/uploads/

@@ -242,6 +242,15 @@ class QueryRequest(BaseModel):
     context: Optional[dict] = None  # 额外上下文
 
 
+class ExecuteSqlRequest(BaseModel):
+    """执行 SQL 请求"""
+    sql: str
+    workspace_id: int
+    dataset_id: Optional[int] = None
+    table_names: Optional[List[str]] = None  # 用户选择的表名列表
+    sql_params: Optional[List[Any]] = None
+
+
 class QueryResponse(BaseModel):
     """NL2SQL 查询响应"""
     question: str
@@ -251,6 +260,7 @@ class QueryResponse(BaseModel):
     sql: Optional[str] = None  # 生成的 SQL
     semantic_sql: Optional[str] = None  # 业务逻辑SQL
     executable_sql: Optional[str] = None  # 可执行SQL
+    sql_params: Optional[List[Any]] = None
     reasoning_summary: Optional[str] = None
     result_schema: Optional[List[dict]] = None
     result_rows: Optional[List[dict]] = None
@@ -264,7 +274,13 @@ class QueryResponse(BaseModel):
     trace_id: str
     audit_id: str
     agent_steps: Optional[List[dict]] = None  # Agent 思考步骤
+    execution_history: Optional[List[dict]] = None  # 完整节点执行历史
+    evidence: Optional[dict] = None  # 结构化证据
     answer: Optional[str] = None  # 自然语言答案
+    plan_source: Optional[str] = None  # 规划来源：rule/llm/sql_cache/manual_sql/reject
+    confidence: Optional[float] = None  # 规划置信度（0~1）
+    clarification_needed: Optional[bool] = None  # 是否需要用户澄清
+    clarification_options: Optional[List[str]] = None  # 澄清建议候选
 
 
 class QueryHistoryResponse(BaseModel):
@@ -283,6 +299,27 @@ class QueryHistoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class QueryHistoryCreate(BaseModel):
+    """创建查询历史请求"""
+    workspace_id: int
+    dataset_id: Optional[int] = None
+    question: str
+    normalized_question: Optional[str] = None
+    intent: Optional[str] = None
+    semantic_sql: Optional[str] = None
+    executable_sql: Optional[str] = None
+    sql_params: Optional[List[Any]] = None
+    result_schema: Optional[list] = None
+    result_rows: Optional[list] = None
+    row_count: int = 0
+    execution_time_ms: Optional[float] = None
+    status: str = "success"
+    error_message: Optional[str] = None
+    warnings: Optional[list] = None
+    trace_id: str
+    audit_id: Optional[str] = None
 
 
 # ── Conversation / Message ────────────────────────────────────────────────

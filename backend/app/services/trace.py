@@ -18,7 +18,7 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from uuid import uuid4
 
 
@@ -48,6 +48,26 @@ def question_hash(text: str) -> str:
     """对归一化后的问题计算 MD5 哈希"""
     normalized = normalize_question(text)
     return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def normalize_table_scope(table_scope: Optional[Union[str, Iterable[str]]]) -> str:
+    """规范化表作用域，用于缓存隔离"""
+    if table_scope is None:
+        return ""
+    if isinstance(table_scope, str):
+        values = [table_scope]
+    else:
+        values = list(table_scope)
+    normalized = sorted({str(v).strip().lower() for v in values if str(v).strip()})
+    return ",".join(normalized)
+
+
+def scoped_question_hash(text: str, table_scope: Optional[Union[str, Iterable[str]]] = None) -> str:
+    """按问题+表作用域生成缓存 key，避免跨表域误命中"""
+    normalized_q = normalize_question(text)
+    scope = normalize_table_scope(table_scope)
+    key = f"{normalized_q}||{scope}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -204,11 +224,20 @@ class TraceManager:
                 question_sample TEXT NOT NULL,
                 intent TEXT NOT NULL,
                 sql TEXT NOT NULL,
+                table_scope TEXT DEFAULT '',
                 hit_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_hit_at TIMESTAMP
             )
         """)
+        # 兼容历史版本：若旧表缺少 table_scope 列则补齐
+        try:
+            cols = conn.execute("PRAGMA table_info(sql_cache)").fetchall()
+            col_names = {str(row[1]).lower() for row in cols}
+            if "table_scope" not in col_names:
+                conn.execute("ALTER TABLE sql_cache ADD COLUMN table_scope TEXT DEFAULT ''")
+        except Exception:
+            pass
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_timestamp ON query_traces(timestamp)
         """)
@@ -268,41 +297,50 @@ class TraceManager:
 
     def _save_to_cache(self, trace: QueryTrace):
         """将成功查询写入 sql_cache 表"""
-        q_hash = question_hash(trace.question)
+        table_scope = normalize_table_scope((trace.metadata or {}).get("selected_tables"))
+        q_hash = scoped_question_hash(trace.question, table_scope)
         now = datetime.now().isoformat()
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("""
-                INSERT INTO sql_cache (question_hash, question_sample, intent, sql, hit_count, created_at, last_hit_at)
-                VALUES (?, ?, ?, ?, 0, ?, NULL)
+                INSERT INTO sql_cache (question_hash, question_sample, intent, sql, table_scope, hit_count, created_at, last_hit_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?, NULL)
                 ON CONFLICT(question_hash) DO UPDATE SET
                     intent = excluded.intent,
                     sql = excluded.sql,
-                    question_sample = excluded.question_sample
-            """, (q_hash, trace.question, trace.intent, trace.sql, now))
+                    question_sample = excluded.question_sample,
+                    table_scope = excluded.table_scope
+            """, (q_hash, trace.question, trace.intent, trace.sql, table_scope, now))
             conn.commit()
             conn.close()
         except Exception:
             pass  # 缓存写入失败不影响主流程
 
-    def lookup_sql_cache(self, q_text: str) -> Optional[Tuple[str, str]]:
+    def lookup_sql_cache(self, q_text: str, table_scope: Optional[Union[str, Iterable[str]]] = None) -> Optional[Tuple[str, str]]:
         """根据问题查找 SQL 缓存。"""
         if not self.db_path:
             return None
 
-        q_hash = question_hash(q_text)
+        scoped_hash = scoped_question_hash(q_text, table_scope)
+        legacy_hash = question_hash(q_text)
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT intent, sql FROM sql_cache WHERE question_hash = ?",
-                (q_hash,)
+                "SELECT intent, sql, question_hash FROM sql_cache WHERE question_hash = ?",
+                (scoped_hash,)
             ).fetchone()
+            # 向后兼容：旧缓存只按 question_hash 存储
+            if not row:
+                row = conn.execute(
+                    "SELECT intent, sql, question_hash FROM sql_cache WHERE question_hash = ?",
+                    (legacy_hash,)
+                ).fetchone()
 
             if row and row["sql"]:
                 conn.execute(
                     "UPDATE sql_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
-                    (datetime.now().isoformat(), q_hash)
+                    (datetime.now().isoformat(), row["question_hash"])
                 )
                 conn.commit()
                 conn.close()

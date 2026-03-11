@@ -1,24 +1,20 @@
 """
-NL2SQL 规则引擎与 LLM 生成
+NL2SQL 多 Agent 规划服务（Intent -> Coder -> Reviewer -> Self-Correction）
 
-功能：
-1. 意图识别（6种：chat, list, count, search, analysis, skip）
-2. 时间范围解析
-3. 地点解析（街道/区县）
-4. 置信度解析
-5. TOP K 解析
-6. 规则引擎 SQL 生成
-7. LLM SQL 生成
-8. SQL 缓存命中
-9. SQL 自动修正
+主流程：
+1. Intent Agent 识别意图（chat/search/list/count）
+2. Coder Agent 用 LLM 生成 DSL，再生成 SQL
+3. Reviewer Agent 检查安全/可执行性/性能风险
+4. Self-Correction：Reviewer 不通过时将错误反馈给 LLM 自动修正
+5. 输出可执行计划或拒绝计划（不降级到规则 SQL）
 """
 
-import calendar
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -43,41 +39,6 @@ def _parse_top_k(text: str, default: int = 20) -> int:
     return default
 
 
-def _parse_time_range(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """解析时间范围"""
-    # 1) 精确日期范围: 2025-01-01 ~ 2025-01-31
-    date_matches = re.findall(r"\d{4}-\d{2}-\d{2}", text)
-    if len(date_matches) >= 2:
-        return date_matches[0] + " 00:00:00", date_matches[1] + " 23:59:59"
-
-    # 2) "近N天/小时"
-    match = re.search(r"近(\d+)(天|小时)", text)
-    if match:
-        value = int(match.group(1))
-        unit = match.group(2)
-        end = datetime.now()
-        start = end - (timedelta(days=value) if unit == "天" else timedelta(hours=value))
-        return start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
-
-    # 3) "YYYY年M月" — 整月范围
-    match = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", text)
-    if match:
-        year, month = int(match.group(1)), int(match.group(2))
-        _, last_day = calendar.monthrange(year, month)
-        return f"{year}-{month:02d}-01 00:00:00", f"{year}-{month:02d}-{last_day} 23:59:59"
-
-    # 4) "最近N天"
-    match = re.search(r"最近(\d+)(天|小时)", text)
-    if match:
-        value = int(match.group(1))
-        unit = match.group(2)
-        end = datetime.now()
-        start = end - (timedelta(days=value) if unit == "天" else timedelta(hours=value))
-        return start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
-
-    return None, None
-
-
 # 闲聊模式
 _CHAT_PATTERNS = [
     # 问候
@@ -94,6 +55,7 @@ _CHAT_PATTERNS = [
 _QUERY_KEYWORDS = [
     "查询", "查看", "搜索", "查找", "查一下", "找一下", "列出",
     "统计", "多少", "数量", "总数", "分布", "TOP", "top", "排名",
+    "对比", "比较", "差异", "vs", "VS",
     "告警", "事件", "设备", "街道", "区县", "置信度", "工单",
     "最近", "今天", "昨天", "本月", "本周",
 ]
@@ -101,6 +63,7 @@ _QUERY_KEYWORDS = [
 # 结构化查询强信号
 _STRUCTURED_KEYWORDS = [
     "统计", "多少", "数量", "总数", "分布", "TOP", "top", "排名",
+    "对比", "比较", "差异", "vs", "VS",
     "按街道", "按设备", "按类型", "按区", "按算法", "GROUP", "group",
 ]
 
@@ -120,22 +83,11 @@ _VISUAL_KEYWORDS = [
     "有没有", "有什么图", "图片", "照片",
 ]
 
-_SCHEMA_COUNT_KEYWORDS = [
-    "多少字段", "多少列", "多少特征", "字段数量", "列数量", "特征数量",
-    "字段个数", "列个数", "特征个数", "字段数", "列数", "特征数",
-]
-
-_SCHEMA_LIST_KEYWORDS = [
-    "有哪些字段", "所有字段", "字段列表", "列名", "字段名", "字段都有哪些", "当前字段",
-]
-
-_ROW_COUNT_HINTS = [
-    "多少条", "多少行", "记录数", "总记录", "总条数", "数据量",
-]
-
 _RAW_LIST_HINTS = [
     "明细", "详情", "样例", "样本", "原始数据",
 ]
+
+_TABLE_POLICY_MODES = {"auto", "exact", "all"}
 
 
 def _is_visual_query(text: str) -> bool:
@@ -158,7 +110,7 @@ def _parse_intent(text: str) -> str:
         return "search"
     # 再检查是否命中查询关键词（优先级最高）
     if any(k in t for k in _QUERY_KEYWORDS):
-        if any(k in t for k in ["多少", "统计", "数量", "总数", "分布", "TOP", "top", "排名"]):
+        if any(k in t for k in ["多少", "统计", "数量", "总数", "分布", "TOP", "top", "排名", "对比", "比较", "差异", "vs", "VS", "构成", "结构", "占比", "组成", "拆分"]):
             return "count"
         return "list"
     # 再检查是否是闲聊
@@ -171,22 +123,281 @@ def _parse_intent(text: str) -> str:
     return "list"
 
 
-def _is_schema_count_query(text: str) -> bool:
-    """是否是字段/列数量问题"""
-    t = text.replace(" ", "")
-    return any(k in t for k in _SCHEMA_COUNT_KEYWORDS)
+def _normalize_table_policy(raw_policy: Any) -> Dict[str, Any]:
+    """标准化 LLM 输出的 table_policy"""
+    mode = "auto"
+    count: Optional[int] = None
+
+    if isinstance(raw_policy, dict):
+        mode = str(raw_policy.get("mode") or raw_policy.get("type") or "auto").strip().lower()
+        count_raw = raw_policy.get("count")
+        try:
+            if count_raw is not None:
+                parsed = int(count_raw)
+                if parsed > 0:
+                    count = parsed
+        except Exception:
+            count = None
+    elif isinstance(raw_policy, (int, float)):
+        parsed = int(raw_policy)
+        if parsed > 0:
+            mode = "exact"
+            count = parsed
+    elif isinstance(raw_policy, str):
+        text = raw_policy.strip().lower()
+        if text in _TABLE_POLICY_MODES:
+            mode = text
+        else:
+            try:
+                parsed = int(text)
+                if parsed > 0:
+                    mode = "exact"
+                    count = parsed
+            except Exception:
+                mode = "auto"
+
+    if mode not in _TABLE_POLICY_MODES:
+        mode = "auto"
+    if mode != "exact":
+        count = None
+
+    policy: Dict[str, Any] = {"mode": mode}
+    if count is not None:
+        policy["count"] = count
+    return policy
 
 
-def _is_schema_list_query(text: str) -> bool:
-    """是否是字段列表问题"""
-    t = text.replace(" ", "")
-    return any(k in t for k in _SCHEMA_LIST_KEYWORDS)
+def _required_table_count_from_policy(policy: Dict[str, Any], selected_count: int) -> Optional[int]:
+    """根据 table_policy 计算最小表数量要求"""
+    if selected_count <= 1:
+        return None
+
+    mode = str(policy.get("mode") or "auto").lower()
+    if mode == "all":
+        return selected_count
+    if mode == "exact":
+        try:
+            count = int(policy.get("count"))
+            if count > 0:
+                return min(count, selected_count)
+        except Exception:
+            return None
+    return None
 
 
-def _is_row_count_query(text: str) -> bool:
-    """是否是数据行数问题"""
-    t = text.replace(" ", "")
-    return any(k in t for k in _ROW_COUNT_HINTS)
+def _validate_dsl_table_policy(dsl: Dict[str, Any], selected_tables: List[str]) -> List[str]:
+    """校验 DSL 的 table_policy 与 tables 是否一致"""
+    selected = list(dict.fromkeys([str(t).strip() for t in (selected_tables or []) if str(t).strip()]))
+    selected_count = len(selected)
+    if selected_count <= 1:
+        return []
+
+    if dsl.get("table_policy_missing"):
+        return ["dsl_missing_table_policy"]
+
+    policy = dsl.get("table_policy")
+    if not isinstance(policy, dict):
+        return ["dsl_missing_table_policy"]
+
+    mode = str(policy.get("mode") or "").lower()
+    if mode not in _TABLE_POLICY_MODES:
+        return [f"dsl_invalid_table_policy_mode:{mode or 'empty'}"]
+    if mode == "exact":
+        count = policy.get("count")
+        if not isinstance(count, int) or count <= 0:
+            return [f"dsl_invalid_table_policy_count:{count}"]
+
+    required_count = _required_table_count_from_policy(policy, selected_count)
+    if required_count is None:
+        return []
+
+    dsl_tables = dsl.get("tables") if isinstance(dsl, dict) else []
+    dsl_table_names = list(dict.fromkeys([str(t).strip() for t in (dsl_tables or []) if str(t).strip()]))
+    if len(dsl_table_names) < required_count:
+        return [f"dsl_table_count_too_small:required>={required_count},actual={len(dsl_table_names)}"]
+    return []
+
+
+def _choose_fallback_tables_by_policy(fallback_tables: List[str], policy: Dict[str, Any]) -> List[str]:
+    """当 DSL 缺 tables 时，基于 table_policy 选择回填表集合"""
+    tables = list(dict.fromkeys([str(t).strip() for t in (fallback_tables or []) if str(t).strip()]))
+    if not tables:
+        return []
+
+    mode = str(policy.get("mode") or "auto").lower()
+    if mode == "all":
+        return tables
+    if mode == "exact":
+        try:
+            count = int(policy.get("count"))
+            if count > 0:
+                return tables[: min(count, len(tables))]
+        except Exception:
+            pass
+    return tables[:1]
+
+
+def _string_overlap_score(a: str, b: str) -> float:
+    """字符串相似度评分（0~1），兼容中英文列名/短语"""
+    a_norm = _normalize_name_for_match(a)
+    b_norm = _normalize_name_for_match(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    if a_norm == b_norm:
+        return 1.0
+    if a_norm in b_norm or b_norm in a_norm:
+        return 0.86
+    set_a = set(a_norm)
+    set_b = set(b_norm)
+    union = len(set_a | set_b)
+    if union == 0:
+        return 0.0
+    return len(set_a & set_b) / union
+
+
+def _column_match_score(column_name: str, hint: str) -> float:
+    """列名与查询提示词匹配分数（0~1）"""
+    col = str(column_name or "")
+    h = str(hint or "")
+    if not col or not h:
+        return 0.0
+    col_lower = col.lower()
+    h_lower = h.lower()
+    if col_lower == h_lower:
+        return 1.0
+    if h_lower in col_lower or col_lower in h_lower:
+        return 0.92
+    score = _string_overlap_score(col, h)
+
+    semantic_groups = [
+        (["月", "月份", "账期", "month", "date", "时间", "日期"], ["month", "ym", "date", "time", "day", "year", "账期", "月份", "日期", "时间"]),
+        (["省", "省份", "省分", "城市", "地区", "prov", "city"], ["省", "省分", "省份", "prov", "city", "地区"]),
+        (["渠道", "channel"], ["渠道", "channel"]),
+        (["产品", "product", "prod"], ["产品", "prod", "product"]),
+        (["用户", "账号", "acct", "user"], ["用户", "账号", "acct", "user"]),
+    ]
+    for hint_tokens, col_tokens in semantic_groups:
+        if any(token in h_lower for token in hint_tokens) and any(token in col_lower for token in col_tokens):
+            score = max(score, 0.82)
+
+    return score
+
+
+def _is_numeric_type(column_type: str) -> bool:
+    """判断字段类型是否为数值型"""
+    dt = str(column_type or "").upper()
+    return any(k in dt for k in ["INT", "DOUBLE", "FLOAT", "DECIMAL", "NUMERIC", "REAL"])
+
+
+def _is_metric_like_column(column_name: str) -> bool:
+    """根据列名判断是否度量/指标字段"""
+    name = str(column_name or "").lower()
+    metric_tokens = [
+        "fee", "amount", "revenue", "income", "cost", "price", "value", "cnt", "count", "num",
+        "收入", "金额", "费用", "计费", "出账", "折扣", "调账", "流量", "语音", "短信", "数量", "使用量",
+    ]
+    return any(token in name for token in metric_tokens)
+
+
+def _extract_dimension_hints(text: str) -> List[str]:
+    """从问题中提取维度提示词（用于 GROUP BY / JOIN 对齐）"""
+    q = (text or "").strip()
+    if not q:
+        return []
+
+    hints: List[str] = []
+
+    for pattern in [
+        r"(?:按|各|每)\s*([^\s，。,.]{1,24})",
+        r"(?:相同|同)\s*([^\s，。,.和与及]{1,16})",
+    ]:
+        for raw in re.findall(pattern, q):
+            cand = (raw or "").strip(" ，。,.、")
+            if not cand:
+                continue
+            # 截断语义尾巴，保留维度核心短语
+            for cut_word in ["的", "进行", "统计", "汇总", "分析", "收入", "金额", "用户数", "数量", "分布", "差异", "对比", "明细", "记录"]:
+                idx = cand.find(cut_word)
+                if idx > 0:
+                    cand = cand[:idx]
+            cand = cand.strip()
+            if cand:
+                hints.append(cand)
+
+    # 显式时间/地域语义提示
+    q_lower = q.lower()
+    if any(k in q_lower for k in ["月份", "按月", "月度", "month", "账期"]):
+        hints.append("月份")
+    if any(k in q for k in ["省", "省份", "省分", "地区", "城市"]):
+        hints.append("省份")
+    if "渠道" in q:
+        hints.append("渠道")
+    if "产品" in q:
+        hints.append("产品")
+
+    # 去重保序
+    return list(dict.fromkeys([h for h in hints if h]))
+
+
+def _pick_metric_column(
+    columns: List[str],
+    question: str,
+    *,
+    prefer_amount: bool = False,
+    prefer_count_metric: bool = False,
+) -> Optional[str]:
+    """通用指标字段选择（基于 schema + 问句语义）"""
+    if not columns:
+        return None
+    q = (question or "").lower()
+    scored: List[Tuple[float, str]] = []
+
+    amount_hints = ["收入", "金额", "费用", "计费", "出账", "fee", "amount", "revenue", "income", "cost", "price"]
+    count_hints = ["用户数", "数量", "条数", "记录数", "个数", "count", "cnt", "num", "user", "acct"]
+
+    for col in columns:
+        col_text = str(col or "")
+        if not col_text:
+            continue
+        col_lower = col_text.lower()
+        score = 0.0
+
+        if _is_metric_like_column(col_text):
+            score += 0.25
+        if "id" == col_lower or col_lower.endswith("_id"):
+            score -= 0.2
+        if col_lower.startswith("rsrv_"):
+            score -= 0.3
+
+        score += _column_match_score(col_text, q) * 0.9
+
+        if prefer_amount or any(k in q for k in amount_hints):
+            score += max((_column_match_score(col_text, hint) for hint in amount_hints), default=0.0) * 0.9
+        if prefer_count_metric or any(k in q for k in count_hints):
+            score += max((_column_match_score(col_text, hint) for hint in count_hints), default=0.0) * 0.8
+
+        if score > 0:
+            scored.append((score, col_text))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda x: (-x[0], len(x[1])))
+    return scored[0][1]
+
+
+def _detect_aggregation_mode(text: str) -> str:
+    """识别聚合模式：count/sum/avg/max/min"""
+    q = (text or "").lower()
+    if any(k in q for k in ["平均", "均值", "avg"]):
+        return "avg"
+    if any(k in q for k in ["最大", "最高", "max"]):
+        return "max"
+    if any(k in q for k in ["最小", "最低", "min"]):
+        return "min"
+    if any(k in q for k in ["记录数", "条数", "多少条", "多少行", "count", "数量", "多少", "个数"]):
+        if not any(k in q for k in ["收入", "金额", "费用", "fee", "amount", "revenue", "income"]):
+            return "count"
+    return "sum"
 
 
 def _get_table_schema(table_name: str) -> List[Dict]:
@@ -259,260 +470,22 @@ def _resolve_candidate_tables(table_names: Optional[List[str]]) -> List[str]:
     return list(dict.fromkeys(resolved)) if resolved else table_names
 
 
-def _select_best_table(text: str, table_names: List[str], intent: str) -> Tuple[Optional[str], str]:
-    """多表场景下，根据问题和字段匹配自动选择最相关表"""
+def _rank_candidate_tables(text: str, table_names: List[str], intent: str) -> List[Dict[str, Any]]:
+    """候选表排序（无业务规则）：保持用户选择顺序"""
     if not table_names:
-        return None, "未提供候选表"
-    if len(table_names) == 1:
-        return table_names[0], "仅选择了 1 张表"
+        return []
 
-    text_lower = text.lower()
-    text_norm = _normalize_name_for_match(text)
-    best_table = table_names[0]
-    best_score = -1
-    best_reason = "默认使用首个候选表"
-
-    # 业务关键词 -> 字段关键词
-    semantic_hints = {
-        "渠道": ["渠道", "channel"],
-        "产品": ["产品", "prod", "product"],
-        "用户": ["用户", "user", "acct"],
-        "收入": ["收入", "fee", "amount", "计费", "出账"],
-    }
-
+    ranked: List[Dict[str, Any]] = []
     for idx, table_name in enumerate(table_names):
-        score = 0
-        reasons: List[str] = []
+        ranked.append({
+            "table": table_name,
+            "score": max(1, len(table_names) - idx),
+            "reason": "按用户选择顺序",
+            "order": idx,
+        })
 
-        # 1) 表名直接命中（最高优先级）
-        table_lower = table_name.lower()
-        table_norm = _normalize_name_for_match(_normalize_table_name(table_name))
-        if table_lower in text_lower or (table_norm and table_norm in text_norm):
-            score += 100
-            reasons.append("问题中直接提到表名")
-
-        # 2) 表名片段命中（如 prod/channel）
-        name_tokens = [t for t in re.split(r"[_\-.]+", table_lower) if len(t) >= 2]
-        token_hits = sum(1 for token in name_tokens if token in text_lower)
-        if token_hits:
-            score += token_hits * 10
-            reasons.append(f"表名关键词命中 {token_hits} 次")
-
-        # 3) 字段命中
-        schema = _get_table_schema(table_name)
-        col_names = [c.get("column_name", "") for c in schema if c.get("column_name")]
-        if col_names:
-            col_name_hits = sum(1 for col in col_names if col.lower() in text_lower)
-            if col_name_hits:
-                score += col_name_hits * 20
-                reasons.append(f"字段名命中 {col_name_hits} 次")
-
-            # 4) 意图/语义相关字段命中
-            col_names_lower = [c.lower() for c in col_names]
-            for hint, keywords in semantic_hints.items():
-                if hint in text:
-                    semantic_hits = sum(
-                        1 for col in col_names_lower if any(k in col for k in keywords)
-                    )
-                    if semantic_hits:
-                        score += min(semantic_hits, 3) * 6
-                        reasons.append(f"{hint}相关字段匹配")
-
-            # 5) 统计场景下，能推断分组字段的表优先
-            if intent == "count" and _infer_group_by_column(text, col_names):
-                score += 8
-                reasons.append("可推断统计维度")
-
-        # 稳定排序：同分优先用户选择顺序靠前
-        score += max(0, 2 - idx)
-
-        if score > best_score:
-            best_score = score
-            best_table = table_name
-            best_reason = "；".join(reasons) if reasons else "未命中明显特征，按选择顺序兜底"
-
-    return best_table, best_reason
-
-
-def _infer_group_by_column(text: str, columns: List[str]) -> Optional[Tuple[str, str]]:
-    """根据问题文本推断 GROUP BY 字段"""
-    text_lower = text.lower()
-
-    # 渠道相关关键词
-    if any(k in text_lower for k in ["渠道", "渠道类型", "发展渠道", "渠道分类", "渠道聚类"]):
-        for col in columns:
-            if "渠道" in col or "channel" in col.lower():
-                return col, col
-        # 备选：找包含"一级"、"二级"、"三级"的字段
-        for col in columns:
-            if "一级" in col or "二级" in col or "三级" in col:
-                return col, col
-
-    # 省份相关
-    if any(k in text_lower for k in ["省", "省份", "市", "城市", "地区"]):
-        for col in columns:
-            if "省" in col or "prov" in col.lower() or "市" in col or "城市" in col:
-                return col, col
-
-    # 时间相关（按月统计）
-    if any(k in text_lower for k in ["月", "月份", "每月"]):
-        for col in columns:
-            if "month" in col.lower() or "月份" in col:
-                return col, col
-
-    # 产品相关
-    if any(k in text_lower for k in ["产品", "业务", "类型"]):
-        for col in columns:
-            if "产品" in col or "业务" in col or "prod" in col.lower():
-                return col, col
-
-    # 用户相关
-    if any(k in text_lower for k in ["用户"]):
-        for col in columns:
-            if "用户" in col or "user" in col.lower():
-                return col, col
-
-    return None
-
-
-def _build_smart_sql(text: str, table_name: str, intent: str) -> Tuple[str, List, Dict]:
-    """根据表结构智能生成 SQL"""
-    columns = _get_table_schema(table_name)
-    if not columns:
-        return "", [], {}
-
-    col_names = [c["column_name"] for c in columns]
-    col_types = {c["column_name"]: c["column_type"] for c in columns}
-
-    # 解析时间范围
-    start_time, end_time = _parse_time_range(text)
-
-    # 解析 TOP K
-    top_k = _parse_top_k(text)
-
-    # 推断 GROUP BY 字段
-    group_result = _infer_group_by_column(text, col_names)
-
-    where = []
-    params = []
-
-    # 时间字段处理
-    time_col = None
-    for col in col_names:
-        if "month" in col.lower():
-            time_col = col
-            break
-
-    if start_time and time_col:
-        # month_id 是YYYYMM格式
-        start_month = start_time[:7].replace("-", "")
-        end_month = end_time[:7].replace("-", "")
-        where.append(f"{time_col} >= ?")
-        params.append(start_month)
-        where.append(f"{time_col} <= ?")
-        params.append(end_month)
-
-    where_sql = " WHERE " + " AND ".join(where) if where else ""
-
-    if intent == "count":
-        # 统计查询
-        if group_result:
-            group_col, group_alias = group_result
-            sql = (
-                f"SELECT {group_col} AS {group_alias}, COUNT(*) AS 数量 FROM {table_name}"
-                + where_sql
-                + f" GROUP BY {group_col} ORDER BY 数量 DESC"
-            )
-        else:
-            # 没有明确的分组字段，返回总数
-            sql = f"SELECT COUNT(*) AS 数量 FROM {table_name}" + where_sql
-
-    else:
-        # 列表查询
-        sql = (
-            f"SELECT * FROM {table_name}"
-            + where_sql
-            + f" LIMIT {top_k}"
-        )
-
-    filters = {
-        "start_time": start_time,
-        "end_time": end_time,
-        "top_k": top_k,
-    }
-
-    return sql, params, filters
-
-
-def _build_schema_meta_sql(text: str, table_name: str) -> QueryPlan:
-    """字段/列/特征相关问题，使用 information_schema.columns 查询"""
-    if _is_schema_count_query(text):
-        sql = (
-            "SELECT COUNT(*) AS 字段数量 "
-            "FROM information_schema.columns "
-            "WHERE table_name = ?"
-        )
-        return QueryPlan(
-            intent="count",
-            sql=sql,
-            params=[table_name],
-            filters={"schema_query": True, "schema_action": "count_columns"}
-        )
-
-    # 字段列表（默认）
-    sql = (
-        "SELECT column_name AS 字段名, data_type AS 字段类型 "
-        "FROM information_schema.columns "
-        "WHERE table_name = ? "
-        "ORDER BY ordinal_position "
-        "LIMIT 500"
-    )
-    return QueryPlan(
-        intent="list",
-        sql=sql,
-        params=[table_name],
-        filters={"schema_query": True, "schema_action": "list_columns"}
-    )
-
-
-def parse_question(text: str, table_name: str = None) -> QueryPlan:
-    """
-    使用规则引擎解析用户问题 - 智能版
-
-    Args:
-        text: 用户问题
-        table_name: 表名
-
-    Returns:
-        QueryPlan 查询计划
-    """
-    intent = _parse_intent(text)
-
-    # 闲聊意图：不生成 SQL
-    if intent == "chat":
-        return QueryPlan(intent="chat", sql="", params=[], filters={})
-
-    # 向量检索意图：不生成 SQL
-    if intent == "search":
-        top_k = _parse_top_k(text, default=10)
-        return QueryPlan(intent="search", sql="", params=[], filters={"query_text": text, "top_k": top_k})
-
-    # 如果没有指定表名，无法生成 SQL
-    if not table_name:
-        print("[parse_question] 未指定表名，返回空查询计划")
-        return QueryPlan(intent=intent, sql="", params=[], filters={})
-
-    # 字段/列/特征问题优先走 schema 元数据查询
-    if _is_schema_count_query(text) or _is_schema_list_query(text):
-        plan = _build_schema_meta_sql(text, table_name)
-        print(f"[parse_question] 识别为 schema 查询: {plan.filters.get('schema_action')}")
-        return plan
-
-    # 使用智能 SQL 生成
-    sql, params, filters = _build_smart_sql(text, table_name, intent)
-    print(f"[parse_question] 智能生成 SQL: {sql[:100]}...")
-
-    return QueryPlan(intent=intent, sql=sql, params=params, filters=filters)
+    ranked.sort(key=lambda item: (-int(item.get("score", 0)), int(item.get("order", 0))))
+    return ranked
 
 
 def _get_llm_config(config: Dict):
@@ -607,7 +580,7 @@ def _parse_llm_json(content: str) -> dict:
     text = _strip_think_blocks(content.strip())
     if text.startswith("```"):
         lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         text = "\n".join(lines)
 
     candidate = _extract_first_json_object(text) or text
@@ -615,43 +588,6 @@ def _parse_llm_json(content: str) -> dict:
         return json.loads(candidate)
     except Exception as exc:
         raise RuntimeError(f"LLM 输出不是有效 JSON: {content}") from exc
-
-
-def _build_nl2sql_system_prompt(schema_prompt: str, table_scope_hint: str = "") -> str:
-    """构建 NL2SQL 的 system prompt"""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        "你是一个专业的 NL2SQL 助手，负责将中文自然语言问题转换为 DuckDB SQL 查询。\n\n"
-        f"# 当前时间\n{now_str}\n"
-        "所有涉及'最近N天'、'本月'、'今天'、'昨天'等相对时间的表达，都必须基于上面的当前时间计算。\n\n"
-        "# 数据库 Schema\n"
-        f"{schema_prompt}\n\n"
-        f"{table_scope_hint}"
-        "# 重要：数据库结构说明\n"
-        "所有数据存储在一张统一的 `embeddings` 表中，表名根据实际数据确定。\n"
-        "你可以直接查询对应的表。\n\n"
-        "# 实体提取规则\n"
-        "1. **区分量词和地名**：'20条'中的'条'是量词，不是地名的一部分。\n"
-        "2. **常见量词**：条、个、件、次、项、篇、张 — 这些紧跟数字时是数量单位，不是地名前缀。\n"
-        "3. **地名后缀识别**：街道、镇、乡、区、县、市、省 — 这些是地名标志。\n"
-        "4. **时间表达式**：'最近N天'、'本月'、'今天' 等需要转换为具体日期范围。\n"
-        "5. **'最近N条' ≠ '最近N天'**：'最近20条'表示 ORDER BY ... DESC LIMIT 20，"
-        "**绝对不要**添加时间过滤条件！\n\n"
-        "# intent 分类规则\n"
-        "- **count**：用户问'统计'、'数量'、'多少'、'分布'、'TOP'、'排名'，或 SQL 包含 COUNT/SUM/AVG + GROUP BY\n"
-        "- **list**：用户问'查询'、'查看'、'详细信息'、'明细'，需要返回逐行记录\n\n"
-        "# SQL 生成规则\n"
-        "1. 直接查询表即可。\n"
-        "2. 时间字段根据实际 schema 确定。\n"
-        "3. SQL 中的值必须用 `$1`, `$2`, ... 占位符（DuckDB 参数化查询），对应的值放在 params 数组中。\n"
-        "4. 如果是列表查询，SELECT 中包含必要的展示字段。\n"
-        "5. 如果是统计查询，建议带 GROUP BY 分组维度和 ORDER BY 数量 DESC。\n"
-        "6. 只允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DROP 等写操作。\n"
-        "7. 列表查询默认 LIMIT 20，除非用户指定了数量。\n\n"
-        "# 输出格式\n"
-        "严格输出一个 JSON 对象，不要包含任何多余文字、注释、`<think>` 标签或 markdown 代码块：\n"
-        '{"intent": "count|list", "sql": "...", "params": [...], "filters": {...}}\n'
-    )
 
 
 def _build_schema_prompt_for_selected_tables(table_names: List[str]) -> str:
@@ -671,14 +607,364 @@ def _build_schema_prompt_for_selected_tables(table_names: List[str]) -> str:
     return "\n\n".join(parts)
 
 
-def _call_deepseek_nl2sql(
+def _build_nl2dsl_system_prompt(schema_prompt: str, table_scope_hint: str = "", intent_hint: str = "list") -> str:
+    """构建 NL->DSL 的 system prompt"""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        "你是一个 NL2SQL 规划器，请先输出结构化 DSL，不要直接输出 SQL。\n\n"
+        f"# 当前时间\n{now_str}\n"
+        "所有涉及'最近N天'、'本月'、'今天'、'昨天'等相对时间的表达，都必须基于上面的当前时间计算。\n\n"
+        "# 数据库 Schema\n"
+        f"{schema_prompt}\n\n"
+        f"{table_scope_hint}"
+        "# 输出要求\n"
+        "1. 仅使用 schema 中存在的表和字段，不得臆造。\n"
+        "2. 仅输出 JSON 对象，不要任何额外文本。\n"
+        "3. intent 仅允许 list 或 count。\n"
+        "4. where 中值必须保留原始语义，暂不参数化。\n"
+        "5. joins 的 left/right 使用 table.column 形式。\n"
+        "6. select/group_by/order_by/where 的 column 均使用原字段名或 table.column。\n"
+        "7. 必须输出 table_policy：mode 仅允许 auto/exact/all；mode=exact 时必须提供 count>0。\n"
+        "8. 若问题有明确表数量要求，table_policy 必须表达该要求，且 tables 与之匹配。\n\n"
+        f"# intent 提示\n用户问题倾向: {intent_hint}\n\n"
+        "# DSL JSON Schema\n"
+        '{'
+        '"intent":"list|count",'
+        '"table_policy":{"mode":"auto|exact|all","count":"mode=exact时必填正整数"},'
+        '"tables":["table_a"],'
+        '"select":[{"column":"table_a.col|col|*","agg":"none|count|sum|avg|max|min","alias":"可选"}],'
+        '"joins":[{"type":"inner|left|right|full","left":"table_a.col","right":"table_b.col"}],'
+        '"where":[{"column":"table_a.col|col","op":"=|!=|>|>=|<|<=|between|in|like","value":"任意JSON值"}],'
+        '"group_by":["table_a.col|col"],'
+        '"order_by":[{"column":"table_a.col|col|alias","direction":"asc|desc"}],'
+        '"limit":100'
+        '}'
+    )
+
+
+def _build_sql_from_dsl_system_prompt(schema_prompt: str, table_scope_hint: str = "") -> str:
+    """构建 DSL->SQL 的 system prompt"""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        "你是一个 SQL 生成器。给定已校验 DSL，请严格按 DSL 生成 DuckDB SQL。\n\n"
+        f"# 当前时间\n{now_str}\n\n"
+        "# 数据库 Schema\n"
+        f"{schema_prompt}\n\n"
+        f"{table_scope_hint}"
+        "# 强约束\n"
+        "1. 只允许 SELECT 查询。\n"
+        "2. 只能使用 DSL 中 tables/joins/select/where/group_by/order_by/limit 指定的信息。\n"
+        "3. where 的值必须使用 ? 占位符，params 顺序与 SQL 占位符一致。\n"
+        "4. 不要补充 DSL 未要求的过滤条件或 join。\n"
+        "5. 若无法生成可执行 SQL，输出空 sql（由上层触发重试）。\n\n"
+        "# 输出格式\n"
+        '{"intent":"count|list","sql":"...","params":[...],"filters":{}}'
+    )
+
+
+def _canonical_ref_name(ref: str) -> str:
+    """标准化列引用（去引号/空白，仅保留 table.col 或 col）"""
+    text = str(ref or "").strip().strip('"').strip("'")
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def _split_ref(ref: str) -> Tuple[Optional[str], str]:
+    """拆分列引用为 table/column"""
+    norm = _canonical_ref_name(ref)
+    if "." in norm:
+        left, right = norm.split(".", 1)
+        return left or None, right
+    return None, norm
+
+
+def _normalize_dsl(
+    obj: Dict[str, Any],
+    intent_hint: str,
+    fallback_tables: List[str],
+) -> Dict[str, Any]:
+    """将 LLM 输出规范化为统一 DSL 结构"""
+    if not isinstance(obj, dict):
+        raise RuntimeError("DSL 输出不是 JSON 对象")
+
+    raw_intent = str(obj.get("intent") or intent_hint or "list").lower()
+    intent = "count" if raw_intent == "count" else "list"
+
+    raw_tables = obj.get("tables")
+    if not isinstance(raw_tables, list):
+        raw_tables = obj.get("from")
+    raw_table_policy = obj.get("table_policy")
+    table_policy_missing = "table_policy" not in obj
+    table_policy = _normalize_table_policy(raw_table_policy)
+    tables: List[str] = []
+    if isinstance(raw_tables, list):
+        for item in raw_tables:
+            val = str(item or "").strip()
+            if val:
+                tables.append(val)
+    if not tables and fallback_tables:
+        tables = _choose_fallback_tables_by_policy(fallback_tables, table_policy)
+    tables = list(dict.fromkeys(tables))
+
+    def _normalize_select(items: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(items, list):
+            return normalized
+        for item in items:
+            if isinstance(item, str):
+                col = _canonical_ref_name(item)
+                if col:
+                    normalized.append({"column": col, "agg": "none"})
+                continue
+            if not isinstance(item, dict):
+                continue
+            col = _canonical_ref_name(str(item.get("column") or item.get("expr") or ""))
+            if not col:
+                continue
+            agg = str(item.get("agg") or item.get("func") or "none").lower()
+            if agg not in {"none", "count", "sum", "avg", "max", "min"}:
+                agg = "none"
+            alias = str(item.get("alias") or "").strip()
+            row: Dict[str, Any] = {"column": col, "agg": agg}
+            if alias:
+                row["alias"] = alias
+            normalized.append(row)
+        return normalized
+
+    def _normalize_joins(items: Any) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        if not isinstance(items, list):
+            return normalized
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            left = _canonical_ref_name(item.get("left"))
+            right = _canonical_ref_name(item.get("right"))
+            if not left or not right:
+                continue
+            jtype = str(item.get("type") or "inner").lower()
+            if jtype not in {"inner", "left", "right", "full"}:
+                jtype = "inner"
+            normalized.append({"type": jtype, "left": left, "right": right})
+        return normalized
+
+    def _normalize_where(items: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(items, list):
+            return normalized
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            col = _canonical_ref_name(item.get("column"))
+            if not col:
+                continue
+            op = str(item.get("op") or "=").lower()
+            if op not in {"=", "!=", ">", ">=", "<", "<=", "between", "in", "like"}:
+                op = "="
+            normalized.append({"column": col, "op": op, "value": item.get("value")})
+        return normalized
+
+    def _normalize_group(items: Any) -> List[str]:
+        vals: List[str] = []
+        if isinstance(items, list):
+            for item in items:
+                col = _canonical_ref_name(item)
+                if col:
+                    vals.append(col)
+        return list(dict.fromkeys(vals))
+
+    def _normalize_order(items: Any) -> List[Dict[str, str]]:
+        vals: List[Dict[str, str]] = []
+        if not isinstance(items, list):
+            return vals
+        for item in items:
+            if isinstance(item, str):
+                col = _canonical_ref_name(item)
+                if col:
+                    vals.append({"column": col, "direction": "desc"})
+                continue
+            if not isinstance(item, dict):
+                continue
+            col = _canonical_ref_name(item.get("column"))
+            if not col:
+                continue
+            direction = str(item.get("direction") or "desc").lower()
+            if direction not in {"asc", "desc"}:
+                direction = "desc"
+            vals.append({"column": col, "direction": direction})
+        return vals
+
+    select = _normalize_select(obj.get("select"))
+    joins = _normalize_joins(obj.get("joins"))
+    where = _normalize_where(obj.get("where"))
+    group_by = _normalize_group(obj.get("group_by"))
+    order_by = _normalize_order(obj.get("order_by"))
+
+    limit_val = obj.get("limit", 1000 if intent == "list" else None)
+    limit: Optional[int] = None
+    if limit_val is not None:
+        try:
+            parsed = int(limit_val)
+            if parsed > 0:
+                limit = min(parsed, 2000)
+        except Exception:
+            limit = None
+
+    if intent == "count" and not select:
+        select = [{"column": "*", "agg": "count", "alias": "数量"}]
+
+    return {
+        "intent": intent,
+        "table_policy": table_policy,
+        "table_policy_missing": table_policy_missing,
+        "tables": tables,
+        "select": select,
+        "joins": joins,
+        "where": where,
+        "group_by": group_by,
+        "order_by": order_by,
+        "limit": limit,
+    }
+
+
+def _build_table_column_index(table_names: List[str]) -> Dict[str, set]:
+    """构建 table->column_set 索引"""
+    index: Dict[str, set] = {}
+    for table_name in table_names or []:
+        cols = _get_table_schema(table_name)
+        index[table_name.lower()] = {
+            str(col.get("column_name", "")).strip().lower()
+            for col in cols
+            if col.get("column_name")
+        }
+    return index
+
+
+def _validate_column_ref(ref: str, table_column_index: Dict[str, set], preferred_tables: List[str]) -> bool:
+    """校验列引用是否可在候选 schema 中解析"""
+    table, col = _split_ref(ref)
+    col_lower = str(col or "").strip().lower()
+    if not col_lower:
+        return False
+    if col_lower == "*":
+        return True
+    if table:
+        cols = table_column_index.get(table.lower())
+        return bool(cols and col_lower in cols)
+
+    # 未指定表时，允许在任一候选表命中；若候选为空，视为未知
+    candidates = preferred_tables or list(table_column_index.keys())
+    for t in candidates:
+        cols = table_column_index.get(str(t).lower())
+        if cols and col_lower in cols:
+            return True
+    return False
+
+
+def _validate_dsl(dsl: Dict[str, Any], allowed_tables: List[str]) -> List[str]:
+    """DSL 确定性校验：表/字段/操作符/连接关系"""
+    errors: List[str] = []
+    tables = dsl.get("tables") or []
+    if not tables:
+        errors.append("dsl_missing_tables")
+        return errors
+
+    allowed_lower = {t.lower() for t in (allowed_tables or [])}
+    for table_name in tables:
+        if allowed_lower and table_name.lower() not in allowed_lower:
+            errors.append(f"dsl_table_not_allowed:{table_name}")
+
+    table_column_index = _build_table_column_index(tables)
+    if not table_column_index:
+        errors.append("dsl_tables_schema_unavailable")
+        return errors
+
+    for sel in dsl.get("select") or []:
+        if not _validate_column_ref(sel.get("column", ""), table_column_index, tables):
+            errors.append(f"dsl_invalid_select_column:{sel.get('column')}")
+
+    for item in dsl.get("where") or []:
+        if not _validate_column_ref(item.get("column", ""), table_column_index, tables):
+            errors.append(f"dsl_invalid_where_column:{item.get('column')}")
+        op = str(item.get("op") or "=").lower()
+        if op == "between":
+            value = item.get("value")
+            if not isinstance(value, list) or len(value) != 2:
+                errors.append(f"dsl_invalid_between_value:{item.get('column')}")
+        if op == "in":
+            value = item.get("value")
+            if not isinstance(value, list) or len(value) == 0:
+                errors.append(f"dsl_invalid_in_value:{item.get('column')}")
+
+    for item in dsl.get("group_by") or []:
+        if not _validate_column_ref(item, table_column_index, tables):
+            errors.append(f"dsl_invalid_group_by:{item}")
+
+    for item in dsl.get("order_by") or []:
+        col = item.get("column", "")
+        if not _validate_column_ref(col, table_column_index, tables):
+            # order by 也允许使用 select alias
+            aliases = {str(s.get("alias", "")).strip().lower() for s in dsl.get("select") or [] if s.get("alias")}
+            if str(col).strip().lower() not in aliases:
+                errors.append(f"dsl_invalid_order_by:{col}")
+
+    for join in dsl.get("joins") or []:
+        if not _validate_column_ref(join.get("left", ""), table_column_index, tables):
+            errors.append(f"dsl_invalid_join_left:{join.get('left')}")
+        if not _validate_column_ref(join.get("right", ""), table_column_index, tables):
+            errors.append(f"dsl_invalid_join_right:{join.get('right')}")
+
+    return list(dict.fromkeys(errors))
+
+
+def _validate_sql_matches_dsl(sql: str, dsl: Dict[str, Any]) -> List[str]:
+    """校验 SQL 与 DSL 核心约束是否一致"""
+    errors: List[str] = []
+    sql_text = str(sql or "")
+    if not sql_text.strip():
+        return ["sql_empty"]
+
+    sql_lower = sql_text.lower()
+    for table_name in dsl.get("tables") or []:
+        if table_name.lower() not in sql_lower:
+            errors.append(f"sql_missing_table:{table_name}")
+
+    for join in dsl.get("joins") or []:
+        left_col = _split_ref(join.get("left", ""))[1].lower()
+        right_col = _split_ref(join.get("right", ""))[1].lower()
+        if left_col and left_col not in sql_lower:
+            errors.append(f"sql_missing_join_col:{left_col}")
+        if right_col and right_col not in sql_lower:
+            errors.append(f"sql_missing_join_col:{right_col}")
+
+    for item in dsl.get("where") or []:
+        col = _split_ref(item.get("column", ""))[1].lower()
+        if col and col not in sql_lower:
+            errors.append(f"sql_missing_where_col:{col}")
+
+    group_by = dsl.get("group_by") or []
+    if group_by and "group by" not in sql_lower:
+        errors.append("sql_missing_group_by_clause")
+
+    order_by = dsl.get("order_by") or []
+    if order_by and "order by" not in sql_lower:
+        errors.append("sql_missing_order_by_clause")
+
+    limit = dsl.get("limit")
+    if limit and "limit" not in sql_lower:
+        errors.append("sql_missing_limit_clause")
+
+    return list(dict.fromkeys(errors))
+
+
+def _call_deepseek_nl2dsl(
     question: str,
     config: Dict,
-    fallback: QueryPlan,
     db_path: str,
-    table_names: Optional[List[str]] = None
-) -> QueryPlan:
-    """调用 DeepSeek LLM 生成 SQL"""
+    table_names: Optional[List[str]],
+    intent_hint: str,
+) -> Dict[str, Any]:
+    """调用 LLM 生成 DSL"""
     from app.services.schema_meta import build_schema_prompt
 
     api_key, url, model, timeout = _get_llm_config(config)
@@ -696,23 +982,204 @@ def _call_deepseek_nl2sql(
         schema_prompt = build_schema_prompt(db_path)
         table_scope_hint = ""
 
-    system_prompt = _build_nl2sql_system_prompt(schema_prompt, table_scope_hint=table_scope_hint)
-    user_prompt = f"问题: {question}\n请直接输出 JSON。"
+    system_prompt = _build_nl2dsl_system_prompt(schema_prompt, table_scope_hint=table_scope_hint, intent_hint=intent_hint)
+    selected_tables_hint = f"\n候选表: {', '.join(selected_tables)}" if selected_tables else ""
+    user_prompt = f"问题: {question}{selected_tables_hint}\n请输出 DSL JSON。"
+    content = _call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt)
+    raw_obj = _parse_llm_json(content)
+    return _normalize_dsl(
+        raw_obj,
+        intent_hint=intent_hint,
+        fallback_tables=selected_tables,
+    )
 
+
+def _call_deepseek_nl2dsl_with_retry(
+    question: str,
+    config: Dict,
+    db_path: str,
+    table_names: Optional[List[str]],
+    allowed_tables: List[str],
+    intent_hint: str,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """调用 LLM 生成 DSL，失败自动重试"""
+    llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
+    try:
+        max_attempts = int(llm_cfg.get("dsl_retry_attempts", llm_cfg.get("retry_attempts", 3)))
+    except Exception:
+        max_attempts = 3
+    max_attempts = max(1, min(6, max_attempts))
+
+    try:
+        retry_interval = float(llm_cfg.get("retry_interval_sec", 0.6))
+    except Exception:
+        retry_interval = 0.6
+    retry_interval = max(0.0, min(5.0, retry_interval))
+
+    errors: List[str] = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            dsl = _call_deepseek_nl2dsl(
+                question=question,
+                config=config,
+                db_path=db_path,
+                table_names=table_names,
+                intent_hint=intent_hint,
+            )
+            dsl_errors = _validate_dsl(dsl, allowed_tables=allowed_tables)
+            if dsl_errors:
+                raise RuntimeError("DSL 校验失败: " + ";".join(dsl_errors[:6]))
+            semantic_errors = _validate_dsl_table_policy(dsl, table_names or allowed_tables)
+            if semantic_errors:
+                raise RuntimeError("DSL 语义校验失败: " + ";".join(semantic_errors[:6]))
+            return dsl, {
+                "success": True,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "errors": errors,
+            }
+        except Exception as exc:
+            err = str(exc)
+            errors.append(err[:240])
+            print(f"[llm_retry] DSL 生成失败 {attempt}/{max_attempts}: {err}")
+            if attempt < max_attempts and retry_interval > 0:
+                time.sleep(retry_interval)
+
+    return None, {
+        "success": False,
+        "attempt": max_attempts,
+        "max_attempts": max_attempts,
+        "errors": errors,
+    }
+
+
+def _call_deepseek_sql_from_dsl(
+    question: str,
+    dsl: Dict[str, Any],
+    config: Dict,
+    db_path: str,
+    table_names: Optional[List[str]],
+    error_feedback: str = "",
+) -> QueryPlan:
+    """调用 LLM 基于 DSL 生成 SQL"""
+    from app.services.schema_meta import build_schema_prompt
+
+    api_key, url, model, timeout = _get_llm_config(config)
+    selected_tables = table_names or []
+    if selected_tables:
+        schema_prompt = _build_schema_prompt_for_selected_tables(selected_tables)
+        if not schema_prompt:
+            schema_prompt = build_schema_prompt(db_path)
+        table_scope_hint = (
+            "# 表访问范围限制\n"
+            f"本次只允许使用以下表：{', '.join(selected_tables)}。\n"
+            "禁止使用未在列表中的表。\n\n"
+        )
+    else:
+        schema_prompt = build_schema_prompt(db_path)
+        table_scope_hint = ""
+
+    system_prompt = _build_sql_from_dsl_system_prompt(schema_prompt, table_scope_hint=table_scope_hint)
+    feedback_block = f"\n上轮失败原因: {error_feedback}\n" if error_feedback else ""
+    selected_tables_hint = f"\n候选表: {', '.join(selected_tables)}" if selected_tables else ""
+    user_prompt = (
+        f"用户问题: {question}\n"
+        f"{selected_tables_hint}\n"
+        f"DSL: {json.dumps(dsl, ensure_ascii=False)}\n"
+        f"{feedback_block}"
+        "请输出 SQL JSON。"
+    )
     content = _call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt)
     obj = _parse_llm_json(content)
 
-    intent = obj.get("intent") or fallback.intent
-    sql = obj.get("sql") or fallback.sql
-    params = obj.get("params") or fallback.params
-    filters = obj.get("filters") or fallback.filters
+    intent = str(obj.get("intent") or dsl.get("intent") or "list").lower()
+    if intent not in {"list", "count"}:
+        intent = "count" if dsl.get("intent") == "count" else "list"
 
-    # 确保 filters 至少包含必要键
-    merged_filters = dict(fallback.filters)
-    if isinstance(filters, dict):
-        merged_filters.update(filters)
+    sql = obj.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        raise RuntimeError("LLM 输出缺少可执行 SQL")
 
-    return QueryPlan(intent=intent, sql=sql, params=params, filters=merged_filters)
+    params = obj.get("params")
+    if not isinstance(params, list):
+        params = []
+
+    filters = obj.get("filters")
+    if not isinstance(filters, dict):
+        filters = {}
+    filters["dsl"] = dsl
+
+    return QueryPlan(intent=intent, sql=sql, params=params, filters=filters)
+
+
+def _call_deepseek_sql_from_dsl_with_retry(
+    question: str,
+    dsl: Dict[str, Any],
+    config: Dict,
+    db_path: str,
+    table_names: Optional[List[str]],
+    allowed_tables: Optional[List[str]],
+) -> Tuple[Optional[QueryPlan], Dict[str, Any]]:
+    """调用 LLM 基于 DSL 生成 SQL 并重试"""
+    llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
+    try:
+        max_attempts = int(llm_cfg.get("sql_retry_attempts", llm_cfg.get("retry_attempts", 3)))
+    except Exception:
+        max_attempts = 3
+    max_attempts = max(1, min(6, max_attempts))
+
+    try:
+        retry_interval = float(llm_cfg.get("retry_interval_sec", 0.6))
+    except Exception:
+        retry_interval = 0.6
+    retry_interval = max(0.0, min(5.0, retry_interval))
+
+    errors: List[str] = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            feedback = errors[-1] if errors else ""
+            plan = _call_deepseek_sql_from_dsl(
+                question=question,
+                dsl=dsl,
+                config=config,
+                db_path=db_path,
+                table_names=table_names,
+                error_feedback=feedback,
+            )
+            if not _is_plan_sql_valid(plan, allowed_tables=allowed_tables):
+                raise RuntimeError("SQL 安全校验失败")
+            if not _is_plan_sql_precheck_ok(plan):
+                raise RuntimeError("SQL EXPLAIN 预检失败")
+            dsl_errors = _validate_sql_matches_dsl(plan.sql, dsl)
+            if dsl_errors:
+                raise RuntimeError("SQL 与 DSL 不一致: " + ";".join(dsl_errors[:6]))
+
+            filters = dict(plan.filters or {})
+            filters["llm_retry"] = {
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "errors": errors,
+            }
+            plan.filters = filters
+            return plan, {
+                "success": True,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "errors": errors,
+            }
+        except Exception as exc:
+            err = str(exc)
+            errors.append(err[:240])
+            print(f"[llm_retry] SQL 生成失败 {attempt}/{max_attempts}: {err}")
+            if attempt < max_attempts and retry_interval > 0:
+                time.sleep(retry_interval)
+
+    return None, {
+        "success": False,
+        "attempt": max_attempts,
+        "max_attempts": max_attempts,
+        "errors": errors,
+    }
 
 
 def _has_llm_config(config: Dict) -> bool:
@@ -735,6 +1202,21 @@ def _is_plan_sql_valid(plan: QueryPlan, allowed_tables: Optional[List[str]] = No
         from app.services.guardrails import SQLGuardrail
         SQLGuardrail.validate_sql(plan.sql, allowed_tables=allowed_tables or None)
         return True
+    except Exception:
+        return False
+
+
+def _is_plan_sql_precheck_ok(plan: QueryPlan) -> bool:
+    """通过 DuckDB EXPLAIN 做可执行性预检（字段/表名/占位符）"""
+    if not _is_sql_text_valid(plan.sql):
+        return False
+    try:
+        from app.orchestrator_duckdb import get_engine
+
+        engine = get_engine()
+        engine.connect()
+        result = engine.explain(plan.sql, plan.params or [])
+        return bool(result.get("ok"))
     except Exception:
         return False
 
@@ -779,110 +1261,15 @@ def _build_reject_plan(intent: str, reason: str, llm_error: str = "") -> QueryPl
     return QueryPlan(intent=intent or "list", sql="", params=[], filters=filters)
 
 
-def _build_semantic_judge_prompt(question: str, rule_plan: QueryPlan, llm_plan: QueryPlan) -> Tuple[str, str]:
-    """构建语义一致性裁决 prompt"""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    system_prompt = (
-        "你是 SQL 语义一致性裁决器。请比较两条 SQL 谁更符合用户问题。\n\n"
-        f"# 当前时间\n{now_str}\n\n"
-        "# 裁决规则\n"
-        "1. 只判断语义匹配，不评价性能。\n"
-        "2. 若问题是“字段/列/特征数量或列表”，优先选择查询 information_schema.columns 的 SQL。\n"
-        "3. 若问题是“数据有多少条/多少行记录”，优先选择 COUNT(*) 统计数据行数的 SQL。\n"
-        "4. 若两条都明显不匹配，winner 设为 reject。\n\n"
-        "# 输出格式\n"
-        "只输出 JSON，不要输出 `<think>` 标签："
-        '{"winner":"rule|llm|reject","confidence":0-1,"reason":"简要原因","rule_score":0-100,"llm_score":0-100}\n'
-    )
-
-    user_prompt = (
-        f"用户问题: {question}\n\n"
-        "候选A（rule）:\n"
-        f"intent={rule_plan.intent}\n"
-        f"sql={rule_plan.sql}\n"
-        f"params={rule_plan.params}\n\n"
-        "候选B（llm）:\n"
-        f"intent={llm_plan.intent}\n"
-        f"sql={llm_plan.sql}\n"
-        f"params={llm_plan.params}\n\n"
-        "请输出 JSON 裁决结果。"
-    )
-    return system_prompt, user_prompt
-
-
-def _call_llm_semantic_judge(
-    question: str,
-    rule_plan: QueryPlan,
-    llm_plan: QueryPlan,
-    config: Dict
-) -> Dict[str, Any]:
-    """调用 LLM 对 rule/llm 两条 SQL 进行语义一致性裁决"""
-    api_key, url, model, timeout = _get_llm_config(config)
-    system_prompt, user_prompt = _build_semantic_judge_prompt(question, rule_plan, llm_plan)
-    content = _call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt)
-    obj = _parse_llm_json(content)
-
-    winner = str(obj.get("winner", "rule")).lower()
-    if winner not in {"rule", "llm", "reject"}:
-        winner = "rule"
-
-    try:
-        confidence = float(obj.get("confidence", 0.5))
-    except Exception:
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
-
-    return {
-        "winner": winner,
-        "confidence": confidence,
-        "reason": str(obj.get("reason", ""))[:200],
-        "rule_score": obj.get("rule_score"),
-        "llm_score": obj.get("llm_score"),
-    }
-
-
-def _plan_looks_like_schema_query(plan: QueryPlan) -> bool:
-    sql_upper = (plan.sql or "").upper()
-    return "INFORMATION_SCHEMA.COLUMNS" in sql_upper
-
-
-def _plan_looks_like_row_count(plan: QueryPlan) -> bool:
-    sql_upper = (plan.sql or "").upper()
-    return (
-        "COUNT(*)" in sql_upper and
-        "INFORMATION_SCHEMA.COLUMNS" not in sql_upper and
-        "GROUP BY" not in sql_upper
-    )
-
-
-def _apply_semantic_hard_rules(question: str, rule_plan: QueryPlan, llm_plan: QueryPlan) -> Optional[Dict[str, Any]]:
-    """硬规则兜底（优先于 LLM 裁决）"""
-    if _is_schema_count_query(question) or _is_schema_list_query(question):
-        rule_schema = _plan_looks_like_schema_query(rule_plan)
-        llm_schema = _plan_looks_like_schema_query(llm_plan)
-        if rule_schema and not llm_schema:
-            return {"winner": "rule", "confidence": 1.0, "reason": "字段/列问题优先 schema 查询（硬规则）"}
-        if llm_schema and not rule_schema:
-            return {"winner": "llm", "confidence": 1.0, "reason": "字段/列问题优先 schema 查询（硬规则）"}
-
-    if _is_row_count_query(question):
-        rule_row_count = _plan_looks_like_row_count(rule_plan)
-        llm_row_count = _plan_looks_like_row_count(llm_plan)
-        if rule_row_count and not llm_row_count:
-            return {"winner": "rule", "confidence": 1.0, "reason": "条数问题优先行数统计（硬规则）"}
-        if llm_row_count and not rule_row_count:
-            return {"winner": "llm", "confidence": 1.0, "reason": "条数问题优先行数统计（硬规则）"}
-
-    return None
-
-
 def _with_plan_context(
     plan: QueryPlan,
     selected_table: Optional[str],
     candidate_tables: List[str],
     table_selection_reason: str,
     plan_source: str,
-    semantic_judge: Optional[Dict[str, Any]] = None
+    candidate_table_ranking: Optional[List[Dict[str, Any]]] = None,
+    semantic_judge: Optional[Dict[str, Any]] = None,
+    confidence: Optional[float] = None,
 ) -> QueryPlan:
     """统一补充计划上下文信息"""
     filters = dict(plan.filters or {})
@@ -890,11 +1277,18 @@ def _with_plan_context(
         filters["selected_table"] = selected_table
     if candidate_tables:
         filters["candidate_tables"] = candidate_tables
+    if candidate_table_ranking:
+        filters["candidate_table_ranking"] = candidate_table_ranking[:8]
     if table_selection_reason:
         filters["table_selection_reason"] = table_selection_reason
     filters["plan_source"] = plan_source
     if semantic_judge:
         filters["semantic_judge"] = semantic_judge
+    if confidence is not None:
+        try:
+            filters["confidence"] = max(0.0, min(1.0, float(confidence)))
+        except Exception:
+            pass
     plan.filters = filters
     return plan
 
@@ -910,208 +1304,358 @@ def _auto_correct_intent(plan: QueryPlan) -> QueryPlan:
     return plan
 
 
+def _run_intent_agent(question: str, config: Dict) -> Dict[str, Any]:
+    """Intent Agent：优先使用 LLM 识别意图，失败回退轻量规则"""
+    fallback_intent = _parse_intent(question)
+    if not _has_llm_config(config):
+        return {
+            "intent": fallback_intent,
+            "confidence": 0.55,
+            "source": "rule_fallback",
+            "reason": "LLM 不可用，使用规则回退",
+        }
+
+    try:
+        api_key, url, model, timeout = _get_llm_config(config)
+        system_prompt = (
+            "你是意图识别 Agent。请将用户问题识别为下列四类之一：chat/search/list/count。\n"
+            "注意：search 仅用于视觉内容检索（如图片、照片、相似图检索），\n"
+            "涉及数据库表/字段/统计/对比/金额/收入/账期等结构化数据问题必须归类为 list 或 count。\n"
+            "仅输出 JSON：{\"intent\":\"chat|search|list|count\",\"confidence\":0~1,\"reason\":\"...\"}"
+        )
+        user_prompt = f"问题: {question}"
+        obj = _parse_llm_json(_call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt))
+        intent = str(obj.get("intent") or fallback_intent).lower()
+        if intent not in {"chat", "search", "list", "count"}:
+            intent = fallback_intent
+
+        reason = str(obj.get("reason") or "LLM intent classify")
+
+        # 强约束：仅视觉语义请求才允许进入向量检索，避免结构化查询被误分流。
+        if intent == "search" and not _is_visual_query(question):
+            intent = fallback_intent if fallback_intent in {"list", "count"} else "list"
+            reason = f"intent_guardrail_override_to_{intent}: non_visual_query"
+
+        try:
+            confidence = float(obj.get("confidence", 0.75))
+        except Exception:
+            confidence = 0.75
+        return {
+            "intent": intent,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "source": "llm",
+            "reason": reason,
+        }
+    except Exception as exc:
+        return {
+            "intent": fallback_intent,
+            "confidence": 0.5,
+            "source": "rule_fallback",
+            "reason": f"intent_agent_fallback:{str(exc)[:120]}",
+        }
+
+
+def _run_reviewer_agent(
+    plan: QueryPlan,
+    *,
+    dsl: Optional[Dict[str, Any]],
+    question: str,
+    allowed_tables: Optional[List[str]],
+) -> Dict[str, Any]:
+    """Reviewer Agent：检查安全、可执行性与性能风险"""
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not _is_plan_sql_valid(plan, allowed_tables=allowed_tables):
+        errors.append("review_security_guardrail_failed")
+    if not _is_plan_sql_precheck_ok(plan):
+        errors.append("review_explain_failed")
+
+    if dsl:
+        dsl_errors = _validate_sql_matches_dsl(plan.sql, dsl)
+        if dsl_errors:
+            errors.extend([f"review_dsl_mismatch:{e}" for e in dsl_errors[:6]])
+
+    sql_lower = (plan.sql or "").lower()
+    if plan.intent == "list" and "limit" not in sql_lower:
+        warnings.append("review_list_query_without_limit")
+    if re.search(r"(?is)^\s*select\s+\*", plan.sql or ""):
+        warnings.append("review_select_star_detected")
+    if not any(tok in question for tok in _RAW_LIST_HINTS) and _is_generic_list_sql(plan.sql):
+        warnings.append("review_generic_list_sql")
+
+    return {
+        "passed": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "score": max(0.0, min(1.0, 1.0 - 0.25 * len(errors) - 0.05 * len(warnings))),
+    }
+
+
 def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: List[str] = None) -> QueryPlan:
-    """
-    构建查询计划 - 完整流程：规则引擎 → LLM fallback
-
-    Args:
-        text: 用户问题
-        config: 配置字典
-        db_path: 数据库路径
-        table_names: 可用的表名列表
-
-    Returns:
-        QueryPlan 查询计划
-    """
-    # 解析并选择候选表（多表可用）
+    """Multi-Agent 协同：Intent -> Coder -> Reviewer -> Self-Correction"""
     resolved_tables = _resolve_candidate_tables(table_names)
-    parsed_intent = _parse_intent(text)
+    intent_meta = _run_intent_agent(text, config)
+    parsed_intent = str(intent_meta.get("intent") or "list")
+
+    # chat/search 非 SQL 场景，直接返回
+    if parsed_intent == "chat":
+        return QueryPlan(
+            intent="chat",
+            sql="",
+            params=[],
+            filters={
+                "plan_source": "llm",
+                "agent_mode": "multi_agent",
+                "confidence": float(intent_meta.get("confidence", 1.0)),
+                "intent_agent": intent_meta,
+            },
+        )
+    if parsed_intent == "search":
+        top_k = _parse_top_k(text, default=10)
+        return QueryPlan(
+            intent="search",
+            sql="",
+            params=[],
+            filters={
+                "query_text": text,
+                "top_k": top_k,
+                "plan_source": "llm",
+                "agent_mode": "multi_agent",
+                "confidence": float(intent_meta.get("confidence", 1.0)),
+                "intent_agent": intent_meta,
+            },
+        )
+
+    if not resolved_tables:
+        reject_reason = "未找到可查询的数据表：请先选择数据表，或检查数据集文件是否已成功加载"
+        reject_plan = _build_reject_plan(parsed_intent, reject_reason)
+        return _with_plan_context(
+            reject_plan,
+            selected_table=None,
+            candidate_tables=[],
+            candidate_table_ranking=[],
+            table_selection_reason="",
+            plan_source="reject",
+            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+            confidence=0.0,
+        )
+
     default_table = None
     table_selection_reason = ""
-    if resolved_tables:
-        default_table, table_selection_reason = _select_best_table(text, resolved_tables, parsed_intent)
+    ranked_tables = _rank_candidate_tables(text, resolved_tables, parsed_intent)
+    if ranked_tables:
+        default_table = ranked_tables[0].get("table")
+        table_selection_reason = ranked_tables[0].get("reason", "")
         print(f"[build_query_plan] 候选表: {resolved_tables}")
         print(f"[build_query_plan] 选择表: {default_table}, 原因: {table_selection_reason}")
 
+    if len(ranked_tables) >= 2:
+        top1 = ranked_tables[0]
+        top2 = ranked_tables[1]
+        score_gap = int(top1.get("score", 0)) - int(top2.get("score", 0))
+        if score_gap <= 6 and int(top1.get("score", 0)) < 35:
+            print(f"[build_query_plan] 多表歧义提醒：top1 与 top2 分差仅 {score_gap}，继续 LLM-DSL 生成")
+
     llm_cfg = config.get("llm", {})
-    llm_enabled = llm_cfg.get("enabled", True)  # 默认启用 LLM
+    llm_enabled = llm_cfg.get("enabled", True)
     llm_available = llm_enabled and _has_llm_config(config)
 
-    # 轨道 A：规则引擎
-    rule_plan = parse_question(text, table_name=default_table)
-    rule_plan = _with_plan_context(
-        rule_plan,
-        selected_table=default_table,
-        candidate_tables=resolved_tables,
-        table_selection_reason=table_selection_reason,
-        plan_source="rule"
+    if not llm_enabled:
+        reject_reason = "当前策略要求必须由 LLM 生成 SQL，但 LLM 已禁用"
+        reject_plan = _build_reject_plan(parsed_intent, reject_reason)
+        return _with_plan_context(
+            reject_plan,
+            selected_table=default_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="reject",
+            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+            confidence=0.0,
+        )
+
+    if not llm_available:
+        reject_reason = "当前策略要求必须由 LLM 生成 SQL，但 LLM 配置不可用"
+        reject_plan = _build_reject_plan(parsed_intent, reject_reason)
+        return _with_plan_context(
+            reject_plan,
+            selected_table=default_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="reject",
+            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+            confidence=0.0,
+        )
+
+    allowed_tables = resolved_tables if resolved_tables else []
+
+    dsl_plan, dsl_retry_meta = _call_deepseek_nl2dsl_with_retry(
+        text,
+        config,
+        db_path or "",
+        table_names=resolved_tables,
+        allowed_tables=allowed_tables,
+        intent_hint=parsed_intent,
+    )
+    if not dsl_plan:
+        dsl_errors = dsl_retry_meta.get("errors", [])
+        llm_error = " | ".join(dsl_errors) if dsl_errors else "DSL 生成失败"
+        reject_reason = "LLM 在重试后未生成有效 DSL，请补充更明确条件后重试"
+        reject_plan = _build_reject_plan(parsed_intent, reject_reason, llm_error=llm_error)
+        judge_result = {
+            "winner": "reject",
+            "confidence": 1.0,
+            "reason": "LLM-DSL 轨道不可用",
+        }
+        if dsl_retry_meta:
+            judge_result["dsl_retry"] = dsl_retry_meta
+        return _with_plan_context(
+            reject_plan,
+            selected_table=default_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="reject",
+            semantic_judge=judge_result,
+            confidence=0.0,
+        )
+
+    llm_plan, sql_retry_meta = _call_deepseek_sql_from_dsl_with_retry(
+        question=text,
+        dsl=dsl_plan,
+        config=config,
+        db_path=db_path or "",
+        table_names=resolved_tables,
+        allowed_tables=allowed_tables,
+    )
+    if not llm_plan:
+        sql_errors = sql_retry_meta.get("errors", [])
+        llm_error = " | ".join(sql_errors) if sql_errors else "SQL 生成失败"
+        reject_reason = "LLM 在重试后仍未生成可执行 SQL，请补充更明确条件后重试"
+        reject_plan = _build_reject_plan(parsed_intent, reject_reason, llm_error=llm_error)
+        judge_result = {
+            "winner": "reject",
+            "confidence": 1.0,
+            "reason": "仅允许 LLM 输出 SQL，且 SQL 轨道不可用",
+        }
+        if dsl_retry_meta:
+            judge_result["dsl_retry"] = dsl_retry_meta
+        if sql_retry_meta:
+            judge_result["sql_retry"] = sql_retry_meta
+        return _with_plan_context(
+            reject_plan,
+            selected_table=default_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="reject",
+            semantic_judge=judge_result,
+            confidence=0.0,
+        )
+
+    selected_table = default_table
+    dsl_tables = dsl_plan.get("tables") if isinstance(dsl_plan, dict) else None
+    if isinstance(dsl_tables, list) and dsl_tables:
+        selected_table = dsl_tables[0]
+
+    reviewer_result = _run_reviewer_agent(
+        llm_plan,
+        dsl=dsl_plan,
+        question=text,
+        allowed_tables=allowed_tables,
     )
 
-    # 闲聊意图直接返回
-    if rule_plan.intent == "chat":
-        print("[build_query_plan] 识别为闲聊，跳过 LLM")
-        return rule_plan
-
-    # 向量检索意图直接返回
-    if rule_plan.intent == "search":
-        print("[build_query_plan] 识别为视觉内容检索，跳过 LLM")
-        return rule_plan
-
-    allowed_tables = resolved_tables if resolved_tables else None
-    rule_valid = _is_plan_sql_valid(rule_plan, allowed_tables=allowed_tables)
-
-    # 轨道 B：LLM（只要可用就执行，和规则轨道做双轨校验）
-    llm_plan: Optional[QueryPlan] = None
-    llm_valid = False
-    llm_error = ""
-    if llm_available:
-        try:
-            llm_plan = _call_deepseek_nl2sql(
-                text,
-                config,
-                rule_plan,
-                db_path or "",
-                table_names=resolved_tables
-            )
-            llm_plan = _with_plan_context(
-                llm_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="llm"
-            )
-            llm_valid = _is_plan_sql_valid(llm_plan, allowed_tables=allowed_tables)
-            print(f"[build_query_plan] LLM 轨道完成, valid={llm_valid}, intent={llm_plan.intent}")
-        except Exception as e:
-            llm_error = str(e)
-            print(f"[build_query_plan] LLM 轨道失败: {llm_error}")
-    elif llm_enabled and not llm_available:
-        llm_error = "LLM 配置不可用，跳过 LLM 轨道"
-        print(f"[build_query_plan] {llm_error}")
-
-    # 双轨都有效：进入语义一致性裁决
-    if rule_valid and llm_valid and llm_plan:
-        judge_result = _apply_semantic_hard_rules(text, rule_plan, llm_plan)
-        if judge_result:
-            print(f"[build_query_plan] 硬规则裁决: {judge_result}")
-        else:
+    self_correction_records: List[Dict[str, Any]] = []
+    final_plan = llm_plan
+    if not reviewer_result.get("passed"):
+        correction_error = "; ".join(reviewer_result.get("errors", [])[:6]) or "Reviewer 检查未通过"
+        correction_attempts = 2
+        for idx in range(correction_attempts):
             try:
-                judge_result = _call_llm_semantic_judge(text, rule_plan, llm_plan, config)
-                print(f"[build_query_plan] LLM 语义裁决: {judge_result}")
-            except Exception as e:
-                judge_result = {
-                    "winner": "rule",
-                    "confidence": 0.0,
-                    "reason": f"语义裁决失败，回退规则轨道: {e}",
-                }
-                print(f"[build_query_plan] {judge_result['reason']}")
-
-        winner = str(judge_result.get("winner", "rule")).lower()
-        if winner == "llm":
-            return _auto_correct_intent(
-                _with_plan_context(
-                    llm_plan,
-                    selected_table=default_table,
-                    candidate_tables=resolved_tables,
-                    table_selection_reason=table_selection_reason,
-                    plan_source="llm",
-                    semantic_judge=judge_result
+                corrected_plan = call_llm_fix_sql(text, final_plan.sql, correction_error, config, db_path=db_path)
+                corrected_review = _run_reviewer_agent(
+                    corrected_plan,
+                    dsl=dsl_plan,
+                    question=text,
+                    allowed_tables=allowed_tables,
                 )
-            )
-        if winner == "reject":
-            reject_reason = "无法可靠理解你的问题，请补充更明确的统计口径或筛选条件后重试"
-            reject_plan = _build_reject_plan(rule_plan.intent, reject_reason, llm_error=llm_error)
-            return _with_plan_context(
-                reject_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="reject",
-                semantic_judge=judge_result
-            )
+                self_correction_records.append(
+                    {
+                        "attempt": idx + 1,
+                        "error_feedback": correction_error,
+                        "passed": corrected_review.get("passed", False),
+                        "review": corrected_review,
+                    }
+                )
+                if corrected_review.get("passed"):
+                    final_plan = corrected_plan
+                    reviewer_result = corrected_review
+                    break
+                correction_error = "; ".join(corrected_review.get("errors", [])[:6]) or correction_error
+            except Exception as exc:
+                self_correction_records.append(
+                    {
+                        "attempt": idx + 1,
+                        "error_feedback": correction_error,
+                        "passed": False,
+                        "error": str(exc)[:200],
+                    }
+                )
 
-        if _should_reject_generic_list(text, rule_plan):
-            reject_reason = "当前问题语义较抽象，系统拒绝返回通用样本明细。请补充“按什么维度、什么时间、什么指标”"
-            reject_plan = _build_reject_plan(rule_plan.intent, reject_reason, llm_error=llm_error)
-            return _with_plan_context(
-                reject_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="reject",
-                semantic_judge=judge_result
-            )
-
-        return _auto_correct_intent(
-            _with_plan_context(
-                rule_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="rule",
-                semantic_judge=judge_result
-            )
-        )
-
-    # 单轨可用：直接使用可用轨道
-    if llm_valid and llm_plan and not rule_valid:
+    if not reviewer_result.get("passed"):
+        reject_reason = "Reviewer 检查未通过：SQL 在安全或可执行性上不满足要求"
+        reject_plan = _build_reject_plan(final_plan.intent, reject_reason, llm_error="; ".join(reviewer_result.get("errors", [])[:6]))
         judge_result = {
-            "winner": "llm",
+            "winner": "reject",
             "confidence": 1.0,
-            "reason": "规则轨道无效，使用 LLM 轨道",
+            "reason": reject_reason,
+            "intent_agent": intent_meta,
+            "dsl_retry": dsl_retry_meta,
+            "sql_retry": sql_retry_meta,
+            "reviewer": reviewer_result,
+            "self_correction": self_correction_records,
         }
-        return _auto_correct_intent(
-            _with_plan_context(
-                llm_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="llm",
-                semantic_judge=judge_result
-            )
+        return _with_plan_context(
+            reject_plan,
+            selected_table=selected_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="reject",
+            semantic_judge=judge_result,
+            confidence=0.0,
         )
 
-    if rule_valid:
-        if _should_reject_generic_list(text, rule_plan):
-            reject_reason = "当前问题语义较抽象，系统拒绝返回通用样本明细。请补充“按什么维度、什么时间、什么指标”"
-            reject_plan = _build_reject_plan(rule_plan.intent, reject_reason, llm_error=llm_error)
-            judge_result = {
-                "winner": "reject",
-                "confidence": 1.0,
-                "reason": "规则轨道仅生成通用明细 SQL，已拒绝执行",
-            }
-            return _with_plan_context(
-                reject_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="reject",
-                semantic_judge=judge_result
-            )
+    judge_result = {
+        "winner": "multi_agent",
+        "confidence": max(0.65, min(0.98, float(reviewer_result.get("score", 0.85)))),
+        "reason": "Intent/Coder/Reviewer/Self-Correction 协同完成 SQL 规划",
+        "intent_agent": intent_meta,
+        "dsl_retry": dsl_retry_meta,
+        "sql_retry": sql_retry_meta,
+        "reviewer": reviewer_result,
+        "self_correction": self_correction_records,
+    }
 
-        judge_result = {
-            "winner": "rule",
-            "confidence": 1.0,
-            "reason": "规则轨道有效，LLM 轨道不可用" if not llm_valid else "规则轨道优先",
-        }
-        if llm_error:
-            judge_result["llm_error"] = llm_error[:200]
-        return _auto_correct_intent(
-            _with_plan_context(
-                rule_plan,
-                selected_table=default_table,
-                candidate_tables=resolved_tables,
-                table_selection_reason=table_selection_reason,
-                plan_source="rule",
-                semantic_judge=judge_result
-            )
+    final_filters = dict(final_plan.filters or {})
+    final_filters["agent_mode"] = "multi_agent"
+    final_plan.filters = final_filters
+
+    final_plan = _auto_correct_intent(final_plan)
+    return _auto_correct_intent(
+        _with_plan_context(
+            final_plan,
+            selected_table=selected_table,
+            candidate_tables=resolved_tables,
+            candidate_table_ranking=ranked_tables,
+            table_selection_reason=table_selection_reason,
+            plan_source="llm",
+            semantic_judge=judge_result,
+            confidence=float(judge_result.get("confidence", 0.8)),
         )
-
-    # 都无效：尽量返回规则结果（保持兼容）
-    if llm_error:
-        rule_plan.filters["llm_error"] = llm_error[:200]
-    print("[build_query_plan] 双轨都无有效 SQL，回退规则结果")
-    return _auto_correct_intent(rule_plan)
+    )
 
 
 def call_llm_fix_sql(question: str, failed_sql: str, error_msg: str,
@@ -1142,7 +1686,7 @@ def call_llm_fix_sql(question: str, failed_sql: str, error_msg: str,
         f"{schema_prompt}\n\n"
         "# 关键规则\n"
         "1. 直接查询表即可。\n"
-        "2. SQL 中的值必须用 `$1`, `$2`, ... 占位符（DuckDB 参数化查询）。\n"
+        "2. SQL 中的值必须使用 `?` 占位符（DuckDB 参数化查询）。\n"
         "3. 如果是列表查询，SELECT 中包含必要的展示字段。\n"
         "4. 只允许 SELECT 查询。\n\n"
         "# 输出格式\n"

@@ -1,4 +1,7 @@
 #!/bin/bash
+export LLM_BASE_URL="https://api.minimaxi.com"
+export LLM_API_KEY="sk-cp-3I67P4YyTkCsI2UBWM9rbhGvmKzu8UNzugkDmkRGy6fX2lZArNavs93Y33zl6wgSITTBRyELN9siL5g72d7Cd57dFGgjC-2_nt54MwaqsOyzHKpvNKu-dEs"
+export LLM_MODEL="MiniMax-M2.5"
 
 # restart.sh - 重启前后端服务
 
