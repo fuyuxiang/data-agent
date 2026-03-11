@@ -2,7 +2,6 @@
 数据库模型定义
 """
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import (
     Boolean,
@@ -36,7 +35,6 @@ class Workspace(Base):
     users = relationship("UserWorkspace", back_populates="workspace")
     data_sources = relationship("DataSource", back_populates="workspace")
     datasets = relationship("Dataset", back_populates="workspace")
-    conversations = relationship("Conversation", back_populates="workspace")
 
 
 class User(Base):
@@ -55,7 +53,6 @@ class User(Base):
 
     # 关系
     workspaces = relationship("UserWorkspace", back_populates="user")
-    conversations = relationship("Conversation", back_populates="user")
     query_histories = relationship("QueryHistory", back_populates="user")
 
 
@@ -178,39 +175,6 @@ class Dataset(Base):
     # 关系
     workspace = relationship("Workspace", back_populates="datasets")
     data_source = relationship("DataSource", back_populates="datasets")
-
-
-class Conversation(Base):
-    """对话会话"""
-    __tablename__ = "conversations"
-
-    id = Column(Integer, primary_key=True, index=True)
-    workspace_id = Column(Integer, ForeignKey("workspaces.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
-    title = Column(String(500), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # 关系
-    workspace = relationship("Workspace", back_populates="conversations")
-    user = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation")
-
-
-class Message(Base):
-    """对话消息"""
-    __tablename__ = "messages"
-
-    id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
-    role = Column(String(20), nullable=False)  # user, assistant, system
-    content = Column(Text, nullable=False)
-    extra_data = Column(JSON, nullable=True)  # 额外信息
-
-    # 关系
-    conversation = relationship("Conversation", back_populates="messages")
-
 
 class QueryHistory(Base):
     """查询历史"""

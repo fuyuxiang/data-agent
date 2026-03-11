@@ -116,16 +116,19 @@ def match_verified_query(question: str, selected_tables: Optional[List[str]] = N
             continue
 
         matched = False
+        matched_pattern: Optional[str] = None
         for pattern in patterns:
             if not pattern:
                 continue
             try:
                 if re.search(pattern, question, flags=re.IGNORECASE):
                     matched = True
+                    matched_pattern = str(pattern)
                     break
             except re.error:
                 if _normalize_text(str(pattern)) == question_norm:
                     matched = True
+                    matched_pattern = str(pattern)
                     break
         if not matched:
             continue
@@ -141,6 +144,10 @@ def match_verified_query(question: str, selected_tables: Optional[List[str]] = N
             "verified_query_name": record.get("name"),
             "verified_query_version": record.get("version"),
         }
+        if record_scope:
+            filters["verified_query_table_scope"] = record_scope
+        if matched_pattern:
+            filters["verified_query_pattern"] = matched_pattern
         return {
             "intent": record.get("intent") or "list",
             "sql": sql,
@@ -149,4 +156,3 @@ def match_verified_query(question: str, selected_tables: Optional[List[str]] = N
         }
 
     return None
-

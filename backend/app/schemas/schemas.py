@@ -233,13 +233,34 @@ class DatasetResponse(DatasetBase):
 
 # ── Query / NL2SQL ──────────────────────────────────────────────────────
 
+class QueryContextTurn(BaseModel):
+    """短会话中的单轮查询摘要"""
+    question: str
+    intent: Optional[str] = None
+    answer: Optional[str] = None
+    sql: Optional[str] = None
+    row_count: Optional[int] = None
+    result_schema: Optional[List[dict]] = None
+    table_names: Optional[List[str]] = None
+    dataset_id: Optional[int] = None
+    status: Optional[str] = None
+    plan_source: Optional[str] = None
+
+
+class QuerySessionContext(BaseModel):
+    """当前页面内最近几轮会话上下文"""
+    recent_turns: Optional[List[QueryContextTurn]] = None
+    current_dataset_id: Optional[int] = None
+    current_table_names: Optional[List[str]] = None
+
+
 class QueryRequest(BaseModel):
     """NL2SQL 查询请求"""
     question: str
     workspace_id: int
     dataset_id: Optional[int] = None
     table_names: Optional[List[str]] = None  # 用户选择的表名列表
-    context: Optional[dict] = None  # 额外上下文
+    context: Optional[QuerySessionContext] = None  # 短会话上下文
 
 
 class ExecuteSqlRequest(BaseModel):
@@ -277,7 +298,7 @@ class QueryResponse(BaseModel):
     execution_history: Optional[List[dict]] = None  # 完整节点执行历史
     evidence: Optional[dict] = None  # 结构化证据
     answer: Optional[str] = None  # 自然语言答案
-    plan_source: Optional[str] = None  # 规划来源：rule/llm/sql_cache/manual_sql/reject
+    plan_source: Optional[str] = None  # 规划来源：rule/llm/verified_query/sql_cache/manual_sql/reject
     confidence: Optional[float] = None  # 规划置信度（0~1）
     clarification_needed: Optional[bool] = None  # 是否需要用户澄清
     clarification_options: Optional[List[str]] = None  # 澄清建议候选
@@ -320,41 +341,3 @@ class QueryHistoryCreate(BaseModel):
     warnings: Optional[list] = None
     trace_id: str
     audit_id: Optional[str] = None
-
-
-# ── Conversation / Message ────────────────────────────────────────────────
-
-class MessageCreate(BaseModel):
-    role: str
-    content: str
-    metadata: Optional[dict] = None
-
-
-class MessageResponse(BaseModel):
-    id: int
-    role: str
-    content: str
-    metadata: Optional[dict] = None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class ConversationCreate(BaseModel):
-    workspace_id: int
-    dataset_id: Optional[int] = None
-    title: Optional[str] = None
-
-
-class ConversationResponse(BaseModel):
-    id: int
-    workspace_id: int
-    user_id: int
-    dataset_id: Optional[int]
-    title: Optional[str]
-    created_at: datetime
-    messages: List[MessageResponse] = []
-
-    class Config:
-        from_attributes = True

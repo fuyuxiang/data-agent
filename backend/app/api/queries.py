@@ -575,6 +575,7 @@ async def stream_query(
     trace_id = f"trace_{uuid.uuid4().hex[:16]}"
     audit_id = f"audit_{uuid.uuid4().hex[:16]}"
     logger.info(f"trace_id: {trace_id}, audit_id: {audit_id}")
+    request_context = request.context.model_dump() if request.context else None
 
     def _inject_trace_meta(raw_event: str) -> str:
         if not raw_event.startswith("data: "):
@@ -600,7 +601,11 @@ async def stream_query(
 
         try:
             event_count = 0
-            iterator = orchestrator.stream_events(request.question, selected_tables)
+            iterator = orchestrator.stream_events(
+                request.question,
+                selected_tables,
+                request_context,
+            )
             while True:
                 done, event = await asyncio.to_thread(_next_or_done, iterator)
                 if done:
@@ -651,12 +656,14 @@ async def execute_query(
     audit_id = f"audit_{uuid.uuid4().hex[:16]}"
 
     logger.info(f"开始执行查询: {request.question}")
+    request_context = request.context.model_dump() if request.context else None
 
     try:
         state = await run_in_threadpool(
             run_stream,
             request.question,
             selected_tables if selected_tables else None,
+            request_context,
         )
     except Exception as exc:
         logger.error(f"查询执行失败: {exc}", exc_info=True)
