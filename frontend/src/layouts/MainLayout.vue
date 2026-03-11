@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import { authApi } from '@/api'
+import { authApi, systemApi } from '@/api'
 import { ElMessage } from 'element-plus'
 
 const router = useRouter()
@@ -10,6 +10,20 @@ const route = useRoute()
 const userStore = useUserStore()
 
 const activeMenu = ref('query')
+const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000
+
+type LlmMonitorStatus = 'checking' | 'up' | 'down'
+
+interface LlmMonitorState {
+  status: LlmMonitorStatus
+  message: string
+}
+
+const llmMonitor = ref<LlmMonitorState>({
+  status: 'checking',
+  message: '环境启动异常',
+})
+let llmHeartbeatTimer: number | null = null
 
 const menuItems = [
   { key: 'query', title: '智能取数', icon: 'ChatDotRound', path: '/query' },
@@ -24,6 +38,18 @@ onMounted(async () => {
     userStore.setWorkspaces(wsRes.data)
   } catch (e) {
     ElMessage.error('获取工作空间失败')
+  } finally {
+    void checkLlmHeartbeat()
+    llmHeartbeatTimer = window.setInterval(() => {
+      void checkLlmHeartbeat()
+    }, HEARTBEAT_INTERVAL_MS)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (llmHeartbeatTimer !== null) {
+    clearInterval(llmHeartbeatTimer)
+    llmHeartbeatTimer = null
   }
 })
 
@@ -43,6 +69,27 @@ const handleLogout = () => {
 
 const currentPath = computed(() => route.path)
 const isFullWidthPage = computed(() => ['/query', '/config'].includes(route.path))
+const llmStatusClass = computed(() => {
+  if (llmMonitor.value.status === 'up') return 'is-up'
+  if (llmMonitor.value.status === 'down') return 'is-down'
+  return 'is-checking'
+})
+
+const checkLlmHeartbeat = async () => {
+  try {
+    const res = await systemApi.getLlmHeartbeat()
+    const data = res.data
+    llmMonitor.value = {
+      status: data.ok ? 'up' : 'down',
+      message: data.message || (data.ok ? '环境启动正常' : '环境启动异常'),
+    }
+  } catch (e) {
+    llmMonitor.value = {
+      status: 'down',
+      message: '环境启动异常',
+    }
+  }
+}
 </script>
 
 <template>
@@ -69,6 +116,13 @@ const isFullWidthPage = computed(() => ['/query', '/config'].includes(route.path
           <span>{{ item.title }}</span>
         </el-menu-item>
       </el-menu>
+
+      <div class="sidebar-monitor">
+        <div class="monitor-main">
+          <span class="monitor-dot" :class="llmStatusClass"></span>
+          <div class="monitor-message">{{ llmMonitor.message }}</div>
+        </div>
+      </div>
 
       <!-- 工作空间选择 -->
       <div class="sidebar-workspace">
@@ -159,6 +213,44 @@ const isFullWidthPage = computed(() => ['/query', '/config'].includes(route.path
   flex: 1;
   overflow-y: auto;
   border-right: none;
+}
+
+.sidebar-monitor {
+  margin: 12px 15px 10px;
+  padding: 8px 10px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.monitor-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitor-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &.is-up {
+    background: #22c55e;
+  }
+
+  &.is-down {
+    background: #ef4444;
+  }
+
+  &.is-checking {
+    background: #f59e0b;
+  }
+}
+
+.monitor-message {
+  font-size: 12px;
+  color: #303133;
 }
 
 .sidebar-workspace {

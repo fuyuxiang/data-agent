@@ -10,7 +10,9 @@ import type {
   Dataset,
   DatasetCreate,
   QueryRequest,
+  QueryResponse,
   QueryHistory,
+  LlmHeartbeatResponse,
 } from './types'
 
 const baseURL = '/api/v1'
@@ -130,7 +132,16 @@ export const queryApi = {
       console.error('[API] Fetch error:', err)
       throw err
     })
-  }
+  },
+
+  // 执行编辑后的 SQL
+  executeSql: (data: {
+    sql: string
+    workspace_id: number
+    dataset_id?: number
+    table_names?: string[]
+    sql_params?: any[]
+  }) => api.post<any, AxiosResponse<QueryResponse>>('/queries/execute-sql', data),
 }
 
 // ── 历史记录 API ─────────────────────────────────────────────────────────
@@ -140,6 +151,30 @@ export const historyApi = {
     api.get<any, AxiosResponse<QueryHistory[]>>('/history', {
       params: { workspace_id: workspaceId, dataset_id: datasetId, limit, offset },
     }),
+
+  create: (data: {
+    workspace_id: number
+    dataset_id?: number
+    question: string
+    normalized_question?: string
+    intent?: string
+    semantic_sql?: string
+    executable_sql?: string
+    sql_params?: any[]
+    result_schema?: any[]
+    result_rows?: any[]
+    row_count: number
+    status: string
+    error_message?: string
+    trace_id: string
+    audit_id?: string
+  }) => api.post<any, AxiosResponse<QueryHistory>>('/history', data),
+}
+
+// ── 系统监控 API ─────────────────────────────────────────────────────────
+export const systemApi = {
+  getLlmHeartbeat: () =>
+    api.get<any, AxiosResponse<LlmHeartbeatResponse>>('/system/llm-heartbeat'),
 }
 
 export default api

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch, reactive } from 'vue'
 import { useUserStore } from '@/stores/user'
-import { queryApi, datasetApi, dataSourceApi } from '@/api'
+import { queryApi, datasetApi, dataSourceApi, historyApi } from '@/api'
 import type { QueryResponse, Dataset, SchemaColumn } from '@/api/types'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
@@ -38,7 +38,7 @@ const allTables = ref<TableItem[]>([])
 
 // 快捷示例（基于 dm_m_kd_charge_info_sichuan 表的实际字段）
 const quickExamples = [
-  '统计2025年12月各一级发展渠道的用户数排行',
+  '查询两个表中相同省份、相同账期的收入对比',
   '查询2025年12月各二级发展渠道的收入分布',
   '统计2025年11月各渠道类型的渠道数量',
   '查询最近10条渠道收入明细',
@@ -134,6 +134,16 @@ const getFriendlyStepEndLines = (step?: string, outputs?: any): string[] => {
     }
     if (outputs?.sql) {
       lines.push('[查询准备] 已生成可执行的查询条件')
+    }
+    const planSource = outputs?.filters?.plan_source
+    if (planSource === 'sql_cache') {
+      lines.push('[查询规划] 已命中 SQL 缓存，复用历史查询模板')
+    } else if (planSource === 'verified_query') {
+      lines.push('[查询规划] 已命中可信模板，直接复用验证过的查询方案')
+    } else if (planSource === 'llm') {
+      lines.push('[查询规划] 已通过模型语义判定生成查询方案')
+    } else if (planSource === 'rule') {
+      lines.push('[查询规划] 已通过规则策略生成查询方案')
     }
     return lines
   }
@@ -331,6 +341,48 @@ const getSuccessSummaryText = (data?: QueryResponse | null): string => {
     return '统计已完成'
   }
   return `${data.row_count || 0} 条结果`
+}
+
+const getPlanSourceLabel = (source?: string): string => {
+  if (!source) return 'unknown'
+  const map: Record<string, string> = {
+    rule: '规则引擎',
+    llm: 'LLM',
+    sql_cache: 'SQL缓存',
+    verified_query: '可信模板',
+    manual_sql: '手工SQL',
+    reject: '拒绝执行',
+  }
+  return map[source] || source
+}
+
+const formatConfidence = (value?: number): string => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  const clamped = Math.max(0, Math.min(1, value))
+  return `${Math.round(clamped * 100)}%`
+}
+
+const applyClarificationOption = (option: string, data?: QueryResponse | null) => {
+  const baseQuestion = data?.question || ''
+  question.value = baseQuestion ? `${baseQuestion}，请基于表 ${option}` : `请基于表 ${option} 查询`
+}
+
+const getEvidenceSourceTables = (data?: QueryResponse | null): string[] => {
+  const tables = data?.evidence?.source_tables
+  if (!Array.isArray(tables)) return []
+  return tables.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+}
+
+const formatDurationMs = (value?: unknown): string => {
+  const duration = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(duration) || duration < 0) return '-'
+  if (duration >= 1000) return `${(duration / 1000).toFixed(2)}s`
+  return `${Math.round(duration)}ms`
+}
+
+const getExecutionHistoryPreview = (data?: QueryResponse | null) => {
+  const history = Array.isArray(data?.execution_history) ? data.execution_history : []
+  return history.slice(-8)
 }
 
 const getResultViewMode = (idx: number): ResultViewMode => {
@@ -658,6 +710,80 @@ const clearSelectedTables = () => {
   selectedTables.value = []
 }
 
+// 重新执行编辑后的 SQL
+const handleRerunSql = async (msgIdx: number, msgData: any) => {
+  if (!msgData.sql || !msgData.sql.trim()) {
+    ElMessage.warning('SQL 不能为空')
+    return
+  }
+
+  if (!userStore.currentWorkspace) {
+    ElMessage.warning('请先选择工作空间')
+    return
+  }
+
+  // 使用生成 SQL 时保存的表名和数据集ID，保证一致性
+  const tableNamesForRerun = msgData.table_names || selectedTables.value.map(t => t.name)
+  const datasetIdForRerun = msgData.dataset_id || selectedDataset.value?.id
+  const sqlParamsForRerun = Array.isArray(msgData.sql_params) ? msgData.sql_params : []
+
+  msgData.executing = true
+
+  try {
+    const response = await queryApi.executeSql({
+      sql: msgData.sql,
+      workspace_id: userStore.currentWorkspace.id,
+      dataset_id: datasetIdForRerun,
+      table_names: tableNamesForRerun,
+      sql_params: sqlParamsForRerun,
+    })
+
+    if (response.data.status === 'success') {
+      // 更新消息数据
+      msgData.result_rows = response.data.result_rows || []
+      msgData.result_schema = response.data.result_schema || []
+      msgData.row_count = response.data.row_count || 0
+      msgData.intent = response.data.intent || 'list'
+      msgData.status = 'success'
+      msgData.error = null
+      msgData.answer = response.data.answer
+      msgData.chart_suggestion = response.data.chart_suggestion || 'table'
+      msgData.trace_id = response.data.trace_id
+      msgData.audit_id = response.data.audit_id
+      msgData.execution_history = response.data.execution_history || []
+      msgData.evidence = response.data.evidence || null
+      msgData.plan_source = response.data.plan_source || 'manual_sql'
+      msgData.confidence = typeof response.data.confidence === 'number' ? response.data.confidence : 1
+      msgData.clarification_needed = !!response.data.clarification_needed
+      msgData.clarification_options = response.data.clarification_options || []
+      msgData.table_names = tableNamesForRerun
+      msgData.dataset_id = datasetIdForRerun
+      msgData.sql_params = Array.isArray(response.data.sql_params) ? response.data.sql_params : sqlParamsForRerun
+
+      // 触发响应式更新
+      messages.value[msgIdx].data = { ...msgData }
+      messages.value = [...messages.value]
+
+      ElMessage.success('SQL 执行成功')
+    } else {
+      msgData.status = 'error'
+      msgData.error = response.data.error || '执行失败'
+      messages.value[msgIdx].data = { ...msgData }
+      messages.value = [...messages.value]
+      ElMessage.error('SQL 执行失败: ' + (response.data.error || '未知错误'))
+    }
+  } catch (e: any) {
+    console.error('SQL 执行失败:', e)
+    msgData.status = 'error'
+    msgData.error = e.message || '执行失败'
+    messages.value[msgIdx].data = { ...msgData }
+    messages.value = [...messages.value]
+    ElMessage.error('SQL 执行失败: ' + (e.message || '未知错误'))
+  } finally {
+    msgData.executing = false
+  }
+}
+
 // 执行查询
 const handleQuery = async () => {
   console.log('handleQuery called, question:', question.value)
@@ -696,6 +822,13 @@ const handleQuery = async () => {
   // 用于累积思考过程
   let thinkingContent = ''
   let lastThinkingLine = ''
+  // 用于保存历史记录的 trace_id 和 audit_id
+  let currentTraceId = ''
+  let currentAuditId = ''
+  let finalExecutionHistory: Record<string, any>[] = []
+  let finalFilters: Record<string, any> = {}
+  let finalSqlFromMeta = ''
+  let finalSqlParamsFromMeta: any[] = []
 
   const updateThinking = (text: string) => {
     const cleanedText = text.replace(/\n+$/, '').trimEnd()
@@ -743,6 +876,7 @@ const handleQuery = async () => {
 
     let buffer = ''
     let finalData: any = null
+    let finalMetaIntent: string | undefined = undefined
 
     while (true) {
       const { done, value } = await reader.read()
@@ -784,7 +918,32 @@ const handleQuery = async () => {
             } else if (data.type === 'node_error') {
               updateThinking('处理过程中出现问题：' + (data.error?.message || '执行失败'))
             } else if (data.type === 'final') {
-              finalData = data.result || data.outputs
+              // 提取 trace_id 和 audit_id
+              if (data.trace_id) {
+                currentTraceId = data.trace_id
+                console.log('[Query] 获取到 trace_id:', currentTraceId)
+              }
+              if (data.audit_id) {
+                currentAuditId = data.audit_id
+                console.log('[Query] 获取到 audit_id:', currentAuditId)
+              }
+              if (Array.isArray(data.meta?.execution_history)) {
+                finalExecutionHistory = data.meta.execution_history
+              }
+              if (typeof data.meta?.intent === 'string') {
+                finalMetaIntent = data.meta.intent
+              }
+              if (data.meta?.filters && typeof data.meta.filters === 'object') {
+                finalFilters = data.meta.filters
+              }
+              if (typeof data.meta?.sql === 'string') {
+                finalSqlFromMeta = data.meta.sql
+              }
+              if (Array.isArray(data.meta?.sql_params)) {
+                finalSqlParamsFromMeta = data.meta.sql_params
+              }
+              // final 事件中也可能包含结果数据
+              finalData = data.result || data.outputs || data
               console.log('[Query] 收到 final, outputs:', finalData)
               if (finalData?.answer_text || finalData?.message) {
                 updateThinking('结果说明：' + (finalData?.answer_text || finalData?.message))
@@ -815,8 +974,8 @@ const handleQuery = async () => {
                   }
                   const statusValue = finalData?.status || 'success'
 
-                  // 处理不同意图类型
-                  let intentValue = finalData?.intent || 'list'
+                  // 处理不同意图类型（错误态优先回退到后端 meta.intent，避免误显示为 list）
+                  let intentValue = finalData?.intent || finalMetaIntent || 'list'
                   if (finalData?.type === 'chat') intentValue = 'chat'
                   if (finalData?.type === 'search') intentValue = 'search'
                   if (finalData?.type === 'count') intentValue = 'count'
@@ -825,7 +984,8 @@ const handleQuery = async () => {
                     question: userQuestion,
                     intent: intentValue,
                     intent_text: finalData?.intent_text || getIntentLabel(intentValue),
-                    sql: finalData?.sql || '',
+                    sql: finalData?.sql || finalSqlFromMeta || '',
+                    sql_params: Array.isArray(finalData?.sql_params) ? finalData.sql_params : finalSqlParamsFromMeta,
                     result_rows: rows,
                     result_schema: resultSchema,
                     chart_suggestion: finalData?.chart_suggestion || (intentValue === 'count' ? 'bar' : 'table'),
@@ -833,14 +993,52 @@ const handleQuery = async () => {
                     status: statusValue,
                     error: finalData?.error?.message || finalData?.message,
                     answer: finalData?.message || finalData?.answer_text || '',
-                    trace_id: '',
-                    audit_id: '',
+                    trace_id: currentTraceId,
+                    audit_id: currentAuditId,
+                    execution_history: finalExecutionHistory,
+                    evidence: finalData?.evidence,
+                    plan_source: finalData?.plan_source || finalFilters?.plan_source,
+                    confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
+                      ? (finalData?.confidence ?? finalFilters?.confidence)
+                      : undefined,
+                    clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
+                    clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
+                    // 保存生成 SQL 时使用的表名和数据集，用于重新执行
+                    table_names: selectedTableNames,
+                    dataset_id: selectedDataset.value?.id,
                   })
                 }
               }
             } else if (data.type === 'done') {
               updateThinking('处理完成，结果已返回')
               loading.value = false
+              // 在流结束时保存历史记录
+              if (currentTraceId) {
+                const lastMsg = messages.value[messages.value.length - 1]
+                const msgData = lastMsg?.data
+                try {
+                  await historyApi.create({
+                    workspace_id: userStore.currentWorkspace?.id || 0,
+                    dataset_id: selectedDataset.value?.id,
+                    question: userQuestion,
+                    normalized_question: userQuestion,
+                    intent: msgData?.intent || 'list',
+                    semantic_sql: msgData?.sql || '',
+                    executable_sql: msgData?.sql || '',
+                    sql_params: Array.isArray(msgData?.sql_params) ? msgData.sql_params : [],
+                    result_schema: msgData?.result_schema || [],
+                    result_rows: (msgData?.result_rows || []).slice(0, 100),
+                    row_count: msgData?.row_count || 0,
+                    status: msgData?.status || 'success',
+                    error_message: msgData?.error || '',
+                    trace_id: currentTraceId,
+                    audit_id: currentAuditId,
+                  })
+                  console.log('[History] 历史记录保存成功')
+                } catch (historyError) {
+                  console.error('[History] 保存历史记录失败:', historyError)
+                }
+              }
             }
           } catch (e) {
             console.error('Parse error:', e)
@@ -853,50 +1051,55 @@ const handleQuery = async () => {
     console.log('[DEBUG] finalData:', finalData)
     if (finalData) {
       const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg) {
-        // 获取列名 - 从 result.columns 或 result_rows 的第一条记录
-        const columns = finalData?.result?.columns || finalData?.columns || []
-        const rows = finalData?.result?.rows || finalData?.rows || []
+      // 只在还未写入消息数据时兜底，避免覆盖 node/final 事件中已构建的结果
+      if (lastMsg && !lastMsg.data) {
+        let columns: any[] = []
+        let rows: any[] = []
+
+        if (finalData?.value && Array.isArray(finalData.value)) {
+          rows = finalData.value
+          if (rows.length > 0) {
+            columns = Object.keys(rows[0])
+          }
+        } else {
+          columns = finalData?.result?.columns || finalData?.columns || []
+          rows = finalData?.result?.rows || finalData?.rows || []
+        }
+
         const rowCount = finalData?.result?.row_count || finalData?.row_count || rows.length
-
-        console.log('[DEBUG] columns:', columns)
-        console.log('[DEBUG] rows:', rows)
-        console.log('[DEBUG] rowCount:', rowCount)
-
-        // 如果没有 columns 但有 rows，从 rows 获取列名
         let resultSchema = columns.map((c: string) => ({ name: c, type: 'string' }))
         if (resultSchema.length === 0 && rows.length > 0) {
           resultSchema = Object.keys(rows[0]).map(key => ({ name: key, type: 'string' }))
         }
 
-        console.log('[DEBUG] resultSchema:', resultSchema)
-
-        // 使用 reactive 确保响应式更新，确保 status 字段被正确设置
         const statusValue = finalData?.status || 'success'
-        console.log('[DEBUG] finalData.status =', finalData?.status, '-> 使用:', statusValue)
-        const responseData = reactive<QueryResponse>({
+        const fallbackIntent = finalData?.intent || finalMetaIntent || finalData?.type || 'list'
+        const fallbackData = reactive<QueryResponse>({
           question: userQuestion,
-          intent: finalData?.intent || 'list',
-          intent_text: finalData?.intent_text || getIntentLabel(finalData?.intent || 'list'),
-          sql: finalData?.sql || '',
+          intent: fallbackIntent,
+          intent_text: finalData?.intent_text || getIntentLabel(fallbackIntent),
+          sql: finalData?.sql || finalSqlFromMeta || '',
+          sql_params: Array.isArray(finalData?.sql_params) ? finalData.sql_params : finalSqlParamsFromMeta,
           result_rows: rows,
           result_schema: resultSchema,
-          chart_suggestion: finalData?.chart_suggestion || 'table',
+          chart_suggestion: finalData?.chart_suggestion || (finalData?.type === 'count' ? 'bar' : 'table'),
           row_count: rowCount,
           status: statusValue,
-          error: finalData?.error?.message,
-          answer: finalData?.answer_text || '',
-          trace_id: '',
-          audit_id: '',
+          error: finalData?.error?.message || finalData?.message,
+          answer: finalData?.answer_text || finalData?.message || '',
+          trace_id: currentTraceId,
+          audit_id: currentAuditId,
+          execution_history: finalExecutionHistory,
+          evidence: finalData?.evidence,
+          plan_source: finalData?.plan_source || finalFilters?.plan_source,
+          confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
+            ? (finalData?.confidence ?? finalFilters?.confidence)
+            : undefined,
+          clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
+          clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
         })
-
-        // 直接更新最后一条消息的 data 属性，确保响应式
-        console.log('[DEBUG] 设置 result_rows:', rows.length, 'status:', statusValue)
-        lastMsg.data = responseData
-        // 强制触发更新
+        lastMsg.data = fallbackData
         messages.value = [...messages.value]
-        console.log('[DEBUG] messages 更新完成, data.status =', lastMsg.data?.status)
-        console.log('[DEBUG] lastMsg.data:', lastMsg.data)
       }
 
     } else {
@@ -910,6 +1113,25 @@ const handleQuery = async () => {
     if (lastMsg) {
       lastMsg.content = '查询失败'
       lastMsg.data = { status: 'error', row_count: 0 } as QueryResponse
+    }
+    // 保存失败记录到历史
+    if (currentTraceId) {
+      try {
+        await historyApi.create({
+          workspace_id: userStore.currentWorkspace?.id || 0,
+          dataset_id: selectedDataset.value?.id,
+          question: userQuestion,
+          normalized_question: userQuestion,
+          intent: 'list',
+          row_count: 0,
+          status: 'error',
+          error_message: e.message || '查询失败',
+          trace_id: currentTraceId,
+          audit_id: currentAuditId,
+        })
+      } catch (historyError) {
+        console.error('[History] 保存失败记录失败:', historyError)
+      }
     }
   } finally {
     loading.value = false
@@ -1093,6 +1315,12 @@ const handleQuery = async () => {
                     <span class="icon-emoji success-icon">✅</span>
                     <span class="success-title">查询成功</span>
                     <span class="result-count">{{ getSuccessSummaryText(msg.data) }}</span>
+                    <el-tag v-if="msg.data.plan_source" size="small" type="info">
+                      {{ getPlanSourceLabel(msg.data.plan_source) }}
+                    </el-tag>
+                    <el-tag v-if="typeof msg.data.confidence === 'number'" size="small" type="success">
+                      置信度 {{ formatConfidence(msg.data.confidence) }}
+                    </el-tag>
                   </div>
                 </div>
 
@@ -1103,9 +1331,65 @@ const handleQuery = async () => {
                       <span class="icon-emoji">📝</span>
                       <span class="header-title">生成的 SQL</span>
                     </div>
+                    <div class="header-right">
+                      <el-button
+                        type="primary"
+                        size="small"
+                        :loading="msg.data.executing"
+                        @click="handleRerunSql(idx, msg.data)"
+                      >
+                        重新执行
+                      </el-button>
+                    </div>
                   </div>
                   <div class="sql-editor">
                     <el-input type="textarea" v-model="msg.data.sql" :rows="4" class="sql-textarea" />
+                  </div>
+                </div>
+
+                <!-- 结构化证据卡片 -->
+                <div v-if="msg.data && msg.data.evidence" class="evidence-card">
+                  <div class="card-header">
+                    <div class="header-left">
+                      <span class="icon-emoji">📌</span>
+                      <span class="header-title">证据</span>
+                    </div>
+                  </div>
+                  <div class="evidence-summary">
+                    {{ msg.data.evidence.summary || '已返回结构化证据。' }}
+                  </div>
+                  <div v-if="getEvidenceSourceTables(msg.data).length > 0" class="evidence-tables">
+                    <span class="meta-label">来源表:</span>
+                    <div class="meta-tags">
+                      <el-tag v-for="table in getEvidenceSourceTables(msg.data)" :key="table" size="small" class="meta-tag">
+                        {{ table }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 执行历史卡片 -->
+                <div v-if="msg.data && msg.data.execution_history && msg.data.execution_history.length > 0" class="exec-history-card">
+                  <div class="card-header">
+                    <div class="header-left">
+                      <span class="icon-emoji">🧭</span>
+                      <span class="header-title">执行历史</span>
+                    </div>
+                  </div>
+                  <div class="exec-history-list">
+                    <div v-for="(item, hidx) in getExecutionHistoryPreview(msg.data)" :key="hidx" class="exec-history-item">
+                      <span class="exec-step">{{ stepLabelMap[item.step] || item.step || 'unknown' }}</span>
+                      <el-tag size="small" :type="item.status === 'success' ? 'success' : item.status === 'error' ? 'danger' : 'info'">
+                        {{ item.status || 'unknown' }}
+                      </el-tag>
+                      <span class="exec-duration">{{ formatDurationMs(item.duration_ms) }}</span>
+                    </div>
+                    <div
+                      v-if="(msg.data.execution_history?.length || 0) > getExecutionHistoryPreview(msg.data).length"
+                      class="exec-history-more"
+                    >
+                      仅展示最近 {{ getExecutionHistoryPreview(msg.data).length }} 个节点
+                    </div>
                   </div>
                 </div>
 
@@ -1133,7 +1417,7 @@ const handleQuery = async () => {
                   <div class="table-wrapper">
                     <!-- 向量检索结果展示（包含相似度分数） -->
                     <template v-if="msg.data.intent === 'search'">
-                      <el-table :data="(msg.data.result_rows || []).slice(0, 10)" border stripe size="small" max-height="350" class="result-table">
+                      <el-table :data="msg.data.result_rows || []" border stripe size="small" max-height="350" class="result-table">
                         <el-table-column v-for="col in msg.data.result_schema" :key="col.name" :prop="col.name" :label="col.name" min-width="120" show-overflow-tooltip />
                         <el-table-column v-if="msg.data.result_rows && msg.data.result_rows[0] && msg.data.result_rows[0]._distance" label="相似度" width="100" align="center">
                           <template #default="{ row }">
@@ -1182,12 +1466,15 @@ const handleQuery = async () => {
                     </template>
                     <!-- 普通查询明细 -->
                     <template v-else>
-                      <el-table :data="(msg.data.result_rows || []).slice(0, 10)" border stripe size="small" max-height="350" class="result-table">
+                      <el-table :data="msg.data.result_rows || []" border stripe size="small" max-height="350" class="result-table">
                         <el-table-column v-for="col in msg.data.result_schema" :key="col.name" :prop="col.name" :label="col.name" min-width="120" show-overflow-tooltip />
                       </el-table>
                     </template>
-                    <div v-if="msg.data.row_count > 10 && getResultViewMode(idx) !== 'chart'" class="more-hint">
-                      仅显示前 10 行，滑动查看更多（共 {{ msg.data.row_count }} 行）
+                    <div
+                      v-if="msg.data.row_count > (msg.data.result_rows?.length || 0) && getResultViewMode(idx) !== 'chart'"
+                      class="more-hint"
+                    >
+                      当前展示 {{ msg.data.result_rows?.length || 0 }} 行（共 {{ msg.data.row_count }} 行）
                     </div>
                   </div>
                 </div>
@@ -1199,6 +1486,22 @@ const handleQuery = async () => {
                     <span class="error-title">查询失败</span>
                   </div>
                   <div v-if="msg.data.error" class="error-detail">{{ msg.data.error }}</div>
+                  <div
+                    v-if="msg.data.clarification_needed && msg.data.clarification_options && msg.data.clarification_options.length > 0"
+                    class="clarification-block"
+                  >
+                    <div class="clarification-title">请先明确要分析的数据表:</div>
+                    <div class="clarification-options">
+                      <el-button
+                        v-for="option in msg.data.clarification_options"
+                        :key="option"
+                        size="small"
+                        @click="applyClarificationOption(option, msg.data)"
+                      >
+                        {{ option }}
+                      </el-button>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- 加载中提示 -->
@@ -1772,6 +2075,131 @@ const handleQuery = async () => {
   }
 }
 
+.evidence-card {
+  background: #f9f9ff;
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: 1px solid #dfe3ff;
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .icon-emoji {
+      font-size: 16px;
+    }
+
+    .header-title {
+      color: #4a56a6;
+      font-weight: 600;
+      font-size: 14px;
+    }
+  }
+
+  .evidence-summary {
+    font-size: 13px;
+    color: #434b63;
+    line-height: 1.6;
+  }
+
+  .evidence-tables {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    .meta-label {
+      font-size: 12px;
+      color: #737a91;
+      flex-shrink: 0;
+    }
+
+    .meta-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .meta-tag {
+      border-color: #cad2ff;
+      color: #4a56a6;
+      background: #eef1ff;
+    }
+  }
+}
+
+.exec-history-card {
+  background: #f7fafc;
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: 1px solid #dde7f2;
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .icon-emoji {
+      font-size: 16px;
+    }
+
+    .header-title {
+      color: #2f4a66;
+      font-weight: 600;
+      font-size: 14px;
+    }
+  }
+
+  .exec-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .exec-history-item {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+    color: #425466;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: #ffffff;
+    border: 1px solid #e6edf5;
+  }
+
+  .exec-step {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .exec-duration {
+    color: #5f7286;
+    font-family: 'Monaco', 'Menlo', monospace;
+  }
+
+  .exec-history-more {
+    font-size: 12px;
+    color: #7a8a9a;
+    margin-top: 2px;
+  }
+}
+
 // 成功状态卡片
 .success-card {
   background: #f6ffed;
@@ -2031,6 +2459,24 @@ const handleQuery = async () => {
     margin-top: 8px;
     color: #666;
     font-size: 14px;
+  }
+
+  .clarification-block {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed #f5a6a6;
+  }
+
+  .clarification-title {
+    color: #b54745;
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+
+  .clarification-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 }
 

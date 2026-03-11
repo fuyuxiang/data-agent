@@ -67,8 +67,11 @@ def get_table_description(table_name: str) -> str:
 
 def _get_table_columns(engine, table: str) -> List[Tuple[str, str]]:
     """获取表的列名和类型（从 DuckDB information_schema）"""
+    conn = getattr(engine, "conn", None) or getattr(engine, "con", None)
+    if conn is None:
+        return []
     try:
-        rows = engine.con.execute(
+        rows = conn.execute(
             "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE table_name = ?", [table]
         ).fetchall()
@@ -76,7 +79,7 @@ def _get_table_columns(engine, table: str) -> List[Tuple[str, str]]:
     except Exception:
         # 尝试使用 PRAGMA
         try:
-            rows = engine.con.execute(f"PRAGMA table_info('{table}')").fetchall()
+            rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
             return [(r[1], r[2]) for r in rows]
         except Exception:
             return []
@@ -85,19 +88,27 @@ def _get_table_columns(engine, table: str) -> List[Tuple[str, str]]:
 def _get_sample_values(engine, table: str, column: str,
                        is_enum: bool = False, limit: int = 5) -> str:
     """获取字段的示例值或枚举值"""
+    def _quote_ident(name: str) -> str:
+        return '"' + (name or "").replace('"', '""') + '"'
+
+    conn = getattr(engine, "conn", None) or getattr(engine, "con", None)
+    if conn is None:
+        return ""
+
+    col_ident = _quote_ident(column)
+    table_ident = _quote_ident(table)
     try:
-        # 使用双引号包裹列名以处理保留字
         if is_enum:
-            rows = engine.con.execute(
-                f'SELECT DISTINCT "{column}" FROM {table} '
-                f'WHERE "{column}" IS NOT NULL AND CAST("{column}" AS VARCHAR) <> \'\' '
-                f'ORDER BY "{column}"'
+            rows = conn.execute(
+                f"SELECT DISTINCT {col_ident} FROM {table_ident} "
+                f"WHERE {col_ident} IS NOT NULL AND CAST({col_ident} AS VARCHAR) <> '' "
+                f"ORDER BY {col_ident}"
             ).fetchall()
         else:
-            rows = engine.con.execute(
-                f'SELECT DISTINCT "{column}" FROM {table} '
-                f'WHERE "{column}" IS NOT NULL AND CAST("{column}" AS VARCHAR) <> \'\' '
-                f'ORDER BY "{column}" LIMIT {limit}'
+            rows = conn.execute(
+                f"SELECT DISTINCT {col_ident} FROM {table_ident} "
+                f"WHERE {col_ident} IS NOT NULL AND CAST({col_ident} AS VARCHAR) <> '' "
+                f"ORDER BY {col_ident} LIMIT {limit}"
             ).fetchall()
         values = [str(r[0]) for r in rows if r[0] is not None]
         if not values:

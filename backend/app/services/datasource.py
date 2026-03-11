@@ -2,6 +2,7 @@
 数据源服务 - 连接管理、Schema 探查
 """
 import os
+from pathlib import Path
 from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,8 @@ from app.core.config import settings
 from app.models.models import DataSource, CSVFile, DataSourceSchema, DataSourceType
 
 logger = get_logger(__name__)
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+UPLOAD_DIR = BACKEND_DIR / "data" / "uploads"
 
 # 加密密钥（从配置读取，如果未配置则生成一个警告）
 def _get_fernet() -> Fernet:
@@ -24,6 +27,21 @@ def _get_fernet() -> Fernet:
         return Fernet(Fernet.generate_key())
 
 fernet = _get_fernet()
+
+
+def _resolve_csv_file_path(file_path: Optional[str]) -> Optional[str]:
+    """解析 CSV 文件路径，兼容历史绝对路径迁移"""
+    if not file_path:
+        return None
+    if os.path.exists(file_path):
+        return file_path
+    basename = os.path.basename(file_path)
+    if not basename:
+        return None
+    candidate = UPLOAD_DIR / basename
+    if candidate.exists():
+        return str(candidate)
+    return None
 
 
 def encrypt_password(password: str) -> str:
@@ -187,9 +205,12 @@ class DataSourceService:
 
                 import pandas as pd
                 for csv_file in csv_files:
-                    if os.path.exists(csv_file.file_path):
+                    resolved_path = _resolve_csv_file_path(csv_file.file_path)
+                    if resolved_path:
                         try:
-                            df = pd.read_csv(csv_file.file_path)
+                            if resolved_path != csv_file.file_path:
+                                logger.info(f"CSV 路径已自动修复: {csv_file.file_path} -> {resolved_path}")
+                            df = pd.read_csv(resolved_path)
                             table_name = os.path.splitext(csv_file.filename)[0]
 
                             # 添加每个文件的 Schema

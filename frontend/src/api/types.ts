@@ -138,6 +138,7 @@ export interface QueryResponse {
   intent?: string
   intent_text?: string
   sql?: string
+  sql_params?: any[]
   matched_dataset?: { id: number; name: string }
   semantic_sql?: string
   executable_sql?: string
@@ -154,7 +155,17 @@ export interface QueryResponse {
   trace_id: string
   audit_id: string
   agent_steps?: AgentStep[]
+  execution_history?: Record<string, any>[]
+  evidence?: Record<string, any>
   answer?: string
+  plan_source?: string
+  confidence?: number
+  clarification_needed?: boolean
+  clarification_options?: string[]
+  executing?: boolean  // 用于标记 SQL 是否正在重新执行
+  // 保存生成 SQL 时使用的表名，用于重新执行
+  table_names?: string[]
+  dataset_id?: number
 }
 
 export interface AgentStep {
@@ -178,4 +189,16 @@ export interface QueryHistory {
   status: string
   trace_id: string
   created_at: string
+}
+
+// 系统监控
+export interface LlmHeartbeatResponse {
+  ok: boolean
+  status: 'up' | 'down'
+  message: string
+  checked_at: string
+  latency_ms?: number
+  model?: string | null
+  model_count?: number
+  detail?: string
 }

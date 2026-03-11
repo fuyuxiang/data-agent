@@ -83,7 +83,7 @@ class DuckDBEngine:
 
             params = params or []
 
-            sql = sql.strip()
+            sql = sql.strip().rstrip(";")
             if "LIMIT" not in sql.upper():
                 sql = f"{sql} LIMIT {settings.SQL_DEFAULT_LIMIT}"
 
@@ -130,6 +130,36 @@ class DuckDBEngine:
                     "execution_time_ms": int((time.time() - start_time) * 1000),
                     "error": str(e)
                 }
+
+    def execute_command(self, sql: str, params: List = None) -> None:
+        """执行非查询 SQL（线程安全，不自动追加 LIMIT）"""
+        with self._lock:
+            if not self.conn:
+                self.connect()
+            if params:
+                self.conn.execute(sql, params)
+            else:
+                self.conn.execute(sql)
+
+    def explain(self, sql: str, params: List = None) -> Dict[str, Any]:
+        """执行 EXPLAIN 预检（不真正执行查询）"""
+        with self._lock:
+            if not self.conn:
+                self.connect()
+
+            params = params or []
+            sql = (sql or "").strip().rstrip(";")
+            if not sql:
+                return {"ok": False, "error": "SQL 语句不能为空"}
+
+            try:
+                if params:
+                    rows = self.conn.execute(f"EXPLAIN {sql}", params).fetchall()
+                else:
+                    rows = self.conn.execute(f"EXPLAIN {sql}").fetchall()
+                return {"ok": True, "plan": rows[:20]}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
     def table_exists(self, table_name: str) -> bool:
         """检查表是否存在"""
