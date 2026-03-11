@@ -129,7 +129,26 @@ export interface QueryRequest {
   workspace_id: number
   dataset_id?: number
   table_names?: string[]  // 用户选择的表名列表
-  context?: Record<string, any>
+  context?: QuerySessionContext
+}
+
+export interface QueryContextTurn {
+  question: string
+  intent?: string
+  answer?: string
+  sql?: string
+  row_count?: number
+  result_schema?: { name: string; type: string }[]
+  table_names?: string[]
+  dataset_id?: number
+  status?: string
+  plan_source?: string
+}
+
+export interface QuerySessionContext {
+  recent_turns?: QueryContextTurn[]
+  current_dataset_id?: number
+  current_table_names?: string[]
 }
 
 export interface QueryResponse {

@@ -89,6 +89,11 @@ _RAW_LIST_HINTS = [
 
 _TABLE_POLICY_MODES = {"auto", "exact", "all"}
 
+_SHORT_SESSION_MAX_TURNS = 3
+_SHORT_SESSION_MAX_SCHEMA_COLUMNS = 8
+_SHORT_SESSION_MAX_SQL_LEN = 320
+_SHORT_SESSION_MAX_TEXT_LEN = 220
+
 
 def _is_visual_query(text: str) -> bool:
     """判断是否为视觉内容描述类查询，应走向量检索"""
@@ -121,6 +126,240 @@ def _parse_intent(text: str) -> str:
     if len(t) <= 6:
         return "chat"
     return "list"
+
+
+def _truncate_text(value: Any, max_len: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _sanitize_table_names(raw_tables: Any, *, limit: int = 6) -> List[str]:
+    if not isinstance(raw_tables, list):
+        return []
+    tables: List[str] = []
+    for item in raw_tables:
+        text = _truncate_text(item, 64)
+        if text:
+            tables.append(text)
+        if len(tables) >= limit:
+            break
+    return tables
+
+
+def _sanitize_result_schema(raw_schema: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw_schema, list):
+        return []
+    schema: List[Dict[str, str]] = []
+    for item in raw_schema[:_SHORT_SESSION_MAX_SCHEMA_COLUMNS]:
+        if not isinstance(item, dict):
+            continue
+        name = _truncate_text(item.get("name"), 64)
+        if not name:
+            continue
+        schema.append({
+            "name": name,
+            "type": _truncate_text(item.get("type"), 32) or "string",
+        })
+    return schema
+
+
+def _sanitize_short_session_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+
+    sanitized_turns: List[Dict[str, Any]] = []
+    for raw_turn in context.get("recent_turns") or []:
+        if not isinstance(raw_turn, dict):
+            continue
+        question = _truncate_text(raw_turn.get("question"), _SHORT_SESSION_MAX_TEXT_LEN)
+        if not question:
+            continue
+        turn: Dict[str, Any] = {"question": question}
+
+        for key in ("intent", "status", "plan_source"):
+            value = _truncate_text(raw_turn.get(key), 40)
+            if value:
+                turn[key] = value
+
+        answer = _truncate_text(raw_turn.get("answer"), _SHORT_SESSION_MAX_TEXT_LEN)
+        if answer:
+            turn["answer"] = answer
+
+        sql = _truncate_text(raw_turn.get("sql"), _SHORT_SESSION_MAX_SQL_LEN)
+        if sql:
+            turn["sql"] = sql
+
+        row_count = raw_turn.get("row_count")
+        if isinstance(row_count, int) and row_count >= 0:
+            turn["row_count"] = row_count
+
+        schema = _sanitize_result_schema(raw_turn.get("result_schema"))
+        if schema:
+            turn["result_schema"] = schema
+
+        table_names = _sanitize_table_names(raw_turn.get("table_names"))
+        if table_names:
+            turn["table_names"] = table_names
+
+        dataset_id = raw_turn.get("dataset_id")
+        if isinstance(dataset_id, int):
+            turn["dataset_id"] = dataset_id
+
+        sanitized_turns.append(turn)
+        if len(sanitized_turns) >= _SHORT_SESSION_MAX_TURNS:
+            break
+
+    result: Dict[str, Any] = {}
+    if sanitized_turns:
+        result["recent_turns"] = sanitized_turns
+
+    current_dataset_id = context.get("current_dataset_id")
+    if isinstance(current_dataset_id, int):
+        result["current_dataset_id"] = current_dataset_id
+
+    current_table_names = _sanitize_table_names(context.get("current_table_names"))
+    if current_table_names:
+        result["current_table_names"] = current_table_names
+
+    return result
+
+
+def _build_short_session_context_prompt(context: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(context, dict):
+        return ""
+
+    turns = context.get("recent_turns") or []
+    if not turns:
+        return ""
+
+    lines = [
+        "# 短会话上下文",
+        "仅当当前问题明显是在追问上一轮结果时参考以下信息；若当前问题已经完整自洽，应优先按当前问题理解。",
+    ]
+    current_tables = context.get("current_table_names") or []
+    if current_tables:
+        lines.append(f"- 当前显式选择表: {', '.join(current_tables)}")
+
+    for idx, turn in enumerate(turns, 1):
+        lines.append(f"## 最近第{idx}轮")
+        lines.append(f"- 用户问题: {turn.get('question', '')}")
+        if turn.get("intent"):
+            lines.append(f"- 意图: {turn['intent']}")
+        if turn.get("status"):
+            lines.append(f"- 状态: {turn['status']}")
+        if turn.get("plan_source"):
+            lines.append(f"- 规划来源: {turn['plan_source']}")
+        if turn.get("table_names"):
+            lines.append(f"- 使用表: {', '.join(turn['table_names'])}")
+        if turn.get("row_count") is not None:
+            lines.append(f"- 返回行数: {turn['row_count']}")
+        schema_names = [item.get("name") for item in turn.get("result_schema") or [] if item.get("name")]
+        if schema_names:
+            lines.append(f"- 结果字段: {', '.join(schema_names)}")
+        if turn.get("sql"):
+            lines.append(f"- 上轮 SQL: {turn['sql']}")
+        if turn.get("answer"):
+            lines.append(f"- 结果摘要: {turn['answer']}")
+
+    return "\n".join(lines) + "\n\n"
+
+
+def _judge_follow_up_with_llm(
+    question: str,
+    context: Optional[Dict[str, Any]],
+    config: Dict,
+) -> Dict[str, Any]:
+    """使用 LLM 判断当前问题是否依赖最近一轮上下文。"""
+    sanitized_context = _sanitize_short_session_context(context)
+    turns = sanitized_context.get("recent_turns") or []
+    if not turns:
+        return {
+            "sanitized_context": sanitized_context,
+            "is_follow_up": False,
+            "confidence": 0.0,
+            "reason": "no_recent_turns",
+        }
+
+    if not _has_llm_config(config):
+        return {
+            "sanitized_context": sanitized_context,
+            "is_follow_up": False,
+            "confidence": 0.0,
+            "reason": "llm_unavailable",
+        }
+
+    context_prompt = _build_short_session_context_prompt(sanitized_context)
+    try:
+        api_key, url, model, timeout = _get_llm_config(config)
+        system_prompt = (
+            "你是对话上下文判定器。你的任务是判断“当前问题”是否必须依赖最近一轮或最近几轮数据查询上下文才能被正确理解。\n"
+            "如果当前问题本身已经是完整、自洽、可独立执行的数据查询需求，则返回 false。\n"
+            "如果当前问题明显是在延续、修改、筛选、排序、分组、补充上一轮结果或上一轮查询条件，则返回 true。\n"
+            "只能输出 JSON：{\"is_follow_up\":true|false,\"confidence\":0~1,\"reason\":\"...\"}"
+        )
+        user_prompt = (
+            f"{context_prompt}"
+            f"当前问题: {question}\n"
+            "请判断当前问题是否依赖上述上下文。"
+        )
+        obj = _parse_llm_json(_call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt))
+        is_follow_up = bool(obj.get("is_follow_up"))
+        try:
+            confidence = float(obj.get("confidence", 0.7 if is_follow_up else 0.6))
+        except Exception:
+            confidence = 0.7 if is_follow_up else 0.6
+        return {
+            "sanitized_context": sanitized_context,
+            "is_follow_up": is_follow_up,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "reason": _truncate_text(obj.get("reason"), 200) or "llm_follow_up_judge",
+        }
+    except Exception as exc:
+        return {
+            "sanitized_context": sanitized_context,
+            "is_follow_up": False,
+            "confidence": 0.0,
+            "reason": f"llm_follow_up_judge_failed:{str(exc)[:160]}",
+        }
+
+
+def _resolve_question_with_short_session_context(
+    question: str,
+    context: Optional[Dict[str, Any]],
+    config: Dict,
+) -> Dict[str, Any]:
+    judge_result = _judge_follow_up_with_llm(question, context, config)
+    sanitized_context = judge_result.get("sanitized_context") or {}
+    turns = sanitized_context.get("recent_turns") or []
+    latest_turn = turns[-1] if turns else None
+    follow_up = bool(judge_result.get("is_follow_up"))
+
+    effective_question = question
+    if follow_up and latest_turn and latest_turn.get("question"):
+        effective_question = f"{latest_turn['question']}；补充要求：{question}"
+
+    resolved: Dict[str, Any] = {
+        "sanitized_context": sanitized_context,
+        "recent_turn_count": len(turns),
+        "context_applied": follow_up,
+        "effective_question": effective_question,
+        "context_prompt": _build_short_session_context_prompt(sanitized_context) if follow_up else "",
+        "context_judge": {
+            "is_follow_up": follow_up,
+            "confidence": judge_result.get("confidence", 0.0),
+            "reason": judge_result.get("reason", ""),
+        },
+    }
+
+    if latest_turn:
+        if latest_turn.get("question"):
+            resolved["reference_question"] = latest_turn["question"]
+        if latest_turn.get("table_names"):
+            resolved["reference_tables"] = latest_turn["table_names"]
+
+    return resolved
 
 
 def _normalize_table_policy(raw_policy: Any) -> Dict[str, Any]:
@@ -235,169 +474,6 @@ def _choose_fallback_tables_by_policy(fallback_tables: List[str], policy: Dict[s
         except Exception:
             pass
     return tables[:1]
-
-
-def _string_overlap_score(a: str, b: str) -> float:
-    """字符串相似度评分（0~1），兼容中英文列名/短语"""
-    a_norm = _normalize_name_for_match(a)
-    b_norm = _normalize_name_for_match(b)
-    if not a_norm or not b_norm:
-        return 0.0
-    if a_norm == b_norm:
-        return 1.0
-    if a_norm in b_norm or b_norm in a_norm:
-        return 0.86
-    set_a = set(a_norm)
-    set_b = set(b_norm)
-    union = len(set_a | set_b)
-    if union == 0:
-        return 0.0
-    return len(set_a & set_b) / union
-
-
-def _column_match_score(column_name: str, hint: str) -> float:
-    """列名与查询提示词匹配分数（0~1）"""
-    col = str(column_name or "")
-    h = str(hint or "")
-    if not col or not h:
-        return 0.0
-    col_lower = col.lower()
-    h_lower = h.lower()
-    if col_lower == h_lower:
-        return 1.0
-    if h_lower in col_lower or col_lower in h_lower:
-        return 0.92
-    score = _string_overlap_score(col, h)
-
-    semantic_groups = [
-        (["月", "月份", "账期", "month", "date", "时间", "日期"], ["month", "ym", "date", "time", "day", "year", "账期", "月份", "日期", "时间"]),
-        (["省", "省份", "省分", "城市", "地区", "prov", "city"], ["省", "省分", "省份", "prov", "city", "地区"]),
-        (["渠道", "channel"], ["渠道", "channel"]),
-        (["产品", "product", "prod"], ["产品", "prod", "product"]),
-        (["用户", "账号", "acct", "user"], ["用户", "账号", "acct", "user"]),
-    ]
-    for hint_tokens, col_tokens in semantic_groups:
-        if any(token in h_lower for token in hint_tokens) and any(token in col_lower for token in col_tokens):
-            score = max(score, 0.82)
-
-    return score
-
-
-def _is_numeric_type(column_type: str) -> bool:
-    """判断字段类型是否为数值型"""
-    dt = str(column_type or "").upper()
-    return any(k in dt for k in ["INT", "DOUBLE", "FLOAT", "DECIMAL", "NUMERIC", "REAL"])
-
-
-def _is_metric_like_column(column_name: str) -> bool:
-    """根据列名判断是否度量/指标字段"""
-    name = str(column_name or "").lower()
-    metric_tokens = [
-        "fee", "amount", "revenue", "income", "cost", "price", "value", "cnt", "count", "num",
-        "收入", "金额", "费用", "计费", "出账", "折扣", "调账", "流量", "语音", "短信", "数量", "使用量",
-    ]
-    return any(token in name for token in metric_tokens)
-
-
-def _extract_dimension_hints(text: str) -> List[str]:
-    """从问题中提取维度提示词（用于 GROUP BY / JOIN 对齐）"""
-    q = (text or "").strip()
-    if not q:
-        return []
-
-    hints: List[str] = []
-
-    for pattern in [
-        r"(?:按|各|每)\s*([^\s，。,.]{1,24})",
-        r"(?:相同|同)\s*([^\s，。,.和与及]{1,16})",
-    ]:
-        for raw in re.findall(pattern, q):
-            cand = (raw or "").strip(" ，。,.、")
-            if not cand:
-                continue
-            # 截断语义尾巴，保留维度核心短语
-            for cut_word in ["的", "进行", "统计", "汇总", "分析", "收入", "金额", "用户数", "数量", "分布", "差异", "对比", "明细", "记录"]:
-                idx = cand.find(cut_word)
-                if idx > 0:
-                    cand = cand[:idx]
-            cand = cand.strip()
-            if cand:
-                hints.append(cand)
-
-    # 显式时间/地域语义提示
-    q_lower = q.lower()
-    if any(k in q_lower for k in ["月份", "按月", "月度", "month", "账期"]):
-        hints.append("月份")
-    if any(k in q for k in ["省", "省份", "省分", "地区", "城市"]):
-        hints.append("省份")
-    if "渠道" in q:
-        hints.append("渠道")
-    if "产品" in q:
-        hints.append("产品")
-
-    # 去重保序
-    return list(dict.fromkeys([h for h in hints if h]))
-
-
-def _pick_metric_column(
-    columns: List[str],
-    question: str,
-    *,
-    prefer_amount: bool = False,
-    prefer_count_metric: bool = False,
-) -> Optional[str]:
-    """通用指标字段选择（基于 schema + 问句语义）"""
-    if not columns:
-        return None
-    q = (question or "").lower()
-    scored: List[Tuple[float, str]] = []
-
-    amount_hints = ["收入", "金额", "费用", "计费", "出账", "fee", "amount", "revenue", "income", "cost", "price"]
-    count_hints = ["用户数", "数量", "条数", "记录数", "个数", "count", "cnt", "num", "user", "acct"]
-
-    for col in columns:
-        col_text = str(col or "")
-        if not col_text:
-            continue
-        col_lower = col_text.lower()
-        score = 0.0
-
-        if _is_metric_like_column(col_text):
-            score += 0.25
-        if "id" == col_lower or col_lower.endswith("_id"):
-            score -= 0.2
-        if col_lower.startswith("rsrv_"):
-            score -= 0.3
-
-        score += _column_match_score(col_text, q) * 0.9
-
-        if prefer_amount or any(k in q for k in amount_hints):
-            score += max((_column_match_score(col_text, hint) for hint in amount_hints), default=0.0) * 0.9
-        if prefer_count_metric or any(k in q for k in count_hints):
-            score += max((_column_match_score(col_text, hint) for hint in count_hints), default=0.0) * 0.8
-
-        if score > 0:
-            scored.append((score, col_text))
-
-    if not scored:
-        return None
-    scored.sort(key=lambda x: (-x[0], len(x[1])))
-    return scored[0][1]
-
-
-def _detect_aggregation_mode(text: str) -> str:
-    """识别聚合模式：count/sum/avg/max/min"""
-    q = (text or "").lower()
-    if any(k in q for k in ["平均", "均值", "avg"]):
-        return "avg"
-    if any(k in q for k in ["最大", "最高", "max"]):
-        return "max"
-    if any(k in q for k in ["最小", "最低", "min"]):
-        return "min"
-    if any(k in q for k in ["记录数", "条数", "多少条", "多少行", "count", "数量", "多少", "个数"]):
-        if not any(k in q for k in ["收入", "金额", "费用", "fee", "amount", "revenue", "income"]):
-            return "count"
-    return "sum"
 
 
 def _get_table_schema(table_name: str) -> List[Dict]:
@@ -625,7 +701,8 @@ def _build_nl2dsl_system_prompt(schema_prompt: str, table_scope_hint: str = "", 
         "5. joins 的 left/right 使用 table.column 形式。\n"
         "6. select/group_by/order_by/where 的 column 均使用原字段名或 table.column。\n"
         "7. 必须输出 table_policy：mode 仅允许 auto/exact/all；mode=exact 时必须提供 count>0。\n"
-        "8. 若问题有明确表数量要求，table_policy 必须表达该要求，且 tables 与之匹配。\n\n"
+        "8. 若问题有明确表数量要求，table_policy 必须表达该要求，且 tables 与之匹配。\n"
+        "9. 若用户当前问题是对上一轮结果的追问，可结合短会话上下文补全语义；若当前问题已经自洽，以当前问题为准。\n\n"
         f"# intent 提示\n用户问题倾向: {intent_hint}\n\n"
         "# DSL JSON Schema\n"
         '{'
@@ -656,7 +733,8 @@ def _build_sql_from_dsl_system_prompt(schema_prompt: str, table_scope_hint: str 
         "2. 只能使用 DSL 中 tables/joins/select/where/group_by/order_by/limit 指定的信息。\n"
         "3. where 的值必须使用 ? 占位符，params 顺序与 SQL 占位符一致。\n"
         "4. 不要补充 DSL 未要求的过滤条件或 join。\n"
-        "5. 若无法生成可执行 SQL，输出空 sql（由上层触发重试）。\n\n"
+        "5. 若当前问题是上一轮结果的追问，可参考短会话上下文，但不得违背 DSL 的约束。\n"
+        "6. 若无法生成可执行 SQL，输出空 sql（由上层触发重试）。\n\n"
         "# 输出格式\n"
         '{"intent":"count|list","sql":"...","params":[...],"filters":{}}'
     )
@@ -963,6 +1041,7 @@ def _call_deepseek_nl2dsl(
     db_path: str,
     table_names: Optional[List[str]],
     intent_hint: str,
+    context_prompt: str = "",
 ) -> Dict[str, Any]:
     """调用 LLM 生成 DSL"""
     from app.services.schema_meta import build_schema_prompt
@@ -984,7 +1063,8 @@ def _call_deepseek_nl2dsl(
 
     system_prompt = _build_nl2dsl_system_prompt(schema_prompt, table_scope_hint=table_scope_hint, intent_hint=intent_hint)
     selected_tables_hint = f"\n候选表: {', '.join(selected_tables)}" if selected_tables else ""
-    user_prompt = f"问题: {question}{selected_tables_hint}\n请输出 DSL JSON。"
+    context_block = f"{context_prompt}" if context_prompt else ""
+    user_prompt = f"{context_block}问题: {question}{selected_tables_hint}\n请输出 DSL JSON。"
     content = _call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt)
     raw_obj = _parse_llm_json(content)
     return _normalize_dsl(
@@ -1001,6 +1081,7 @@ def _call_deepseek_nl2dsl_with_retry(
     table_names: Optional[List[str]],
     allowed_tables: List[str],
     intent_hint: str,
+    context_prompt: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """调用 LLM 生成 DSL，失败自动重试"""
     llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
@@ -1025,6 +1106,7 @@ def _call_deepseek_nl2dsl_with_retry(
                 db_path=db_path,
                 table_names=table_names,
                 intent_hint=intent_hint,
+                context_prompt=context_prompt,
             )
             dsl_errors = _validate_dsl(dsl, allowed_tables=allowed_tables)
             if dsl_errors:
@@ -1060,6 +1142,7 @@ def _call_deepseek_sql_from_dsl(
     db_path: str,
     table_names: Optional[List[str]],
     error_feedback: str = "",
+    context_prompt: str = "",
 ) -> QueryPlan:
     """调用 LLM 基于 DSL 生成 SQL"""
     from app.services.schema_meta import build_schema_prompt
@@ -1082,7 +1165,9 @@ def _call_deepseek_sql_from_dsl(
     system_prompt = _build_sql_from_dsl_system_prompt(schema_prompt, table_scope_hint=table_scope_hint)
     feedback_block = f"\n上轮失败原因: {error_feedback}\n" if error_feedback else ""
     selected_tables_hint = f"\n候选表: {', '.join(selected_tables)}" if selected_tables else ""
+    context_block = f"{context_prompt}" if context_prompt else ""
     user_prompt = (
+        f"{context_block}"
         f"用户问题: {question}\n"
         f"{selected_tables_hint}\n"
         f"DSL: {json.dumps(dsl, ensure_ascii=False)}\n"
@@ -1119,6 +1204,7 @@ def _call_deepseek_sql_from_dsl_with_retry(
     db_path: str,
     table_names: Optional[List[str]],
     allowed_tables: Optional[List[str]],
+    context_prompt: str = "",
 ) -> Tuple[Optional[QueryPlan], Dict[str, Any]]:
     """调用 LLM 基于 DSL 生成 SQL 并重试"""
     llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
@@ -1145,6 +1231,7 @@ def _call_deepseek_sql_from_dsl_with_retry(
                 db_path=db_path,
                 table_names=table_names,
                 error_feedback=feedback,
+                context_prompt=context_prompt,
             )
             if not _is_plan_sql_valid(plan, allowed_tables=allowed_tables):
                 raise RuntimeError("SQL 安全校验失败")
@@ -1231,25 +1318,6 @@ def _is_generic_list_sql(sql: str) -> bool:
     return True
 
 
-def _is_explicit_raw_list_request(question: str) -> bool:
-    """用户是否明确要求原始明细列表"""
-    q = (question or "").strip()
-    if any(hint in q for hint in _RAW_LIST_HINTS):
-        return True
-    if re.search(r"(前|最近)\s*\d+\s*条", q, flags=re.IGNORECASE):
-        return True
-    return False
-
-
-def _should_reject_generic_list(question: str, plan: QueryPlan) -> bool:
-    """是否应拒绝执行通用兜底明细 SQL"""
-    return (
-        plan.intent == "list"
-        and _is_generic_list_sql(plan.sql)
-        and not _is_explicit_raw_list_request(question)
-    )
-
-
 def _build_reject_plan(intent: str, reason: str, llm_error: str = "") -> QueryPlan:
     """构建拒绝执行的查询计划（用于返回可读错误）"""
     filters: Dict[str, Any] = {
@@ -1259,6 +1327,137 @@ def _build_reject_plan(intent: str, reason: str, llm_error: str = "") -> QueryPl
     if llm_error:
         filters["llm_error"] = llm_error[:200]
     return QueryPlan(intent=intent or "list", sql="", params=[], filters=filters)
+
+
+def _match_tables_to_candidates(raw_tables: Optional[List[str]], candidate_tables: List[str]) -> List[str]:
+    """将原始表名列表映射回当前候选表集合"""
+    if not raw_tables or not candidate_tables:
+        return []
+
+    normalized_candidates: Dict[str, str] = {}
+    for table in candidate_tables:
+        key = _normalize_name_for_match(_normalize_table_name(str(table)))
+        if key and key not in normalized_candidates:
+            normalized_candidates[key] = str(table)
+
+    resolved: List[str] = []
+    for raw_table in raw_tables:
+        key = _normalize_name_for_match(_normalize_table_name(str(raw_table)))
+        if key and key in normalized_candidates:
+            resolved.append(normalized_candidates[key])
+    return list(dict.fromkeys(resolved))
+
+
+def _resolve_source_tables_for_plan(plan: QueryPlan, candidate_tables: List[str]) -> List[str]:
+    """尽量从计划本身推断实际命中的来源表"""
+    filters = dict(plan.filters or {})
+    verified_scope = filters.get("verified_query_table_scope")
+    if isinstance(verified_scope, list):
+        resolved_scope = _match_tables_to_candidates(verified_scope, candidate_tables)
+        if resolved_scope:
+            return resolved_scope
+
+    try:
+        from app.services.evidence import extract_tables_from_sql
+
+        sql_tables = extract_tables_from_sql(plan.sql or "")
+    except Exception:
+        sql_tables = []
+    return _match_tables_to_candidates(sql_tables, candidate_tables)
+
+
+def _try_build_verified_query_plan(question: str, parsed_intent: str, candidate_tables: List[str]) -> Optional[QueryPlan]:
+    """优先命中已验证查询模板，命中成功则直接返回计划"""
+    if parsed_intent not in {"list", "count"} or not candidate_tables:
+        return None
+
+    from app.services.verified_queries import match_verified_query
+
+    matched = match_verified_query(question, selected_tables=candidate_tables)
+    if not matched:
+        return None
+
+    intent = str(matched.get("intent") or parsed_intent or "list").lower()
+    if intent not in {"list", "count"}:
+        intent = parsed_intent if parsed_intent in {"list", "count"} else "list"
+
+    sql = matched.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        print("[build_query_plan] 命中 verified query，但 SQL 为空，回退 LLM 轨道")
+        return None
+
+    params = matched.get("params")
+    if not isinstance(params, list):
+        params = []
+
+    filters = matched.get("filters") if isinstance(matched.get("filters"), dict) else {}
+    plan = _auto_correct_intent(
+        QueryPlan(intent=intent, sql=sql.strip(), params=params, filters=dict(filters))
+    )
+    plan.filters.setdefault("agent_mode", "verified_query")
+
+    if not _is_plan_sql_valid(plan, allowed_tables=candidate_tables):
+        print("[build_query_plan] 命中 verified query，但 SQL 安全校验失败，回退 LLM 轨道")
+        return None
+    if not _is_plan_sql_precheck_ok(plan):
+        print("[build_query_plan] 命中 verified query，但 SQL 预检失败，回退 LLM 轨道")
+        return None
+
+    return plan
+
+
+def _try_build_sql_cache_plan(question: str, parsed_intent: str, candidate_tables: List[str]) -> Optional[QueryPlan]:
+    """尝试命中长期 SQL 缓存。"""
+    if parsed_intent not in {"list", "count"} or not candidate_tables:
+        return None
+
+    from app.services.trace import get_trace_manager
+
+    manager = get_trace_manager()
+    if not manager:
+        return None
+
+    cached = manager.lookup_sql_cache(question, table_scope=candidate_tables, mark_hit=False)
+    if not cached:
+        return None
+
+    cached_intent = str(cached.get("intent") or parsed_intent or "list").lower()
+    if cached_intent not in {"list", "count"}:
+        cached_intent = parsed_intent if parsed_intent in {"list", "count"} else "list"
+
+    sql = cached.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        return None
+
+    params = cached.get("sql_params")
+    if not isinstance(params, list):
+        params = []
+
+    plan = _auto_correct_intent(
+        QueryPlan(
+            intent=cached_intent,
+            sql=sql.strip(),
+            params=params,
+            filters={
+                "sql_cache_hit": True,
+                "sql_cache_question_sample": cached.get("question_sample"),
+                "sql_cache_hit_count": int(cached.get("hit_count") or 0),
+            },
+        )
+    )
+    plan.filters.setdefault("agent_mode", "sql_cache")
+
+    if not _is_plan_sql_valid(plan, allowed_tables=candidate_tables):
+        manager.invalidate_sql_cache(str(cached.get("question_hash") or ""))
+        print("[build_query_plan] 命中 sql_cache，但 SQL 安全校验失败，已移除缓存并回退 LLM 轨道")
+        return None
+    if not _is_plan_sql_precheck_ok(plan):
+        manager.invalidate_sql_cache(str(cached.get("question_hash") or ""))
+        print("[build_query_plan] 命中 sql_cache，但 SQL 预检失败，已移除缓存并回退 LLM 轨道")
+        return None
+
+    manager.mark_sql_cache_hit(str(cached.get("question_hash") or ""))
+    return plan
 
 
 def _with_plan_context(
@@ -1293,6 +1492,40 @@ def _with_plan_context(
     return plan
 
 
+def _apply_short_session_metadata(plan: QueryPlan, session_meta: Optional[Dict[str, Any]]) -> QueryPlan:
+    """将短会话上下文命中信息写入计划 filters，便于审计与前端展示。"""
+    if not isinstance(session_meta, dict):
+        return plan
+
+    filters = dict(plan.filters or {})
+    turn_count = session_meta.get("recent_turn_count")
+    if isinstance(turn_count, int) and turn_count > 0:
+        filters["context_turn_count"] = turn_count
+
+    context_judge = session_meta.get("context_judge")
+    if isinstance(context_judge, dict):
+        filters["context_judge"] = {
+            "is_follow_up": bool(context_judge.get("is_follow_up")),
+            "confidence": context_judge.get("confidence", 0.0),
+            "reason": _truncate_text(context_judge.get("reason"), 200),
+        }
+
+    if session_meta.get("context_applied"):
+        filters["context_applied"] = True
+        resolved_question = _truncate_text(session_meta.get("effective_question"), 320)
+        if resolved_question:
+            filters["resolved_question"] = resolved_question
+        reference_question = _truncate_text(session_meta.get("reference_question"), 220)
+        if reference_question:
+            filters["context_reference_question"] = reference_question
+        reference_tables = _sanitize_table_names(session_meta.get("reference_tables"))
+        if reference_tables:
+            filters["context_reference_tables"] = reference_tables
+
+    plan.filters = filters
+    return plan
+
+
 def _auto_correct_intent(plan: QueryPlan) -> QueryPlan:
     """根据 SQL 内容自动纠正 intent"""
     sql_upper = (plan.sql or "").upper()
@@ -1304,7 +1537,7 @@ def _auto_correct_intent(plan: QueryPlan) -> QueryPlan:
     return plan
 
 
-def _run_intent_agent(question: str, config: Dict) -> Dict[str, Any]:
+def _run_intent_agent(question: str, config: Dict, context_prompt: str = "") -> Dict[str, Any]:
     """Intent Agent：优先使用 LLM 识别意图，失败回退轻量规则"""
     fallback_intent = _parse_intent(question)
     if not _has_llm_config(config):
@@ -1321,9 +1554,10 @@ def _run_intent_agent(question: str, config: Dict) -> Dict[str, Any]:
             "你是意图识别 Agent。请将用户问题识别为下列四类之一：chat/search/list/count。\n"
             "注意：search 仅用于视觉内容检索（如图片、照片、相似图检索），\n"
             "涉及数据库表/字段/统计/对比/金额/收入/账期等结构化数据问题必须归类为 list 或 count。\n"
+            "若用户当前提问明显是在追问上一轮结果，可结合短会话上下文补全理解；若当前问题已经完整自洽，以当前问题为准。\n"
             "仅输出 JSON：{\"intent\":\"chat|search|list|count\",\"confidence\":0~1,\"reason\":\"...\"}"
         )
-        user_prompt = f"问题: {question}"
+        user_prompt = f"{context_prompt}问题: {question}"
         obj = _parse_llm_json(_call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt))
         intent = str(obj.get("intent") or fallback_intent).lower()
         if intent not in {"chat", "search", "list", "count"}:
@@ -1392,58 +1626,76 @@ def _run_reviewer_agent(
     }
 
 
-def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: List[str] = None) -> QueryPlan:
+def build_query_plan(
+    text: str,
+    config: Dict,
+    db_path: str = None,
+    table_names: List[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> QueryPlan:
     """Multi-Agent 协同：Intent -> Coder -> Reviewer -> Self-Correction"""
+    session_meta = _resolve_question_with_short_session_context(text, context, config)
+    planning_text = str(session_meta.get("effective_question") or text)
+    context_prompt = str(session_meta.get("context_prompt") or "")
     resolved_tables = _resolve_candidate_tables(table_names)
-    intent_meta = _run_intent_agent(text, config)
+    intent_meta = _run_intent_agent(planning_text, config, context_prompt=context_prompt)
     parsed_intent = str(intent_meta.get("intent") or "list")
 
     # chat/search 非 SQL 场景，直接返回
     if parsed_intent == "chat":
-        return QueryPlan(
-            intent="chat",
-            sql="",
-            params=[],
-            filters={
-                "plan_source": "llm",
-                "agent_mode": "multi_agent",
-                "confidence": float(intent_meta.get("confidence", 1.0)),
-                "intent_agent": intent_meta,
-            },
+        return _apply_short_session_metadata(
+            QueryPlan(
+                intent="chat",
+                sql="",
+                params=[],
+                filters={
+                    "plan_source": "llm",
+                    "agent_mode": "multi_agent",
+                    "confidence": float(intent_meta.get("confidence", 1.0)),
+                    "intent_agent": intent_meta,
+                },
+            ),
+            session_meta,
         )
     if parsed_intent == "search":
-        top_k = _parse_top_k(text, default=10)
-        return QueryPlan(
-            intent="search",
-            sql="",
-            params=[],
-            filters={
-                "query_text": text,
-                "top_k": top_k,
-                "plan_source": "llm",
-                "agent_mode": "multi_agent",
-                "confidence": float(intent_meta.get("confidence", 1.0)),
-                "intent_agent": intent_meta,
-            },
+        top_k = _parse_top_k(planning_text, default=10)
+        return _apply_short_session_metadata(
+            QueryPlan(
+                intent="search",
+                sql="",
+                params=[],
+                filters={
+                    "query_text": planning_text,
+                    "top_k": top_k,
+                    "plan_source": "llm",
+                    "agent_mode": "multi_agent",
+                    "confidence": float(intent_meta.get("confidence", 1.0)),
+                    "intent_agent": intent_meta,
+                },
+            ),
+            session_meta,
         )
 
     if not resolved_tables:
         reject_reason = "未找到可查询的数据表：请先选择数据表，或检查数据集文件是否已成功加载"
         reject_plan = _build_reject_plan(parsed_intent, reject_reason)
-        return _with_plan_context(
-            reject_plan,
-            selected_table=None,
-            candidate_tables=[],
-            candidate_table_ranking=[],
-            table_selection_reason="",
-            plan_source="reject",
-            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=None,
+                candidate_tables=[],
+                candidate_table_ranking=[],
+                table_selection_reason="",
+                plan_source="reject",
+                semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     default_table = None
     table_selection_reason = ""
-    ranked_tables = _rank_candidate_tables(text, resolved_tables, parsed_intent)
+    ranked_tables = _rank_candidate_tables(planning_text, resolved_tables, parsed_intent)
     if ranked_tables:
         default_table = ranked_tables[0].get("table")
         table_selection_reason = ranked_tables[0].get("reason", "")
@@ -1457,6 +1709,74 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
         if score_gap <= 6 and int(top1.get("score", 0)) < 35:
             print(f"[build_query_plan] 多表歧义提醒：top1 与 top2 分差仅 {score_gap}，继续 LLM-DSL 生成")
 
+    verified_plan = _try_build_verified_query_plan(planning_text, parsed_intent, resolved_tables)
+    if verified_plan:
+        source_tables = _resolve_source_tables_for_plan(verified_plan, resolved_tables)
+        if source_tables:
+            final_filters = dict(verified_plan.filters or {})
+            final_filters["source_tables"] = source_tables
+            verified_plan.filters = final_filters
+
+        selected_table = source_tables[0] if source_tables else default_table
+        verified_name = (
+            (verified_plan.filters or {}).get("verified_query_name")
+            or (verified_plan.filters or {}).get("verified_query_id")
+            or "unnamed"
+        )
+        verified_reason = f"命中已验证查询模板: {verified_name}"
+        judge_result = {
+            "winner": "verified_query",
+            "confidence": 1.0,
+            "reason": verified_reason,
+            "intent_agent": intent_meta,
+        }
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                verified_plan,
+                selected_table=selected_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=verified_reason,
+                plan_source="verified_query",
+                semantic_judge=judge_result,
+                confidence=1.0,
+            ),
+            session_meta,
+        )
+
+    cached_plan = _try_build_sql_cache_plan(planning_text, parsed_intent, resolved_tables)
+    if cached_plan:
+        source_tables = _resolve_source_tables_for_plan(cached_plan, resolved_tables)
+        if source_tables:
+            final_filters = dict(cached_plan.filters or {})
+            final_filters["source_tables"] = source_tables
+            cached_plan.filters = final_filters
+
+        selected_table = source_tables[0] if source_tables else default_table
+        hit_count = int((cached_plan.filters or {}).get("sql_cache_hit_count") or 0)
+        cache_confidence = max(0.82, min(0.97, 0.86 + 0.02 * min(hit_count, 5)))
+        cache_reason = "命中长期 SQL 缓存，直接复用历史成功查询"
+        judge_result = {
+            "winner": "sql_cache",
+            "confidence": cache_confidence,
+            "reason": cache_reason,
+            "intent_agent": intent_meta,
+            "sql_cache_hit_count": hit_count,
+        }
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                cached_plan,
+                selected_table=selected_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=cache_reason,
+                plan_source="sql_cache",
+                semantic_judge=judge_result,
+                confidence=cache_confidence,
+            ),
+            session_meta,
+        )
+
     llm_cfg = config.get("llm", {})
     llm_enabled = llm_cfg.get("enabled", True)
     llm_available = llm_enabled and _has_llm_config(config)
@@ -1464,40 +1784,47 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
     if not llm_enabled:
         reject_reason = "当前策略要求必须由 LLM 生成 SQL，但 LLM 已禁用"
         reject_plan = _build_reject_plan(parsed_intent, reject_reason)
-        return _with_plan_context(
-            reject_plan,
-            selected_table=default_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="reject",
-            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=default_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="reject",
+                semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     if not llm_available:
         reject_reason = "当前策略要求必须由 LLM 生成 SQL，但 LLM 配置不可用"
         reject_plan = _build_reject_plan(parsed_intent, reject_reason)
-        return _with_plan_context(
-            reject_plan,
-            selected_table=default_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="reject",
-            semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=default_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="reject",
+                semantic_judge={"winner": "reject", "confidence": 1.0, "reason": reject_reason},
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     allowed_tables = resolved_tables if resolved_tables else []
 
     dsl_plan, dsl_retry_meta = _call_deepseek_nl2dsl_with_retry(
-        text,
+        planning_text,
         config,
         db_path or "",
         table_names=resolved_tables,
         allowed_tables=allowed_tables,
         intent_hint=parsed_intent,
+        context_prompt=context_prompt,
     )
     if not dsl_plan:
         dsl_errors = dsl_retry_meta.get("errors", [])
@@ -1511,24 +1838,28 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
         }
         if dsl_retry_meta:
             judge_result["dsl_retry"] = dsl_retry_meta
-        return _with_plan_context(
-            reject_plan,
-            selected_table=default_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="reject",
-            semantic_judge=judge_result,
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=default_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="reject",
+                semantic_judge=judge_result,
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     llm_plan, sql_retry_meta = _call_deepseek_sql_from_dsl_with_retry(
-        question=text,
+        question=planning_text,
         dsl=dsl_plan,
         config=config,
         db_path=db_path or "",
         table_names=resolved_tables,
         allowed_tables=allowed_tables,
+        context_prompt=context_prompt,
     )
     if not llm_plan:
         sql_errors = sql_retry_meta.get("errors", [])
@@ -1544,15 +1875,18 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
             judge_result["dsl_retry"] = dsl_retry_meta
         if sql_retry_meta:
             judge_result["sql_retry"] = sql_retry_meta
-        return _with_plan_context(
-            reject_plan,
-            selected_table=default_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="reject",
-            semantic_judge=judge_result,
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=default_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="reject",
+                semantic_judge=judge_result,
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     selected_table = default_table
@@ -1563,7 +1897,7 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
     reviewer_result = _run_reviewer_agent(
         llm_plan,
         dsl=dsl_plan,
-        question=text,
+        question=planning_text,
         allowed_tables=allowed_tables,
     )
 
@@ -1574,11 +1908,11 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
         correction_attempts = 2
         for idx in range(correction_attempts):
             try:
-                corrected_plan = call_llm_fix_sql(text, final_plan.sql, correction_error, config, db_path=db_path)
+                corrected_plan = call_llm_fix_sql(planning_text, final_plan.sql, correction_error, config, db_path=db_path)
                 corrected_review = _run_reviewer_agent(
                     corrected_plan,
                     dsl=dsl_plan,
-                    question=text,
+                    question=planning_text,
                     allowed_tables=allowed_tables,
                 )
                 self_correction_records.append(
@@ -1617,15 +1951,18 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
             "reviewer": reviewer_result,
             "self_correction": self_correction_records,
         }
-        return _with_plan_context(
-            reject_plan,
-            selected_table=selected_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="reject",
-            semantic_judge=judge_result,
-            confidence=0.0,
+        return _apply_short_session_metadata(
+            _with_plan_context(
+                reject_plan,
+                selected_table=selected_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="reject",
+                semantic_judge=judge_result,
+                confidence=0.0,
+            ),
+            session_meta,
         )
 
     judge_result = {
@@ -1645,15 +1982,18 @@ def build_query_plan(text: str, config: Dict, db_path: str = None, table_names: 
 
     final_plan = _auto_correct_intent(final_plan)
     return _auto_correct_intent(
-        _with_plan_context(
-            final_plan,
-            selected_table=selected_table,
-            candidate_tables=resolved_tables,
-            candidate_table_ranking=ranked_tables,
-            table_selection_reason=table_selection_reason,
-            plan_source="llm",
-            semantic_judge=judge_result,
-            confidence=float(judge_result.get("confidence", 0.8)),
+        _apply_short_session_metadata(
+            _with_plan_context(
+                final_plan,
+                selected_table=selected_table,
+                candidate_tables=resolved_tables,
+                candidate_table_ranking=ranked_tables,
+                table_selection_reason=table_selection_reason,
+                plan_source="llm",
+                semantic_judge=judge_result,
+                confidence=float(judge_result.get("confidence", 0.8)),
+            ),
+            session_meta,
         )
     )
 

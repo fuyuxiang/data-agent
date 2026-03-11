@@ -24,6 +24,7 @@ from app.services.guardrails import SQLGuardrail
 class AgentState(TypedDict):
     """Agent 执行状态"""
     question: str
+    resolved_question: Optional[str]
     intent: Optional[str]
     sql: Optional[str]
     sql_params: Optional[List]
@@ -43,6 +44,7 @@ class AgentState(TypedDict):
     logs: List[Dict]
     _run_id: str
     selected_tables: Optional[List[str]]
+    request_context: Optional[Dict[str, Any]]
 
 
 # ==================== 日志辅助 ====================
@@ -164,6 +166,7 @@ def parse_question_node(state: AgentState) -> AgentState:
     history_input = {
         "question": question,
         "selected_tables": state.get("selected_tables") or [],
+        "context_turn_count": len((state.get("request_context") or {}).get("recent_turns") or []),
     }
     logger.start_node("parse_question", {"question": question[:100]})
 
@@ -177,12 +180,21 @@ def parse_question_node(state: AgentState) -> AgentState:
             state["selected_tables"] = []
 
         config = {"llm": {"enabled": True}}  # 启用 LLM
-        plan = build_query_plan(question, config, table_names=selected_tables)
+        plan = build_query_plan(
+            question,
+            config,
+            table_names=selected_tables,
+            context=state.get("request_context"),
+        )
 
         state["intent"] = plan.intent
         state["sql"] = plan.sql
         state["sql_params"] = plan.params
         state["filters"] = plan.filters
+        filters = plan.filters if isinstance(plan.filters, dict) else {}
+        resolved_question = filters.get("resolved_question")
+        if isinstance(resolved_question, str) and resolved_question.strip():
+            state["resolved_question"] = resolved_question
 
         if not selected_tables and plan.intent not in {"chat", "search"}:
             err_msg = "未找到可查询的数据表：请先选择数据表，或检查数据集文件是否已成功加载"
@@ -237,6 +249,8 @@ def parse_question_node(state: AgentState) -> AgentState:
                 "intent": plan.intent,
                 "plan_source": (plan.filters or {}).get("plan_source", "rule"),
                 "selected_table": (plan.filters or {}).get("selected_table"),
+                "resolved_question": (plan.filters or {}).get("resolved_question"),
+                "context_applied": bool((plan.filters or {}).get("context_applied")),
             },
         )
 
@@ -512,13 +526,14 @@ def fix_sql_node(state: AgentState) -> AgentState:
         )
 
         question = state["question"]
+        resolved_question = state.get("resolved_question") or question
         failed_sql = state.get("sql", "") or ""
         error_msg = state.get("error_message", "") or "SQL 执行失败"
 
         plan = None
         if _has_llm_config(config):
             try:
-                llm_fixed = call_llm_fix_sql(question, failed_sql, error_msg, config)
+                llm_fixed = call_llm_fix_sql(resolved_question, failed_sql, error_msg, config)
                 if (
                     _is_plan_sql_valid(llm_fixed, allowed_tables=allowed_tables or None)
                     and _is_plan_sql_precheck_ok(llm_fixed)
@@ -529,7 +544,12 @@ def fix_sql_node(state: AgentState) -> AgentState:
 
         if plan is None:
             # 降级到规则引擎重新生成
-            plan = build_query_plan(question, config, table_names=selected_tables)
+            plan = build_query_plan(
+                question,
+                config,
+                table_names=selected_tables,
+                context=state.get("request_context"),
+            )
 
         if not plan.sql:
             raise RuntimeError("SQL 修正后为空")
@@ -822,7 +842,12 @@ class LangGraphOrchestrator:
     def __init__(self):
         self.graph = build_graph().compile()
 
-    def stream_events(self, question: str, selected_tables: Optional[List[str]] = None):
+    def stream_events(
+        self,
+        question: str,
+        selected_tables: Optional[List[str]] = None,
+        request_context: Optional[Dict[str, Any]] = None,
+    ):
         """流式输出"""
         import json
         from datetime import datetime
@@ -832,6 +857,7 @@ class LangGraphOrchestrator:
 
         initial_state: AgentState = {
             "question": question,
+            "resolved_question": None,
             "intent": None,
             "sql": None,
             "sql_params": None,
@@ -846,7 +872,8 @@ class LangGraphOrchestrator:
             "execution_history": [],
             "logs": [],
             "_run_id": run_id,
-            "selected_tables": selected_tables
+            "selected_tables": selected_tables,
+            "request_context": request_context,
         }
 
         yield f"data: {json.dumps({'type': 'run_start', 'run_id': run_id, 'question': question[:100], 'ts': datetime.utcnow().isoformat() + 'Z'}, ensure_ascii=False)}\n\n"
@@ -900,13 +927,19 @@ class LangGraphOrchestrator:
 
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
-    def run_stream(self, question: str, selected_tables: Optional[List[str]] = None) -> Dict[str, Any]:
+    def run_stream(
+        self,
+        question: str,
+        selected_tables: Optional[List[str]] = None,
+        request_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """非流式运行"""
         run_id = str(uuid.uuid4())[:8]
         logger = _get_logger(run_id)
 
         initial_state: AgentState = {
             "question": question,
+            "resolved_question": None,
             "intent": None,
             "sql": None,
             "sql_params": None,
@@ -921,7 +954,8 @@ class LangGraphOrchestrator:
             "execution_history": [],
             "logs": [],
             "_run_id": run_id,
-            "selected_tables": selected_tables
+            "selected_tables": selected_tables,
+            "request_context": request_context,
         }
 
         final_state = None
@@ -935,7 +969,11 @@ class LangGraphOrchestrator:
         return result_state
 
 
-def run_stream(question: str, selected_tables: Optional[List[str]] = None) -> Dict[str, Any]:
+def run_stream(
+    question: str,
+    selected_tables: Optional[List[str]] = None,
+    request_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """运行流式查询"""
     orchestrator = LangGraphOrchestrator()
-    return orchestrator.run_stream(question, selected_tables)
+    return orchestrator.run_stream(question, selected_tables, request_context)

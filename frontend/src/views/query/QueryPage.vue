@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch, reactive } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { queryApi, datasetApi, dataSourceApi, historyApi } from '@/api'
-import type { QueryResponse, Dataset, SchemaColumn } from '@/api/types'
+import type { QueryContextTurn, QueryResponse, QuerySessionContext, Dataset, SchemaColumn } from '@/api/types'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
@@ -91,6 +91,9 @@ const stepLabelMap: Record<string, string> = {
   format_node: '结果整理',
 }
 
+const SHORT_SESSION_CONTEXT_LIMIT = 3
+const SHORT_SESSION_SCHEMA_LIMIT = 8
+
 const getIntentLabel = (intent?: string) => {
   if (!intent) return '查询需求'
   return intentLabelMap[intent] || intent
@@ -144,6 +147,9 @@ const getFriendlyStepEndLines = (step?: string, outputs?: any): string[] => {
       lines.push('[查询规划] 已通过模型语义判定生成查询方案')
     } else if (planSource === 'rule') {
       lines.push('[查询规划] 已通过规则策略生成查询方案')
+    }
+    if (outputs?.filters?.context_applied) {
+      lines.push('[会话上下文] 已结合最近一轮查询理解当前追问')
     }
     return lines
   }
@@ -360,6 +366,78 @@ const formatConfidence = (value?: number): string => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
   const clamped = Math.max(0, Math.min(1, value))
   return `${Math.round(clamped * 100)}%`
+}
+
+const summarizeTurnAnswer = (data?: QueryResponse | null): string => {
+  if (!data) return ''
+  const answerText = (data.answer || '').trim()
+  if (answerText) return answerText.slice(0, 220)
+  if (data.status === 'success') return getSuccessSummaryText(data).slice(0, 220)
+  return (data.error || '').trim().slice(0, 220)
+}
+
+const buildShortSessionContext = (datasetId?: number, currentTableNames: string[] = []): QuerySessionContext | undefined => {
+  const recentTurns: QueryContextTurn[] = []
+
+  for (let idx = messages.value.length - 1; idx >= 1 && recentTurns.length < SHORT_SESSION_CONTEXT_LIMIT; idx -= 1) {
+    const assistantMsg = messages.value[idx]
+    if (assistantMsg.role !== 'assistant' || !assistantMsg.data) continue
+
+    const data = assistantMsg.data
+    if (!data || data.intent === 'chat') continue
+
+    const userMsg = messages.value[idx - 1]
+    if (!userMsg || userMsg.role !== 'user') continue
+
+    const turnDatasetId = data.dataset_id
+    if (typeof datasetId === 'number') {
+      if (typeof turnDatasetId !== 'number' || turnDatasetId !== datasetId) continue
+    } else if (typeof turnDatasetId === 'number') {
+      continue
+    }
+
+    if (data.status === 'error' && !data.clarification_needed) continue
+
+    const turnQuestion = (data.question || userMsg.content || '').trim()
+    if (!turnQuestion) continue
+
+    const turn: QueryContextTurn = {
+      question: turnQuestion,
+      intent: data.intent,
+      answer: summarizeTurnAnswer(data),
+      sql: data.sql || undefined,
+      row_count: data.row_count,
+      result_schema: (data.result_schema || []).slice(0, SHORT_SESSION_SCHEMA_LIMIT),
+      table_names: Array.isArray(data.table_names) && data.table_names.length > 0 ? data.table_names : undefined,
+      dataset_id: turnDatasetId,
+      status: data.status,
+      plan_source: data.plan_source,
+    }
+    recentTurns.push(turn)
+  }
+
+  if (recentTurns.length === 0) return undefined
+
+  recentTurns.reverse()
+  return {
+    recent_turns: recentTurns,
+    current_dataset_id: datasetId,
+    current_table_names: currentTableNames.length > 0 ? currentTableNames : undefined,
+  }
+}
+
+const clearCurrentSession = () => {
+  if (loading.value) {
+    ElMessage.warning('当前查询仍在执行，请稍后再清空会话')
+    return
+  }
+
+  messages.value = []
+  question.value = ''
+  resultViewModeMap.value = {}
+  messageChartInstances.forEach((chart) => chart.dispose())
+  messageChartInstances.clear()
+  ElMessage.success('已清空当前会话上下文')
 }
 
 const applyClarificationOption = (option: string, data?: QueryResponse | null) => {
@@ -829,6 +907,8 @@ const handleQuery = async () => {
   let finalFilters: Record<string, any> = {}
   let finalSqlFromMeta = ''
   let finalSqlParamsFromMeta: any[] = []
+  const selectedTableNames = selectedTables.value.map(t => t.name)
+  const sessionContext = buildShortSessionContext(selectedDataset.value?.id, selectedTableNames)
 
   const updateThinking = (text: string) => {
     const cleanedText = text.replace(/\n+$/, '').trimEnd()
@@ -852,8 +932,6 @@ const handleQuery = async () => {
     // 显示开始思考
     updateThinking('收到你的问题，正在处理中')
 
-    // 获取用户选择的表名列表
-    const selectedTableNames = selectedTables.value.map(t => t.name)
     console.log('[DEBUG] 发送查询请求, table_names:', selectedTableNames)
 
     const response = await queryApi.streamExecute({
@@ -861,6 +939,7 @@ const handleQuery = async () => {
       workspace_id: userStore.currentWorkspace.id,
       dataset_id: selectedDataset.value?.id,
       table_names: selectedTableNames.length > 0 ? selectedTableNames : undefined,
+      context: sessionContext,
     })
 
     if (!response.ok) {
@@ -1097,6 +1176,8 @@ const handleQuery = async () => {
             : undefined,
           clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
           clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
+          table_names: selectedTableNames,
+          dataset_id: selectedDataset.value?.id,
         })
         lastMsg.data = fallbackData
         messages.value = [...messages.value]
@@ -1112,7 +1193,16 @@ const handleQuery = async () => {
     const lastMsg = messages.value[messages.value.length - 1]
     if (lastMsg) {
       lastMsg.content = '查询失败'
-      lastMsg.data = { status: 'error', row_count: 0 } as QueryResponse
+      lastMsg.data = {
+        question: userQuestion,
+        status: 'error',
+        row_count: 0,
+        error: e.message || '查询失败',
+        trace_id: currentTraceId,
+        audit_id: currentAuditId,
+        table_names: selectedTableNames,
+        dataset_id: selectedDataset.value?.id,
+      } as QueryResponse
     }
     // 保存失败记录到历史
     if (currentTraceId) {
@@ -1204,6 +1294,13 @@ const handleQuery = async () => {
         </div>
         <el-button text type="primary" size="small" @click="clearSelectedTables">
           清空
+        </el-button>
+      </div>
+
+      <div v-if="messages.length > 0" class="session-toolbar">
+        <span class="session-hint">已启用短会话上下文，可直接继续追问上一轮结果</span>
+        <el-button text type="primary" size="small" @click="clearCurrentSession">
+          清空当前会话
         </el-button>
       </div>
 
@@ -1587,14 +1684,6 @@ const handleQuery = async () => {
   color: #303133;
 }
 
-.new-session-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
 // 导航菜单
 .nav-section {
   padding: 12px 8px;
@@ -1797,6 +1886,22 @@ const handleQuery = async () => {
   background-color: #ecf5ff;
   border-color: #b3d8ff;
   color: #409eff;
+}
+
+.session-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
+  background: #f8fbff;
+  border-bottom: 1px solid #e8eaed;
+  flex-shrink: 0;
+}
+
+.session-hint {
+  font-size: 13px;
+  color: #606266;
 }
 
 // 聊天容器

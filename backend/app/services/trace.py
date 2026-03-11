@@ -44,6 +44,13 @@ def normalize_question(text: str) -> str:
     return t
 
 
+def normalize_question_for_sql_cache(text: str) -> str:
+    """更保守的 SQL 缓存归一化，避免不同年月/参数问题误命中。"""
+    t = text.strip().lower()
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 def question_hash(text: str) -> str:
     """对归一化后的问题计算 MD5 哈希"""
     normalized = normalize_question(text)
@@ -68,6 +75,25 @@ def scoped_question_hash(text: str, table_scope: Optional[Union[str, Iterable[st
     scope = normalize_table_scope(table_scope)
     key = f"{normalized_q}||{scope}"
     return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def sql_cache_question_hash(text: str, table_scope: Optional[Union[str, Iterable[str]]] = None) -> str:
+    """按更严格的问题归一化 + 表作用域生成 SQL 缓存 key。"""
+    normalized_q = normalize_question_for_sql_cache(text)
+    scope = normalize_table_scope(table_scope)
+    key = f"{normalized_q}||{scope}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def _load_json_array(payload: Optional[str]) -> List[Any]:
+    """解析 JSON 数组文本，失败时返回空数组。"""
+    if not payload:
+        return []
+    try:
+        value = json.loads(payload)
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
 
 
 @dataclass
@@ -224,6 +250,7 @@ class TraceManager:
                 question_sample TEXT NOT NULL,
                 intent TEXT NOT NULL,
                 sql TEXT NOT NULL,
+                sql_params TEXT,
                 table_scope TEXT DEFAULT '',
                 hit_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -236,6 +263,8 @@ class TraceManager:
             col_names = {str(row[1]).lower() for row in cols}
             if "table_scope" not in col_names:
                 conn.execute("ALTER TABLE sql_cache ADD COLUMN table_scope TEXT DEFAULT ''")
+            if "sql_params" not in col_names:
+                conn.execute("ALTER TABLE sql_cache ADD COLUMN sql_params TEXT")
         except Exception:
             pass
         conn.execute("""
@@ -298,58 +327,114 @@ class TraceManager:
     def _save_to_cache(self, trace: QueryTrace):
         """将成功查询写入 sql_cache 表"""
         table_scope = normalize_table_scope((trace.metadata or {}).get("selected_tables"))
-        q_hash = scoped_question_hash(trace.question, table_scope)
+        q_hash = sql_cache_question_hash(trace.question, table_scope)
         now = datetime.now().isoformat()
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("""
-                INSERT INTO sql_cache (question_hash, question_sample, intent, sql, table_scope, hit_count, created_at, last_hit_at)
-                VALUES (?, ?, ?, ?, ?, 0, ?, NULL)
+                INSERT INTO sql_cache (question_hash, question_sample, intent, sql, sql_params, table_scope, hit_count, created_at, last_hit_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL)
                 ON CONFLICT(question_hash) DO UPDATE SET
                     intent = excluded.intent,
                     sql = excluded.sql,
+                    sql_params = excluded.sql_params,
                     question_sample = excluded.question_sample,
                     table_scope = excluded.table_scope
-            """, (q_hash, trace.question, trace.intent, trace.sql, table_scope, now))
+            """, (
+                q_hash,
+                trace.question,
+                trace.intent,
+                trace.sql,
+                json.dumps(trace.sql_params or [], ensure_ascii=False),
+                table_scope,
+                now,
+            ))
             conn.commit()
             conn.close()
         except Exception:
             pass  # 缓存写入失败不影响主流程
 
-    def lookup_sql_cache(self, q_text: str, table_scope: Optional[Union[str, Iterable[str]]] = None) -> Optional[Tuple[str, str]]:
+    def lookup_sql_cache(
+        self,
+        q_text: str,
+        table_scope: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        mark_hit: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """根据问题查找 SQL 缓存。"""
         if not self.db_path:
             return None
 
-        scoped_hash = scoped_question_hash(q_text, table_scope)
+        scoped_hash = sql_cache_question_hash(q_text, table_scope)
+        legacy_scoped_hash = scoped_question_hash(q_text, table_scope)
         legacy_hash = question_hash(q_text)
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT intent, sql, question_hash FROM sql_cache WHERE question_hash = ?",
+                "SELECT intent, sql, sql_params, question_hash, question_sample, hit_count FROM sql_cache WHERE question_hash = ?",
                 (scoped_hash,)
             ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT intent, sql, sql_params, question_hash, question_sample, hit_count FROM sql_cache WHERE question_hash = ?",
+                    (legacy_scoped_hash,)
+                ).fetchone()
             # 向后兼容：旧缓存只按 question_hash 存储
             if not row:
                 row = conn.execute(
-                    "SELECT intent, sql, question_hash FROM sql_cache WHERE question_hash = ?",
+                    "SELECT intent, sql, sql_params, question_hash, question_sample, hit_count FROM sql_cache WHERE question_hash = ?",
                     (legacy_hash,)
                 ).fetchone()
 
             if row and row["sql"]:
-                conn.execute(
-                    "UPDATE sql_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
-                    (datetime.now().isoformat(), row["question_hash"])
-                )
-                conn.commit()
+                if mark_hit:
+                    conn.execute(
+                        "UPDATE sql_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
+                        (datetime.now().isoformat(), row["question_hash"])
+                    )
+                    conn.commit()
                 conn.close()
-                return (row["intent"], row["sql"])
+                return {
+                    "intent": row["intent"],
+                    "sql": row["sql"],
+                    "sql_params": _load_json_array(row["sql_params"]),
+                    "question_hash": row["question_hash"],
+                    "question_sample": row["question_sample"],
+                    "hit_count": int(row["hit_count"] or 0),
+                }
 
             conn.close()
         except Exception:
             pass
         return None
+
+    def mark_sql_cache_hit(self, question_hash_value: str):
+        """标记缓存命中。"""
+        if not self.db_path or not question_hash_value:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE sql_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
+                (datetime.now().isoformat(), question_hash_value),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def invalidate_sql_cache(self, question_hash_value: str):
+        """移除失效缓存，避免重复误命中。"""
+        if not self.db_path or not question_hash_value:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("DELETE FROM sql_cache WHERE question_hash = ?", (question_hash_value,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def get_trace(self, trace_id: str) -> Optional[QueryTrace]:
         """根据ID获取追踪记录"""
