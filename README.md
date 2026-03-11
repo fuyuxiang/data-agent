@@ -1,166 +1,279 @@
-# 智能问数平台 (Data Chat Bot)
+# 智能问数平台
 
-一个面向业务分析场景的自然语言问数系统。  
-你可以上传 CSV 或配置数据源，创建数据集后直接用自然语言提问，系统会通过 LangGraph 编排执行 NL2SQL，并以流式方式返回思考日志与结果。
+企业级自然语言取数与分析平台，提供完整的前后端实现：用户认证、工作空间、多数据源与数据集管理、CSV 导入、DuckDB 执行、LangGraph 编排的 NL2SQL、流式查询、手工 SQL、执行追踪与 SQL 长期复用。
 
-- 前端：Vue 3 + TypeScript + Element Plus + ECharts
-- 后端：FastAPI + SQLAlchemy + SQLite + DuckDB
-- 查询编排：LangGraph
-- NL2SQL：规则引擎 + 可选 LLM 双轨
+## 特性概览
 
-## 功能特性
+- 用户体系与工作空间管理，支持注册、登录、工作空间切换与新建
+- 数据源管理，支持 `MySQL`、`PostgreSQL`、`SQL Server`、`DuckDB`、`CSV`
+- 数据集语义层配置，支持多数据源绑定、指标/维度/别名/业务规则定义
+- CSV 上传后自动保存到本地，并尝试抽取行列信息与 Schema
+- 查询页支持数据集选择、表选择、多轮短会话上下文、流式执行反馈
+- 查询结果支持明细表格与统计图表展示
+- 支持手工 SQL 执行，并自动校验表范围与 SQL 安全性
+- 内置 `trace`、结构化证据、`audit_id`、`trace_id`
+- 成功查询会自动写入长期 `sql_cache`，后续同类问题可直接复用
+- 侧边栏内置 LLM 心跳探测，前端可见环境状态
 
-### 1. 账户与工作空间
-- 用户注册、登录、JWT 鉴权。
-- 登录后自动绑定默认工作空间。
-- 支持在系统设置中新增工作空间。
+## 当前查询链路
 
-### 2. 数据源与数据集管理
-- 支持数据源类型：`mysql`、`postgresql`、`sqlserver`、`duckdb`、`csv`。
-- 支持 CSV 文件上传，自动解析行列信息。
-- 支持数据源 Schema 刷新与字段列表查看。
-- 支持创建数据集并绑定多个数据源（`data_source_ids`）。
+### 1. 数据准备
 
-### 3. 智能问数与流式返回
-- 查询接口支持 SSE (`/api/v1/queries/stream`)。
-- 执行过程按节点流式输出：意图识别、SQL 校验、执行、结果整理。
-- 支持意图类型：`chat`、`list`、`count`、`search`。
-- 前端支持查看生成 SQL、结果明细、图表切换（柱状/折线/饼图）。
+查询请求进入后，后端会先把数据集关联的 CSV 文件加载到 DuckDB，并为表名加上数据集作用域前缀：
 
-### 4. 安全控制
-- SQL Guardrail：只允许 `SELECT`，拦截危险关键词与多语句注入。
-- 工作空间维度访问校验（核心管理接口均依赖当前用户）。
-- 数据源密码使用 Fernet 加密存储。
+```text
+ds{dataset_id}_{table_name}
+```
+
+这样可以避免不同数据集出现同名表污染。
+
+### 2. 查询规划
+
+`backend/app/services/nl2sql.py` 中的主规划顺序为：
+
+1. 识别意图：`chat` / `search` / `list` / `count`
+2. 非结构化问答或内容检索直接分流
+3. 在候选表范围内优先匹配 `verified_queries.json`
+4. 若未命中，再尝试命中 `sql_cache`
+5. 若仍未命中，再走 LLM 多 Agent 生成 SQL
+6. Reviewer 不通过时执行自动修正
+7. 若仍无法生成可靠 SQL，则返回 `reject`
+
+### 3. 执行与回写
+
+生成出的 SQL 在真正执行前会经过：
+
+- `SQLGuardrail.validate_sql()` 只允许安全 `SELECT`
+- DuckDB `EXPLAIN` 预检
+- 参数清洗与表白名单检查
+
+执行成功后会：
+
+- 返回结构化结果、答案摘要、图表建议、执行历史
+- 记录 `trace_id` / `audit_id`
+- 持久化到 `traces.db`
+- 自动写入 `sql_cache`，形成长期复用能力
+
+### plan_source 说明
+
+接口返回里的 `plan_source` 常见值如下：
+
+| 值 | 含义 |
+| --- | --- |
+| `verified_query` | 命中人工维护的可信模板 |
+| `sql_cache` | 命中历史成功 SQL 缓存 |
+| `llm` | 由 LLM 规划生成 |
+| `manual_sql` | 由用户提交手工 SQL 执行 |
+| `reject` | 当前问题未通过规划或审查 |
 
 ## 系统架构
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                        Frontend (Vue)                      │
-│  Login / DataConfig / Query / History / Settings           │
-└───────────────────────┬─────────────────────────────────────┘
-                        │ HTTP + SSE (/api/v1/queries/stream)
-┌───────────────────────▼─────────────────────────────────────┐
-│                      FastAPI Backend                        │
-│  auth | data_sources | datasets | queries | history         │
-└───────────────────────┬─────────────────────────────────────┘
-                        │
-        ┌───────────────▼──────────────────────┐
-        │      LangGraph Orchestrator          │
-        │ parse → validate → execute → format  │
-        └───────────────┬──────────────────────┘
-                        │
-        ┌───────────────▼──────────────┐
-        │ DuckDB Execution Engine       │
-        │ + CSV load + SQL guardrail    │
-        └───────────────┬──────────────┘
-                        │
-        ┌───────────────▼─────────────────────────────────────┐
-        │ SQLite (meta) + DuckDB (query) + CSV files          │
-        │ backend/data/chatbot.db / backend/data/duckdb.duckdb│
-        └───────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    U[User] --> F[Vue 3 Frontend]
+    F --> B[FastAPI Backend]
+    B --> A[Auth / Workspace / Dataset APIs]
+    B --> O[LangGraph Orchestrator]
+    O --> VQ[Verified Queries]
+    O --> SC[SQL Cache]
+    O --> LLM[LLM Multi-Agent]
+    O --> G[SQL Guardrail + EXPLAIN]
+    G --> D[DuckDB Engine]
+    B --> S1[(chatbot.db)]
+    B --> S2[(traces.db)]
+    B --> S3[(uploads/)]
+    D --> S4[(duckdb.duckdb)]
 ```
 
-## 核心查询链路
+## 前端页面
 
-`POST /api/v1/queries/stream` 的执行路径：
+### `/query`
 
-1. 校验 `dataset_id`（可选）。
-2. 将数据集关联的 CSV 文件加载到 DuckDB 临时/持久表。
-3. 初始化 LangGraph 状态并开始流式执行。
-4. 各节点依次执行：
-   - `parse_question`：规则 + 可选 LLM 双轨生成 SQL。
-   - `validate_sql`：SQL 安全校验。
-   - `execute_sql`：DuckDB 执行。
-   - `semantic_enhance`：list 场景下可选语义增强。
-   - `format_answer`：统一输出格式。
-5. 按 SSE 事件持续推送日志和最终结果。
+主查询页面，支持：
 
-## 技术栈与版本要求
+- 选择工作空间、数据集、数据表
+- 输入自然语言问题
+- 流式显示执行阶段反馈
+- 展示答案、结果表格、统计图
+- 结合最近若干轮上下文理解追问
+
+页面内置的快捷示例包括：
+
+- `查询两个表中相同省份、相同账期的收入对比`
+- `查询2025年12月各二级发展渠道的收入分布`
+- `统计2025年11月各渠道类型的渠道数量`
+- `查询最近10条渠道收入明细`
+
+### `/config`
+
+数据配置页，支持：
+
+- 新建数据源
+- 上传 CSV
+- 创建与编辑数据集
+- 给数据集绑定多个数据源
+- 设置数据集状态
+
+### `/history`
+
+历史记录列表页，支持按数据集筛选查看 `QueryHistory`。
+
+### `/settings`
+
+系统设置页，支持查看用户信息与创建工作空间。
+
+## 技术栈
 
 ### 后端
-- Python `>=3.10`
-- FastAPI `>=0.109`
-- SQLAlchemy `>=2.0`
-- DuckDB `>=1.0`
+
+- FastAPI
+- SQLAlchemy + SQLite
+- DuckDB
+- LangGraph
+- Pydantic / pydantic-settings
+- Requests
 
 ### 前端
-- Node.js `>=18`
-- npm `>=9`
-- Vite `5.x`
+
+- Vue 3
+- TypeScript
+- Vite
+- Pinia
+- Vue Router
+- Element Plus
+- ECharts
 
 ## 目录结构
 
 ```text
-data-chat-bot/
-├── backend/
-│   ├── app/
-│   │   ├── api/                  # 认证、数据源、数据集、查询、历史
-│   │   ├── core/                 # 配置、数据库、安全、日志
-│   │   ├── models/               # SQLAlchemy 模型
-│   │   ├── schemas/              # Pydantic 请求/响应模型
-│   │   ├── services/             # datasource、nl2sql、guardrails 等
-│   │   ├── orchestrator_graph.py # LangGraph 状态图
-│   │   └── orchestrator_duckdb.py
-│   ├── data/                     # sqlite、duckdb、uploads
+.
+├── backend
+│   ├── app
+│   │   ├── api                 # 认证、数据源、数据集、查询、历史、系统监控接口
+│   │   ├── core                # 配置、数据库、日志、安全
+│   │   ├── models              # SQLAlchemy 模型
+│   │   ├── services            # NL2SQL、trace、guardrail、verified query 等服务
+│   │   ├── orchestrator_*.py   # DuckDB 与 LangGraph 编排
+│   │   └── schemas             # Pydantic 请求/响应模型
+│   ├── data                    # SQLite / DuckDB / Trace / 上传文件 / verified_queries
+│   ├── logs                    # Trace 文件日志
+│   ├── requirements.txt
 │   ├── init_db.py
 │   └── main.py
-├── frontend/
-│   ├── src/
-│   │   ├── api/
-│   │   ├── layouts/
-│   │   ├── router/
-│   │   ├── stores/
-│   │   └── views/
+├── frontend
+│   ├── src
+│   │   ├── api                 # 前端 API 封装
+│   │   ├── layouts             # 布局
+│   │   ├── router              # 路由
+│   │   ├── stores              # Pinia 状态
+│   │   └── views               # 登录、查询、配置、历史、设置页面
 │   ├── package.json
 │   └── vite.config.ts
-├── logs/
+├── deploy                      # 容器化草稿
+├── logs                        # start.sh / stop.sh 启动日志与 pid
 ├── start.sh
 ├── stop.sh
-├── restart.sh
-└── deploy/
+└── restart.sh
 ```
 
 ## 快速开始
 
-### 方式 A：一键脚本（推荐）
+### 环境要求
+
+- Python `3.10+`
+- Node.js `18+`
+- `npm`
+
+### 1. 初始化数据库
+
+首次运行建议先初始化业务表：
+
+```bash
+cd backend
+python init_db.py
+```
+
+这一步会创建 `users`、`workspaces`、`data_sources`、`datasets`、`query_histories` 等业务表。
+
+### 2. 配置 LLM
+
+后端通过 `backend/.env` 读取主要配置。建议新建 `backend/.env`：
+
+```dotenv
+SECRET_KEY=change-me-in-production
+LLM_BASE_URL=https://your-openai-compatible-endpoint
+LLM_API_KEY=your-api-key
+LLM_MODEL=your-model-name
+
+TRACE_DB_PATH=./data/traces.db
+TRACE_FILE_LOG_ENABLED=true
+TRACE_LOG_DIR=./logs/traces
+```
+
+说明：
+
+- `LLM_*` 用于 NL2SQL 主链路与心跳检查
+- `TRACE_*` 用于追踪与 SQL 缓存持久化
+- 请不要把密钥直接写入仓库脚本或提交到 Git
+
+### 3. 创建第一个用户
+
+当前前端只有登录页，没有注册页。首次使用请调用后端注册接口：
+
+```bash
+curl -X POST http://localhost:50805/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "admin",
+    "password": "change-me-123",
+    "email": "admin@example.com",
+    "full_name": "Admin"
+  }'
+```
+
+注册成功后，系统会自动创建一个默认工作空间并建立用户关联。
+
+### 4. 一键启动前后端
+
+在仓库根目录执行：
 
 ```bash
 ./start.sh
 ```
 
-脚本行为：
-- 自动检测 Python / Node / npm。
-- 缺依赖时自动安装：
-  - `backend/requirements.txt`
-  - `frontend/node_modules`
-- 启动服务并写入 PID/日志到 `logs/`。
+脚本会：
 
-默认地址：
-- 前端：`http://localhost:50803`
-- 后端：`http://localhost:50805`
-- OpenAPI：`http://localhost:50805/docs`
-- 健康检查：`http://localhost:50805/health`
+- 检查 Python / Node / npm / pip
+- 按需安装后端依赖
+- 按需安装前端依赖
+- 启动后端 `50805`
+- 启动前端 `50803`
 
-停止与重启：
+启动后可访问：
+
+- 前端：http://localhost:50803
+- 后端健康检查：http://localhost:50805/health
+- Swagger 文档：http://localhost:50805/docs
+
+### 5. 关闭或重启
 
 ```bash
 ./stop.sh
 ./restart.sh
 ```
 
-### 方式 B：手动启动
+## 手动启动
 
-1. 初始化并启动后端
+### 后端
 
 ```bash
 cd backend
-python3 -m pip install -r requirements.txt
-python3 init_db.py
-uvicorn main:app --host 0.0.0.0 --port 50805 --reload
+python -m pip install -r requirements.txt
+python init_db.py
+python -m uvicorn main:app --host 0.0.0.0 --port 50805 --reload
 ```
 
-2. 启动前端
+### 前端
 
 ```bash
 cd frontend
@@ -168,235 +281,172 @@ npm install
 npm run dev -- --host 0.0.0.0 --port 50803
 ```
 
-## 首次使用
+## 使用流程
 
-当前前端未提供注册页，首次需调用后端注册接口创建账号。
+### 1. 登录
 
-```bash
-curl -X POST "http://localhost:50805/api/v1/auth/register" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "admin",
-    "password": "admin123",
-    "email": "admin@example.com",
-    "full_name": "Admin"
-  }'
-```
+用注册好的账号登录前端。
 
-登录页地址：`http://localhost:50803/login`
+### 2. 创建或导入数据
 
-## 配置说明
+在“数据配置”页面可以：
 
-后端使用 `pydantic-settings`，默认读取 `backend/.env`。  
-配置来源优先级：环境变量 > `.env` > 代码默认值。
+- 新建数据库型数据源
+- 上传 CSV 文件
+- 刷新数据源 Schema
+- 创建数据集并绑定多个数据源
 
-### 核心配置项（API 服务）
+### 3. 进入查询页
 
-定义位置：`backend/app/core/config.py`
+在“智能取数”页面：
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `PROJECT_NAME` | `智能问数平台` | FastAPI 项目名称 |
-| `DEBUG` | `True` | 调试模式，影响日志级别 |
-| `SECRET_KEY` | `your-secret-key-change-in-production` | JWT 签名密钥 |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | Token 过期时间（分钟） |
-| `DATABASE_URL` | `sqlite:///./data/chatbot.db` | 元数据数据库连接串 |
-| `LLM_MODEL` | `None` | LLM 模型名 |
-| `LLM_BASE_URL` | `None` | LLM 网关地址 |
-| `LLM_API_KEY` | `None` | LLM API Key |
-| `CORS_ORIGINS` | `["http://localhost:5173","http://localhost:3000","*"]` | CORS 白名单 |
-| `MAX_QUERY_ROWS` | `10000` | 查询最大返回行 |
-| `QUERY_TIMEOUT_SECONDS` | `60` | 查询超时时间 |
-| `ENCRYPTION_KEY` | `None` | Fernet 密钥（数据源密码加密） |
+- 选择工作空间
+- 选择数据集
+- 勾选要参与查询的数据表
+- 输入自然语言问题
 
-### 编排器配置项（查询引擎）
+### 4. 查看结果
 
-定义位置：`backend/app/orchestrator_config.py`
+查询返回后可以看到：
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DUCKDB_PATH` | `:memory:` | DuckDB 路径（当前引擎有自定义默认文件） |
-| `DUCKDB_MAX_LIMIT` | `1000` | DuckDB 查询限制 |
-| `SQL_MAX_LIMIT` | `1000` | SQL 最大限制 |
-| `SQL_DEFAULT_LIMIT` | `10` | 默认 LIMIT |
-| `ENABLE_SQL_GUARDRAILS` | `True` | 是否启用 SQL 安全护栏 |
-| `MAX_RETRIES` | `3` | SQL 修正最大重试次数 |
+- SQL
+- SQL 参数
+- 结果表格
+- 图表建议与图表展示
+- `trace_id`
+- `audit_id`
+- 执行阶段历史
+- `plan_source`
 
-### 建议 `.env` 示例
+### 5. 手工修正 SQL
 
-```env
-DEBUG=true
-SECRET_KEY=change-this-in-production
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
+如果需要，也可以通过后端 `execute-sql` 接口执行人工编辑后的 SQL。系统会做：
 
-LLM_BASE_URL=https://your-openai-compatible-endpoint
-LLM_API_KEY=your-api-key
-LLM_MODEL=your-model-name
-
-ENCRYPTION_KEY=your-fernet-key
-```
-
-生成 Fernet Key：
-
-```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-## 数据存储说明
-
-| 组件 | 路径 | 用途 |
-|---|---|---|
-| SQLite | `backend/data/chatbot.db` | 用户、工作空间、数据源、数据集等元数据 |
-| DuckDB | `backend/data/duckdb.duckdb` | 查询执行引擎 |
-| 上传 CSV | `backend/data/uploads/` | CSV 物理文件 |
-| 运行日志 | `logs/backend.log`、`logs/frontend.log` | 服务日志 |
-| PID 文件 | `logs/backend.pid`、`logs/frontend.pid` | 启停脚本管理 |
+- SELECT 白名单限制
+- 表白名单校验
+- 参数清洗
+- EXPLAIN 预检
 
 ## API 概览
 
-基础路径：`/api/v1`
+### 认证与工作空间
 
-### 认证
-- `POST /auth/register`
-- `POST /auth/login` (`application/x-www-form-urlencoded`)
-- `GET /auth/me`
-- `GET /auth/workspaces`
-- `POST /auth/workspaces`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+- `GET /api/v1/auth/workspaces`
+- `POST /api/v1/auth/workspaces`
 
-### 数据源
-- `POST /data-sources`
-- `GET /data-sources?workspace_id=...`
-- `PATCH /data-sources/{id}`
-- `DELETE /data-sources/{id}`
-- `POST /data-sources/test`
-- `POST /data-sources/upload-csv`
-- `GET /data-sources/{id}/schema`
-- `POST /data-sources/{id}/refresh-schema`
+### 数据源与数据集
 
-### 数据集
-- `POST /datasets`
-- `GET /datasets?workspace_id=...`
-- `GET /datasets/{id}`
-- `PATCH /datasets/{id}`
-- `DELETE /datasets/{id}` (软删除，状态置为 `deprecated`)
+- `POST /api/v1/data-sources`
+- `POST /api/v1/data-sources/upload-csv`
+- `POST /api/v1/data-sources/test`
+- `GET /api/v1/data-sources/{id}/schema`
+- `POST /api/v1/data-sources/{id}/refresh-schema`
+- `POST /api/v1/datasets`
+- `GET /api/v1/datasets`
+- `PATCH /api/v1/datasets/{id}`
+- `DELETE /api/v1/datasets/{id}`
 
 ### 查询
-- `POST /queries/stream` (SSE)
-- `POST /queries` (非流式)
-- `GET /queries/{trace_id}/replay`
 
-### 历史
-- `GET /history?workspace_id=...`
-- `GET /history/{history_id}`
+- `POST /api/v1/queries/stream`
+- `POST /api/v1/queries`
+- `POST /api/v1/queries/execute-sql`
+- `GET /api/v1/queries/{trace_id}/replay`
 
-## SSE 事件协议（`/queries/stream`）
+### 历史与监控
 
-后端按 `text/event-stream` 返回，每行格式：
+- `POST /api/v1/history`
+- `GET /api/v1/history`
+- `GET /api/v1/history/{history_id}`
+- `GET /api/v1/system/llm-heartbeat`
+- `GET /health`
 
-```text
-data: {"type":"...","...":"..."}
-```
+## 数据落盘说明
 
-常见事件：
+当前仓库里主要有四类本地数据：
 
-- `run_start`：本次运行开始。
-- `node_start`：节点开始执行。
-- `node_end`：节点结束并附带节点输出。
-- `node_error`：节点执行失败。
-- `final`：最终结果。
-- `done`：流结束标记。
+| 路径 | 作用 |
+| --- | --- |
+| `backend/data/chatbot.db` | 业务元数据，存储用户、工作空间、数据源、数据集、历史等 |
+| `backend/data/traces.db` | 查询 Trace 与 `sql_cache` |
+| `backend/data/duckdb.duckdb` | DuckDB 执行引擎持久化文件 |
+| `backend/data/uploads/` | 上传的 CSV 原始文件 |
 
-示例：
+另外还有两类日志目录：
 
-```text
-data: {"type":"run_start","run_id":"a1b2c3d4"}
-data: {"type":"node_start","step":"parse_question"}
-data: {"type":"node_end","step":"parse_question","outputs":{"intent":"count","sql":"SELECT ..."}}
-data: {"type":"final","result":{"type":"count","value":123,"message":"查询结果：共 123 条记录"}}
-data: {"type":"done"}
-```
+- `logs/`：`start.sh` 生成的前后端启动日志与 PID
+- `backend/logs/traces/`：Trace 文件日志
 
-## 安全设计
+## Verified Query 与 SQL Cache
 
-### JWT 认证
-- 算法：`HS256`
-- 令牌内容包含 `user_id`、`workspace_id`、`exp`
-- 认证失败统一返回 `401`
+### Verified Query
 
-### SQL 安全护栏
-位于 `backend/app/services/guardrails.py`，核心策略：
-- 仅允许 `SELECT`。
-- 拦截 `DROP/DELETE/UPDATE/INSERT/ALTER/CREATE/...`。
-- 拦截注释注入与堆叠语句。
-- 支持基于表白名单校验。
-- 自动补充或约束 `LIMIT`。
+`backend/data/verified_queries.json` 是人工维护的可信模板库。
 
-### 数据源密码保护
-- 数据源密码以 Fernet 加密后存储在 `password_encrypted` 字段。
-- 建议生产环境固定配置 `ENCRYPTION_KEY`，避免重启后无法解密历史密码。
+用途：
 
-## 开发与调试
+- 对固定问法做稳定复用
+- 规避 LLM 幻觉
+- 提供可审计、可版本化的 SQL 模板沉淀
 
-### 前端
+注意：
 
-```bash
-cd frontend
-npm run lint
-npm run build
-```
+- 当前文件默认是空数组
+- 它不会自动根据每次成功查询写入
+- 需要人工维护或单独建设晋升流程
 
-前端代理配置在 `frontend/vite.config.ts`：
-- `/api` 代理到 `http://localhost:50805`
+### SQL Cache
 
-### 后端
+`sql_cache` 是当前已经生效的长期复用能力：
 
-```bash
-cd backend
-uvicorn main:app --reload --port 50805
-```
-
-日志：
-- 调试模式下输出可读文本日志。
-- 非调试模式下输出 JSON 格式日志。
-
-## 已知限制
-
-- 当前查询主链路面向 DuckDB（尤其是 CSV 加载后的表）；关系型外部数据源尚未全部打通到统一执行链路。
-- 历史查询读取接口可用，但查询接口当前未自动写入 `query_histories`。
-- 向量检索 `search` 依赖额外包与 LanceDB 数据准备，默认安装不包含该依赖链。
-- 仓库内 `deploy/docker-compose.yml` 与本地脚本默认端口不同，使用前请按实际环境统一端口与变量。
+- 成功查询后自动写入
+- 记录问题、SQL、参数、表作用域、命中次数
+- 下次相同问题且表范围一致时优先复用
+- 命中后仍会做安全校验与 EXPLAIN
+- 若缓存 SQL 失效，会自动删除并回退到 LLM
 
 ## 常见问题
 
-### 1. 登录失败 `401`
-- 确认已先调用 `/auth/register` 创建用户。
-- 确认前端本地存储中的 `token` 未过期或被污染。
+### 1. 页面显示“环境启动异常”
 
-### 2. 查询报“数据集不存在”或无结果
-- 确认查询请求中传入了正确 `dataset_id`。
-- 确认数据集已绑定数据源并有可读表。
+侧边栏状态来自 `/api/v1/system/llm-heartbeat`。优先检查：
 
-### 3. SQL 执行失败
-- 查看 SSE 日志中的 `node_error` 信息。
-- 检查问题是否触发 SQL Guardrail（例如敏感关键词或非白名单表）。
+- `LLM_BASE_URL`
+- `LLM_API_KEY`
+- `LLM_MODEL`
+- LLM 服务是否支持 `/v1/models` 或 OpenAI 兼容 `chat/completions`
 
-### 4. CSV 上传成功但查询不到
-- 在“数据配置”中确认数据源 Schema 已刷新。
-- 在“智能取数”页重新选择数据集并勾选对应表。
+### 2. 查询时报“未找到可查询的数据表”
 
-## 部署
+通常说明：
 
-仓库提供 `deploy/` 目录作为部署模板：
-- `deploy/backend/Dockerfile`
-- `deploy/frontend/Dockerfile`
-- `deploy/frontend/nginx.conf`
-- `deploy/docker-compose.yml`
+- 当前数据集没有关联 CSV 数据源
+- 关联的 CSV 文件路径已经失效
+- 查询时未选中任何可用表
 
-建议流程：
-1. 先本地按本 README 跑通开发版。
-2. 再按环境（端口、网关、模型服务、持久化卷）调整部署配置。
-3. 生产环境务必替换 `SECRET_KEY`、`LLM_API_KEY` 等敏感项。
+### 3. CSV 被错误识别成单列
+
+代码里已经做了多轮分隔符探测与容错重载，但仍建议保证：
+
+- 文件头完整
+- 编码尽量使用 UTF-8 / UTF-8-SIG
+- 分隔符明确
+
+### 4. 为什么 trace 已经有了，但 replay 仍然不可用？
+
+因为 `trace/sql_cache` 是后端主链路自动持久化的，而 `query_histories` 目前依赖前端额外调用 `/history` 或业务方自行落库。直接调用查询接口但不补写历史时，`replay` 无法命中记录。
+
+## 后续适合继续完善的方向
+
+- 打通外部数据库直连查询，而不只依赖 CSV 落地到 DuckDB
+- 给 `verified_queries` 增加后台维护界面与审核流
+- 自动把合格查询沉淀为可审核模板，而不是只停留在 `sql_cache`
+- 把 `query_histories` 写入下沉到后端主链路，避免依赖前端补写
+- 整理并修正容器化部署配置
 
 ## License
 
-MIT
+当前仓库未声明开源许可证。如需公开分发，请补充明确的 `LICENSE` 文件。
