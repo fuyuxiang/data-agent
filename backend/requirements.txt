@@ -25,6 +25,9 @@ langgraph>=0.2.0
 
 # 数据处理
 pandas>=2.2.0
+numpy>=1.26.4
+Pillow>=10.2.0
+opencv-python-headless>=4.10.0.84
 
 # 日志
 python-json-logger>=2.0.7
@@ -32,3 +35,8 @@ python-json-logger>=2.0.7
 # Pydantic
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+
+# Test
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+httpx>=0.28.0

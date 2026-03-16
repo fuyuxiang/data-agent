@@ -20,10 +20,19 @@ from app.services.schema_meta import (
     get_table_schema,
     load_schema_config,
 )
+from app.services.query_plan import QueryPlan
 from app.services.nl2sql import (
-    QueryPlan,
     build_query_plan,
     call_llm_fix_sql,
+)
+from app.services.nl2intent import (
+    parse_intent,
+    is_visual_query,
+    run_intent_agent,
+)
+from app.services.nl2multimodal import (
+    build_multimodal_query_plan,
+    run_multimodal_search,
 )
 from app.services.vector_search import (
     ModelManager,

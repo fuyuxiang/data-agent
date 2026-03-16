@@ -453,6 +453,7 @@ def _build_query_response_data(
     trace_id: str,
     audit_id: str,
     state: Dict[str, Any],
+    warnings: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """将 LangGraph final state 映射为 API QueryResponse"""
     final = state.get("final_answer") or {}
@@ -531,7 +532,7 @@ def _build_query_response_data(
         "chart_suggestion": chart_suggestion,
         "cost_time_ms": None,
         "cost_rows": row_count,
-        "warnings": [],
+        "warnings": warnings or [],
         "status": status_value,
         "error": error_value,
         "trace_id": trace_id,
@@ -547,6 +548,21 @@ def _build_query_response_data(
     }
 
 
+def _build_dataset_processing_warnings(dataset: Optional[Dataset]) -> List[str]:
+    if not dataset:
+        return []
+    raw_status = getattr(dataset, "processing_status", None)
+    processing_status = getattr(raw_status, "value", raw_status) or ""
+    if processing_status in {"pending", "processing"}:
+        return ["当前数据集中的图片或视频仍在处理中，检索结果可能不完整"]
+    if processing_status == "failed":
+        error_message = getattr(dataset, "error_message", None)
+        if error_message:
+            return [f"当前数据集中的部分图片或视频处理失败: {error_message}"]
+        return ["当前数据集中的部分图片或视频处理失败，检索结果可能不完整"]
+    return []
+
+
 @router.post("/stream")
 async def stream_query(
     request: QueryRequest,
@@ -560,6 +576,7 @@ async def stream_query(
 
     await _ensure_workspace_access(db, current_user, request.workspace_id)
     dataset = await _get_authorized_dataset(db, request.dataset_id, request.workspace_id)
+    dataset_warnings = _build_dataset_processing_warnings(dataset)
 
     engine = get_engine()
     engine.connect()
@@ -575,7 +592,12 @@ async def stream_query(
     trace_id = f"trace_{uuid.uuid4().hex[:16]}"
     audit_id = f"audit_{uuid.uuid4().hex[:16]}"
     logger.info(f"trace_id: {trace_id}, audit_id: {audit_id}")
-    request_context = request.context.model_dump() if request.context else None
+    request_context = request.context.model_dump() if request.context else {}
+    request_context["dataset_id"] = request.dataset_id
+    if request.query_image_path:
+        request_context["query_image_path"] = request.query_image_path
+    if request.query_video_path:
+        request_context["query_video_path"] = request.query_video_path
 
     def _inject_trace_meta(raw_event: str) -> str:
         if not raw_event.startswith("data: "):
@@ -591,6 +613,10 @@ async def stream_query(
         if event_obj.get("type") in {"final", "error", "done"}:
             event_obj["trace_id"] = trace_id
             event_obj["audit_id"] = audit_id
+            if event_obj.get("type") == "final" and dataset_warnings:
+                result_obj = event_obj.get("result")
+                if isinstance(result_obj, dict):
+                    result_obj["warnings"] = list(dict.fromkeys((result_obj.get("warnings") or []) + dataset_warnings))
             return f"data: {json.dumps(event_obj, ensure_ascii=False)}\n\n"
         return raw_event
 
@@ -644,6 +670,7 @@ async def execute_query(
 
     await _ensure_workspace_access(db, current_user, request.workspace_id)
     dataset = await _get_authorized_dataset(db, request.dataset_id, request.workspace_id)
+    dataset_warnings = _build_dataset_processing_warnings(dataset)
 
     engine = get_engine()
     engine.connect()
@@ -656,7 +683,12 @@ async def execute_query(
     audit_id = f"audit_{uuid.uuid4().hex[:16]}"
 
     logger.info(f"开始执行查询: {request.question}")
-    request_context = request.context.model_dump() if request.context else None
+    request_context = request.context.model_dump() if request.context else {}
+    request_context["dataset_id"] = request.dataset_id
+    if request.query_image_path:
+        request_context["query_image_path"] = request.query_image_path
+    if request.query_video_path:
+        request_context["query_video_path"] = request.query_video_path
 
     try:
         state = await run_in_threadpool(
@@ -683,6 +715,7 @@ async def execute_query(
         trace_id=trace_id,
         audit_id=audit_id,
         state=state,
+        warnings=dataset_warnings,
     )
     return QueryResponse(**response_data)
 

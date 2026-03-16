@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { dataSourceApi, datasetApi } from '@/api'
 import type { DataSource, Dataset } from '@/api/types'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Edit, Delete, FolderOpened, Document, Connection } from '@element-plus/icons-vue'
+import { UploadFilled, Edit, Delete, FolderOpened, Document, Connection, PictureFilled, VideoCameraFilled, Plus, WarningFilled } from '@element-plus/icons-vue'
 
 const userStore = useUserStore()
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 // 加载状态
 const loading = ref(false)
@@ -14,13 +15,14 @@ const datasets = ref<Dataset[]>([])
 const dataSources = ref<DataSource[]>([])
 const selectedDataset = ref<Dataset | null>(null)
 const isEditing = ref(false)  // 是否在编辑状态
+const savingDataset = ref(false)
 
 // 数据集表单
 const datasetForm = ref({
   name: '',
   description: '',
   data_source_ids: [] as number[],
-  csv_files: [] as File[],
+  file_paths: [] as string[],
   status: 'draft',
 })
 
@@ -38,6 +40,9 @@ const dataSourceForm = ref({
 
 // CSV 文件上传
 const csvFiles = ref<File[]>([])
+const imageFiles = ref<File[]>([])
+const videoFiles = ref<File[]>([])
+const mediaPathInput = ref('')
 const uploading = ref(false)
 const uploadProgress = ref(0)
 
@@ -53,9 +58,9 @@ const typeOptions = [
 ]
 
 // 加载数据
-const loadData = async () => {
+const loadData = async (silent = false) => {
   if (!userStore.currentWorkspace) {
-    ElMessage.warning('请先选择工作空间')
+    if (!silent) ElMessage.warning('请先选择工作空间')
     return
   }
 
@@ -67,18 +72,41 @@ const loadData = async () => {
     ])
     dataSources.value = dsRes.data
     datasets.value = ddRes.data
-    ElMessage.success(`加载了 ${ddRes.data.length} 个数据集`)
+    if (selectedDataset.value) {
+      const latest = datasets.value.find((item) => item.id === selectedDataset.value?.id)
+      if (latest) selectedDataset.value = latest
+    }
+    syncPolling()
   } catch (e) {
-    ElMessage.error('加载失败')
+    if (!silent) ElMessage.error('加载失败')
     console.error('加载失败:', e)
   } finally {
     loading.value = false
   }
 }
 
-onMounted(loadData)
+onMounted(() => {
+  loadData(true)
+  syncPolling()
+})
 
-watch(() => userStore.currentWorkspace, loadData)
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
+
+watch(() => userStore.currentWorkspace, () => loadData(true))
+
+const syncPolling = () => {
+  const hasProcessing = datasets.value.some((item) => ['pending', 'processing'].includes(item.processing_status))
+  if (hasProcessing && !pollTimer) {
+    pollTimer = setInterval(() => loadData(true), 5000)
+    return
+  }
+  if (!hasProcessing && pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
 
 // 选择数据集
 const handleDatasetSelect = (ds: Dataset) => {
@@ -88,9 +116,13 @@ const handleDatasetSelect = (ds: Dataset) => {
     name: ds.name,
     description: ds.description || '',
     data_source_ids: ds.data_source_ids || (ds.data_source_id ? [ds.data_source_id] : []),
-    csv_files: [],
+    file_paths: [],
     status: ds.status || 'draft',
   }
+  imageFiles.value = []
+  videoFiles.value = []
+  csvFiles.value = []
+  mediaPathInput.value = ''
 }
 
 // 新增数据集
@@ -101,10 +133,13 @@ const handleAddDataset = () => {
     name: '',
     description: '',
     data_source_ids: [],
-    csv_files: [],
+    file_paths: [],
     status: 'draft',
   }
   csvFiles.value = []
+  imageFiles.value = []
+  videoFiles.value = []
+  mediaPathInput.value = ''
 }
 
 // 编辑数据集
@@ -119,13 +154,12 @@ const handleSaveDataset = async () => {
     return
   }
 
-  // 如果有 CSV 文件需要先上传
-  if (csvFiles.value.length > 0) {
-    await handleUploadCsvFiles()
-    if (uploading.value) return // 上传失败
+  if (selectedDataset.value && (imageFiles.value.length > 0 || videoFiles.value.length > 0 || datasetForm.value.file_paths.length > 0)) {
+    ElMessage.warning('当前版本仅支持在新建数据集时接入图片/视频资源')
+    return
   }
 
-  ElMessage.info(`正在保存，data_source_ids: ${JSON.stringify(datasetForm.value.data_source_ids)}`)
+  savingDataset.value = true
 
   try {
     const payload: any = {
@@ -134,23 +168,36 @@ const handleSaveDataset = async () => {
       data_source_ids: datasetForm.value.data_source_ids,
       data_source_id: datasetForm.value.data_source_ids[0] || null,
       status: datasetForm.value.status,
+      workspace_id: userStore.currentWorkspace!.id,
+      file_paths: datasetForm.value.file_paths,
     }
 
     if (selectedDataset.value) {
+      if (csvFiles.value.length > 0) {
+        await handleUploadCsvFiles()
+      }
       await datasetApi.update(selectedDataset.value.id, payload)
       ElMessage.success('更新成功')
     } else {
-      await datasetApi.create({
-        ...payload,
-        workspace_id: userStore.currentWorkspace!.id,
-      })
-      ElMessage.success('创建成功')
+      const hasFileInputs = csvFiles.value.length > 0 || imageFiles.value.length > 0 || videoFiles.value.length > 0 || datasetForm.value.file_paths.length > 0
+      const requestBody = hasFileInputs ? buildDatasetFormData(payload) : payload
+      const res = await datasetApi.create(requestBody)
+      const created = res.data
+      const isProcessing = ['pending', 'processing'].includes(created.processing_status)
+      ElMessage.success(isProcessing ? '数据集创建成功，图片/视频正在处理中' : '创建成功')
     }
     isEditing.value = false
-    loadData()
+    selectedDataset.value = null
+    csvFiles.value = []
+    imageFiles.value = []
+    videoFiles.value = []
+    mediaPathInput.value = ''
+    await loadData(true)
   } catch (e: any) {
     console.error('保存失败:', e)
     ElMessage.error(e.response?.data?.detail || '操作失败')
+  } finally {
+    savingDataset.value = false
   }
 }
 
@@ -185,9 +232,61 @@ const handleCsvFileChange = (uploadFile: any) => {
   csvFiles.value.push(file)
 }
 
+const validateMediaFile = (file: File, type: 'image' | 'video') => {
+  const maxMb = type === 'image' ? 50 : 1024
+  const validType = type === 'image'
+    ? file.type.startsWith('image/') || /\.(png|jpe?g|bmp|webp)$/i.test(file.name)
+    : file.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|m4v|webm)$/i.test(file.name)
+  if (!validType) {
+    ElMessage.error(type === 'image' ? '只支持图片文件' : '只支持视频文件')
+    return false
+  }
+  if (file.size / 1024 / 1024 > maxMb) {
+    ElMessage.error(`${type === 'image' ? '图片' : '视频'}大小不能超过 ${maxMb}MB`)
+    return false
+  }
+  return true
+}
+
+const handleImageFileChange = (uploadFile: any) => {
+  const file = uploadFile.raw as File | undefined
+  if (!file || !validateMediaFile(file, 'image')) return
+  imageFiles.value.push(file)
+}
+
+const handleVideoFileChange = (uploadFile: any) => {
+  const file = uploadFile.raw as File | undefined
+  if (!file || !validateMediaFile(file, 'video')) return
+  videoFiles.value.push(file)
+}
+
 // 删除 CSV 文件
 const removeCsvFile = (index: number) => {
   csvFiles.value.splice(index, 1)
+}
+
+const removeImageFile = (index: number) => {
+  imageFiles.value.splice(index, 1)
+}
+
+const removeVideoFile = (index: number) => {
+  videoFiles.value.splice(index, 1)
+}
+
+const handleAddMediaPath = () => {
+  const value = mediaPathInput.value.trim()
+  if (!value) {
+    ElMessage.warning('请输入文件路径')
+    return
+  }
+  if (!datasetForm.value.file_paths.includes(value)) {
+    datasetForm.value.file_paths.push(value)
+  }
+  mediaPathInput.value = ''
+}
+
+const removeMediaPath = (index: number) => {
+  datasetForm.value.file_paths.splice(index, 1)
 }
 
 // 创建数据源并添加到数据集
@@ -290,7 +389,7 @@ const handleUploadCsvFiles = async () => {
     ElMessage.success(`成功上传 ${csvFiles.value.length} 个文件`)
     csvFiles.value = []
     uploadProgress.value = 0
-    loadData()
+    loadData(true)
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail || '上传失败')
   } finally {
@@ -303,6 +402,56 @@ const getDataSourceTypeLabel = (type: string) => {
   const option = typeOptions.find(t => t.value === type)
   return option?.label || type
 }
+
+const buildDatasetFormData = (payload: Record<string, any>) => {
+  const formData = new FormData()
+  formData.append('payload', JSON.stringify(payload))
+  csvFiles.value.forEach((file) => formData.append('csv_files', file))
+  imageFiles.value.forEach((file) => formData.append('image_files', file))
+  videoFiles.value.forEach((file) => formData.append('video_files', file))
+  return formData
+}
+
+const formatFileSize = (size: number) => {
+  if (!size) return '0 B'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`
+}
+
+const getProcessingTagType = (processingStatus: Dataset['processing_status']) => {
+  if (processingStatus === 'ready') return 'success'
+  if (processingStatus === 'failed') return 'danger'
+  if (processingStatus === 'processing') return 'warning'
+  return 'info'
+}
+
+const getProcessingStatusLabel = (dataset: Dataset) => {
+  if (dataset.processing_status === 'ready') return dataset.media_count > 0 ? '可检索' : '已就绪'
+  if (dataset.processing_status === 'failed') return '处理失败'
+  if (dataset.processing_status === 'processing') return '图片/视频处理中'
+  return '等待处理'
+}
+
+const selectedDatasetAlert = computed(() => {
+  if (!selectedDataset.value) return null
+  if (selectedDataset.value.processing_status === 'processing' || selectedDataset.value.processing_status === 'pending') {
+    return {
+      type: 'warning',
+      title: '当前数据集中的图片/视频正在处理中',
+      description: '离线处理完成前，多模态检索结果可能不完整。',
+    }
+  }
+  if (selectedDataset.value.processing_status === 'failed') {
+    return {
+      type: 'error',
+      title: '当前数据集中的部分图片/视频处理失败',
+      description: selectedDataset.value.error_message || '请检查路径、文件格式或后端日志后重试。',
+    }
+  }
+  return null
+})
 
 </script>
 
@@ -323,7 +472,12 @@ const getDataSourceTypeLabel = (type: string) => {
         >
           <div class="source-info">
             <el-icon><FolderOpened /></el-icon>
-            <span class="source-name">{{ ds.name }}</span>
+            <div class="source-meta">
+              <span class="source-name">{{ ds.name }}</span>
+              <el-tag size="small" :type="getProcessingTagType(ds.processing_status)">
+                {{ getProcessingStatusLabel(ds) }}
+              </el-tag>
+            </div>
           </div>
           <div class="source-actions">
             <el-button size="small" text @click.stop="handleEditDataset(ds)">
@@ -349,6 +503,18 @@ const getDataSourceTypeLabel = (type: string) => {
       </div>
 
       <div v-else class="config-content">
+        <el-alert
+          v-if="selectedDatasetAlert"
+          :title="selectedDatasetAlert.title"
+          :description="selectedDatasetAlert.description"
+          :type="selectedDatasetAlert.type as any"
+          :closable="false"
+          show-icon
+          class="dataset-alert"
+        >
+          <template #icon><el-icon><WarningFilled /></el-icon></template>
+        </el-alert>
+
         <div class="edit-form">
           <h4>{{ selectedDataset ? '编辑数据集' : '新建数据集' }}</h4>
 
@@ -480,22 +646,119 @@ const getDataSourceTypeLabel = (type: string) => {
               </div>
 
               <el-button
-                v-if="csvFiles.length > 0"
+                v-if="selectedDataset && csvFiles.length > 0"
                 type="primary"
                 size="small"
                 :loading="uploading"
                 @click="handleUploadCsvFiles"
                 style="margin-top: 10px"
               >
-                {{ uploading ? `上传中 ${uploadProgress}%` : '上传 CSV 文件' }}
+                {{ uploading ? `上传中 ${uploadProgress}%` : '上传 CSV 文件到当前数据集' }}
               </el-button>
+              <div v-else class="inline-tip">新建数据集时，CSV 会随“创建数据集”一起提交。</div>
+            </div>
+          </div>
+
+          <div class="media-input-section">
+            <div class="section-title">图/视频数据</div>
+            <div class="media-grid">
+              <div class="add-source-item">
+                <div class="add-source-header">
+                  <el-icon><PictureFilled /></el-icon>
+                  <span>图片上传</span>
+                </div>
+                <el-upload
+                  :auto-upload="false"
+                  :file-list="[]"
+                  :on-change="handleImageFileChange"
+                  accept=".jpg,.jpeg,.png,.bmp,.webp,image/*"
+                  multiple
+                  drag
+                >
+                  <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+                  <div class="el-upload__text">拖拽图片到此处，或点击选择</div>
+                </el-upload>
+              </div>
+
+              <div class="add-source-item">
+                <div class="add-source-header">
+                  <el-icon><VideoCameraFilled /></el-icon>
+                  <span>视频上传</span>
+                </div>
+                <el-upload
+                  :auto-upload="false"
+                  :file-list="[]"
+                  :on-change="handleVideoFileChange"
+                  accept=".mp4,.mov,.avi,.mkv,.m4v,.webm,video/*"
+                  multiple
+                  drag
+                >
+                  <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+                  <div class="el-upload__text">拖拽视频到此处，或点击选择</div>
+                </el-upload>
+              </div>
+            </div>
+
+            <div class="path-box">
+              <div class="add-source-header">
+                <el-icon><Document /></el-icon>
+                <span>服务端可访问路径</span>
+              </div>
+              <div class="path-input-row">
+                <el-input
+                  v-model="mediaPathInput"
+                  placeholder="输入本地路径、挂载路径或目录路径"
+                  @keydown.enter.prevent="handleAddMediaPath"
+                />
+                <el-button type="primary" plain @click="handleAddMediaPath">
+                  <el-icon><Plus /></el-icon>
+                  添加路径
+                </el-button>
+              </div>
+              <div v-if="datasetForm.file_paths.length > 0" class="path-list">
+                <el-tag
+                  v-for="(filePath, index) in datasetForm.file_paths"
+                  :key="filePath"
+                  closable
+                  @close="removeMediaPath(index)"
+                  class="file-tag"
+                >
+                  {{ filePath }}
+                </el-tag>
+              </div>
+            </div>
+
+            <div v-if="imageFiles.length > 0 || videoFiles.length > 0" class="selected-media-files">
+              <div class="section-title">已选媒体文件</div>
+              <div
+                v-for="(file, index) in imageFiles"
+                :key="`image-${index}-${file.name}`"
+                class="selected-file-row"
+              >
+                <span class="selected-file-name">图片 · {{ file.name }}</span>
+                <span class="selected-file-size">{{ formatFileSize(file.size) }}</span>
+                <el-button text type="danger" @click="removeImageFile(index)">移除</el-button>
+              </div>
+              <div
+                v-for="(file, index) in videoFiles"
+                :key="`video-${index}-${file.name}`"
+                class="selected-file-row"
+              >
+                <span class="selected-file-name">视频 · {{ file.name }}</span>
+                <span class="selected-file-size">{{ formatFileSize(file.size) }}</span>
+                <el-button text type="danger" @click="removeVideoFile(index)">移除</el-button>
+              </div>
+            </div>
+
+            <div class="inline-tip">
+              支持上传图片/视频，或填写服务端可访问路径。视频会按逻辑切片离线处理，不会默认导出大量物理 clip。
             </div>
           </div>
         </div>
 
         <!-- 保存按钮 -->
         <div class="action-bar">
-          <el-button type="primary" @click="handleSaveDataset">
+          <el-button type="primary" :loading="savingDataset" @click="handleSaveDataset">
             {{ selectedDataset ? '保存修改' : '创建数据集' }}
           </el-button>
         </div>
@@ -568,6 +831,13 @@ const getDataSourceTypeLabel = (type: string) => {
   overflow: hidden;
 }
 
+.source-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 .source-name {
   font-size: 14px;
   white-space: nowrap;
@@ -595,6 +865,10 @@ const getDataSourceTypeLabel = (type: string) => {
 
 .config-content {
   max-width: 900px;
+}
+
+.dataset-alert {
+  margin-bottom: 16px;
 }
 
 .edit-form {
@@ -638,10 +912,39 @@ const getDataSourceTypeLabel = (type: string) => {
   gap: 20px;
 }
 
+.media-input-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px dashed #e4e7ed;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
 .add-source-item {
   padding: 16px;
   border: 1px dashed #dcdfe6;
   border-radius: 8px;
+}
+
+.path-box {
+  padding: 16px;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.path-input-row {
+  display: flex;
+  gap: 12px;
+}
+
+.path-list {
+  margin-top: 12px;
 }
 
 .add-source-header {
@@ -694,6 +997,38 @@ const getDataSourceTypeLabel = (type: string) => {
   margin-bottom: 8px;
 }
 
+.selected-media-files {
+  padding: 16px;
+  border-radius: 8px;
+  background: #f5f7fa;
+  margin-bottom: 12px;
+}
+
+.selected-file-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #ebeef5;
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.selected-file-name {
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-file-size {
+  color: #909399;
+  font-size: 12px;
+}
+
 .el-icon--upload {
   font-size: 40px;
   color: #409eff;
@@ -715,7 +1050,24 @@ const getDataSourceTypeLabel = (type: string) => {
   margin-top: 7px;
 }
 
+.inline-tip {
+  margin-top: 10px;
+  color: #909399;
+  font-size: 12px;
+}
+
 .action-bar {
   text-align: center;
+}
+
+@media (max-width: 960px) {
+  .add-source-section,
+  .media-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .path-input-row {
+    flex-direction: column;
+  }
 }
 </style>

@@ -5,10 +5,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api import router as v1
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.services.media_tasks import get_media_task_manager
+from app.services.media_utils import MEDIA_ROOT, QUERY_UPLOAD_ROOT, ensure_media_dirs
 from app.services.trace import init_trace_manager
 
 # 设置日志
@@ -31,8 +34,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+ensure_media_dirs()
+
 # 注册 API 路由
 app.include_router(v1, prefix="/api/v1")
+app.mount("/media-files", StaticFiles(directory=str(MEDIA_ROOT)), name="media-files")
+app.mount("/query-files", StaticFiles(directory=str(QUERY_UPLOAD_ROOT)), name="query-files")
 
 
 @app.on_event("startup")
@@ -53,6 +60,13 @@ async def setup_trace_system():
         enable_file_log=settings.TRACE_FILE_LOG_ENABLED,
         log_dir=trace_log_dir,
     )
+    ensure_media_dirs()
+    await get_media_task_manager().startup()
+
+
+@app.on_event("shutdown")
+async def shutdown_background_workers():
+    await get_media_task_manager().shutdown()
 
 # 健康检查
 @app.get("/health")

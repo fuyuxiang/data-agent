@@ -67,110 +67,33 @@ async def upload_csv(
     db: AsyncSession = Depends(get_db),
 ):
     """上传 CSV 文件，可创建新数据源或上传到已有数据源"""
-    if not file.filename.endswith('.csv'):
+    service = DataSourceService(db)
+    try:
+        data_source = await service.create_csv_data_source_from_upload(
+            workspace_id=workspace_id,
+            upload=file,
+            data_source_id=data_source_id,
+        )
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="只支持 CSV 文件",
-        )
-
-    # 生成唯一文件名
-    file_id = uuid.uuid4().hex[:8]
-    filename = f"{file_id}_{file.filename}"
-    file_path = str(UPLOAD_DIR / filename)
-
-    # 保存文件
-    content = await file.read()
-    with open(file_path, 'wb') as f:
-        f.write(content)
-
-    file_size = len(content)
-    logger.info(f"CSV 文件上传成功: {file_path}, 大小: {file_size} bytes")
-
-    # 尝试解析 CSV 获取基本信息
-    row_count = None
-    column_count = None
-    try:
-        import pandas as pd
-        df = pd.read_csv(file_path)
-        row_count = len(df)
-        column_count = len(df.columns)
-    except Exception as e:
-        logger.warning(f"解析 CSV 文件失败: {e}")
-
-    # 确定数据源
-    if data_source_id:
-        # 上传到已存在的数据源
-        result = await db.execute(
-            select(DataSource).where(DataSource.id == data_source_id)
-        )
-        data_source = result.scalar_one_or_none()
-        if not data_source:
-            # 文件已保存，删除它
-            os.remove(file_path)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="数据源不存在",
-            )
-        if data_source.type != DataSourceType.CSV:
-            os.remove(file_path)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="只能上传 CSV 文件到 CSV 类型的数据源",
-            )
-    else:
-        # 创建新数据源
-        data_source = DataSource(
-            workspace_id=workspace_id,
-            name=file.filename.replace('.csv', ''),
-            type=DataSourceType.CSV,
-            is_active=True,
-        )
-        db.add(data_source)
-        await db.commit()
-        await db.refresh(data_source)
-
-    # 创建 CSVFile 记录
-    csv_file = CSVFile(
-        data_source_id=data_source.id,
-        filename=file.filename,
-        file_path=file_path,
-        file_size=file_size,
-        row_count=row_count,
-        column_count=column_count,
-    )
-    db.add(csv_file)
-    await db.commit()
-
-    # 提前提取所需数据
-    ds_id = data_source.id
-    ds_workspace_id = data_source.workspace_id
-    ds_name = data_source.name
-    ds_type = data_source.type
-    ds_is_active = data_source.is_active
-    ds_created_at = data_source.created_at
-    ds_updated_at = data_source.updated_at
-
-    # 自动刷新 Schema
-    try:
-        service = DataSourceService(db)
-        await service.refresh_schema(data_source)
-    except Exception as e:
-        logger.warning(f"自动刷新 Schema 失败: {e}")
+            detail=str(exc),
+        ) from exc
 
     # 返回数据
     from app.schemas.schemas import DataSourceResponse as ResponseSchema
     return ResponseSchema(
-        id=ds_id,
-        workspace_id=ds_workspace_id,
-        name=ds_name,
-        type=ds_type.value,
+        id=data_source.id,
+        workspace_id=data_source.workspace_id,
+        name=data_source.name,
+        type=data_source.type.value,
         host=None,
         port=None,
         database=None,
         username=None,
-        is_active=ds_is_active,
-        created_at=ds_created_at,
-        updated_at=ds_updated_at,
+        is_active=data_source.is_active,
+        created_at=data_source.created_at,
+        updated_at=data_source.updated_at,
     )
 
 

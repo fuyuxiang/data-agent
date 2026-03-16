@@ -272,22 +272,41 @@ def parse_question_node(state: AgentState) -> AgentState:
 # ==================== 向量检索 ====================
 
 def vector_search_node(state: AgentState) -> AgentState:
-    """向量检索节点"""
+    """多模态检索节点。"""
     run_id = state.get("_run_id", "default")
     logger = _get_logger(run_id)
     question = state["question"]
     filters = state.get("filters") or {}
+    request_context = state.get("request_context") or {}
+    query_text = str(filters.get("query_text") or state.get("resolved_question") or question)
     top_k = filters.get("top_k", 10)
+    dataset_id = request_context.get("dataset_id")
+    query_image_path = request_context.get("query_image_path")
+    query_video_path = request_context.get("query_video_path")
     started_at = time.time()
-    history_input = {"question": question, "top_k": top_k}
+    history_input = {
+        "question": question,
+        "query_text": query_text,
+        "top_k": top_k,
+        "dataset_id": dataset_id,
+        "query_image_path": query_image_path,
+        "query_video_path": query_video_path,
+    }
 
-    logger.start_node("vector_search", {"question": question[:100], "top_k": top_k})
+    logger.start_node("vector_search", {"query_text": query_text[:100], "top_k": top_k})
 
     try:
-        from app.services.vector_search import vector_search
+        from app.services.nl2multimodal import run_multimodal_search
 
         config = {"search": {"lancedb_dir": "data/lancedb"}}
-        results = vector_search(config, question, top_k=top_k)
+        results = run_multimodal_search(
+            query_text,
+            top_k=top_k,
+            config=config,
+            dataset_id=dataset_id,
+            query_image_path=query_image_path,
+            query_video_path=query_video_path,
+        )
 
         state["sql_result"] = results
         state["error_message"] = None

@@ -29,7 +29,13 @@ ds{dataset_id}_{table_name}
 
 ### 2. 查询规划
 
-`backend/app/services/nl2sql.py` 中的主规划顺序为：
+当前查询规划由以下模块协同完成：
+
+- `backend/app/services/nl2intent.py`：负责意图识别，输出 `chat` / `search` / `list` / `count`
+- `backend/app/services/nl2multimodal.py`：负责 `search` 意图的检索计划与执行接口
+- `backend/app/services/nl2sql.py`：仅负责结构化 `list` / `count` SQL 规划
+
+主规划顺序为：
 
 1. 识别意图：`chat` / `search` / `list` / `count`
 2. 非结构化问答或内容检索直接分流
@@ -197,7 +203,13 @@ python init_db.py
 
 ### 2. 配置 LLM
 
-后端通过 `backend/.env` 读取主要配置。建议新建 `backend/.env`：
+后端通过 `backend/.env` 读取主要配置。建议先复制示例文件：
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+最小配置示例：
 
 ```dotenv
 SECRET_KEY=change-me-in-production
@@ -208,12 +220,20 @@ LLM_MODEL=your-model-name
 TRACE_DB_PATH=./data/traces.db
 TRACE_FILE_LOG_ENABLED=true
 TRACE_LOG_DIR=./logs/traces
+
+# 可选：多模态远程模型
+VL_BASE_URL=
+VL_API_KEY=
+VL_MODEL=
+EMBEDDING_QWEN_API_URL=
+RERANKER_API_URL=
 ```
 
 说明：
 
 - `LLM_*` 用于 NL2SQL 主链路与心跳检查
 - `TRACE_*` 用于追踪与 SQL 缓存持久化
+- `VL_*`、`EMBEDDING_QWEN_API_URL`、`RERANKER_API_URL` 用于多模态远程模型；留空时自动回退本地特征链路
 - 请不要把密钥直接写入仓库脚本或提交到 Git
 
 ### 3. 创建第一个用户

@@ -91,8 +91,10 @@ export const dataSourceApi = {
 // ── 数据集 API ───────────────────────────────────────────────────────────
 
 export const datasetApi = {
-  create: (data: DatasetCreate) =>
-    api.post<any, AxiosResponse<Dataset>>('/datasets', data),
+  create: (data: DatasetCreate | FormData) =>
+    api.post<any, AxiosResponse<Dataset>>('/datasets', data, data instanceof FormData
+      ? { headers: { 'Content-Type': 'multipart/form-data' } }
+      : undefined),
 
   list: (workspaceId: number, dataSourceId?: number) =>
     api.get<any, AxiosResponse<Dataset[]>>('/datasets', {

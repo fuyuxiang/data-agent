@@ -9,10 +9,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./data/chatbot.db
-      - LLM_BASE_URL=http://10.132.19.82:50270
-      - LLM_API_KEY=sk-8fA3kP2QxR7mJ9WZC6dE0T1B4yH5VnL
-      - LLM_MODEL=/models/Qwen3.5-27B-FP8
+      DATABASE_URL: "${DATABASE_URL:-sqlite:///./data/chatbot.db}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-https://your-openai-compatible-endpoint}"
+      LLM_API_KEY: "${LLM_API_KEY:-change-me}"
+      LLM_MODEL: "${LLM_MODEL:-your-model-name}"
+      VL_BASE_URL: "${VL_BASE_URL:-}"
+      VL_API_KEY: "${VL_API_KEY:-}"
+      VL_MODEL: "${VL_MODEL:-}"
+      EMBEDDING_QWEN_API_URL: "${EMBEDDING_QWEN_API_URL:-}"
+      RERANKER_API_URL: "${RERANKER_API_URL:-}"
     volumes:
       - ./backend:/app
       - ./data:/app/data
@@ -40,9 +45,9 @@ services:
   db:
     image: postgres:15
     environment:
-      - POSTGRES_USER=chatbot
-      - POSTGRES_PASSWORD=chatbot123
-      - POSTGRES_DB=chatbot
+      POSTGRES_USER: "${POSTGRES_USER:-chatbot}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me}"
+      POSTGRES_DB: "${POSTGRES_DB:-chatbot}"
     ports:
       - "5432:5432"
     volumes:
