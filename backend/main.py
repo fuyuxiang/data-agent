@@ -45,6 +45,11 @@ app.mount("/query-files", StaticFiles(directory=str(QUERY_UPLOAD_ROOT)), name="q
 @app.on_event("startup")
 async def setup_trace_system():
     """初始化 Trace 与 SQL 缓存"""
+    # 兼容旧 SQLite 库，先补齐缺失表/字段，避免启动期任务查询直接打挂服务。
+    from init_db import init_db
+
+    init_db()
+
     trace_db_path = Path(settings.TRACE_DB_PATH)
     if not trace_db_path.is_absolute():
         trace_db_path = (Path(__file__).resolve().parent / trace_db_path).resolve()
