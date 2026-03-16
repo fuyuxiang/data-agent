@@ -1,9 +1,10 @@
 """
 数据集管理 API
 """
-from typing import List
+import json
+from typing import List, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
@@ -18,6 +19,60 @@ from app.schemas.schemas import (
 from app.services.dataset import DatasetService
 
 router = APIRouter()
+
+
+def _dump_json_models(items):
+    if not items:
+        return None
+    return [item.model_dump() if hasattr(item, "model_dump") else item for item in items]
+
+
+def _parse_form_list(raw_value) -> List[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, list):
+        return [str(item).strip() for item in raw_value if str(item).strip()]
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    return [str(raw_value).strip()]
+
+
+async def _parse_dataset_create_request(
+    request: Request,
+) -> Tuple[DatasetCreate, List[UploadFile], List[UploadFile], List[UploadFile]]:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        payload = await request.json()
+        return DatasetCreate.model_validate(payload), [], [], []
+
+    form = await request.form()
+    raw_payload = form.get("payload")
+    payload_data = json.loads(raw_payload) if raw_payload else {}
+
+    if "file_paths" not in payload_data:
+        payload_data["file_paths"] = _parse_form_list(form.get("file_paths"))
+    if "data_source_ids" in payload_data and isinstance(payload_data["data_source_ids"], str):
+        payload_data["data_source_ids"] = _parse_form_list(payload_data["data_source_ids"])
+    dataset_payload = DatasetCreate.model_validate(payload_data)
+
+    def _extract_uploads(field_name: str) -> List[UploadFile]:
+        return [item for item in form.getlist(field_name) if getattr(item, "filename", None)]
+
+    return (
+        dataset_payload,
+        _extract_uploads("csv_files"),
+        _extract_uploads("image_files"),
+        _extract_uploads("video_files"),
+    )
 
 
 async def verify_workspace_access(
@@ -39,55 +94,69 @@ async def verify_workspace_access(
 
 @router.post("", response_model=DatasetResponse)
 async def create_dataset(
-    data: DatasetCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """创建数据集"""
-    # 处理 data_source_ids 和 data_source_id
+    data, csv_files, image_files, video_files = await _parse_dataset_create_request(request)
+
     data_source_ids = data.data_source_ids or []
     if data.data_source_id and data.data_source_id not in data_source_ids:
         data_source_ids.append(data.data_source_id)
 
-    if not data_source_ids:
+    workspace_id = data.workspace_id
+    data_sources = []
+    if data_source_ids:
+        result = await db.execute(select(DataSource).where(DataSource.id.in_(data_source_ids)))
+        data_sources = result.scalars().all()
+        if len(data_sources) != len(data_source_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="部分数据源不存在",
+            )
+        workspace_id = workspace_id or data_sources[0].workspace_id
+        if any(data_source.workspace_id != workspace_id for data_source in data_sources):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="数据源必须属于同一工作空间",
+            )
+
+    if not workspace_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请至少选择一个数据源",
+            detail="缺少 workspace_id",
         )
 
-    # 验证数据源存在
-    result = await db.execute(
-        select(DataSource).where(DataSource.id.in_(data_source_ids))
-    )
-    data_sources = result.scalars().all()
-
-    if len(data_sources) != len(data_source_ids):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="部分数据源不存在",
-        )
-
-    # 验证用户是否有权限访问该数据源所在的工作空间
-    workspace_id = data_sources[0].workspace_id
     if not await verify_workspace_access(workspace_id, current_user, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权在该工作空间创建数据集",
         )
 
-    # 创建数据集
     service = DatasetService(db)
-    dataset = await service.create_dataset(
-        workspace_id=workspace_id,
-        data_source_ids=data_source_ids,
-        name=data.name,
-        description=data.description,
-        metrics=data.metrics,
-        dimensions=data.dimensions,
-        aliases=data.aliases,
-        business_rules=data.business_rules,
-        status=data.status,
-    )
+    try:
+        dataset = await service.create_dataset_with_inputs(
+            workspace_id=workspace_id,
+            data_source_ids=data_source_ids,
+            data_source_id=data.data_source_id,
+            csv_uploads=csv_files,
+            image_uploads=image_files,
+            video_uploads=video_files,
+            file_paths=data.file_paths,
+            name=data.name,
+            description=data.description,
+            metrics=_dump_json_models(data.metrics),
+            dimensions=_dump_json_models(data.dimensions),
+            aliases=_dump_json_models(data.aliases),
+            business_rules=data.business_rules,
+            status=data.status or "draft",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
     return dataset
 

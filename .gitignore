@@ -16,6 +16,8 @@ __pycache__/
 # Local env files
 .env
 .env.*
+!.env.example
+!backend/.env.example
 
 # Frontend dependencies and build output
 frontend/node_modules/
@@ -33,3 +35,8 @@ backend/data/*.sqlite
 backend/data/*.sqlite3
 backend/data/*.duckdb
 backend/data/uploads/
+backend/data/media/
+backend/data/query_uploads/
+
+# Local test dependencies
+backend/.test-deps/

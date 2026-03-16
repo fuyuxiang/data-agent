@@ -1,16 +1,29 @@
 """
-初始化数据库表（同步版本）
+初始化数据库表，并补齐媒体相关增量 schema。
 """
-from app.core.database import engine, Base
+from app.core.database import Base, engine
 from app.models.models import (
-    Workspace, User, UserWorkspace, DataSource, CSVFile, DataSourceSchema,
-    Dataset, Conversation, Message, QueryHistory, AuditLog
+    AuditLog,
+    CSVFile,
+    DataSource,
+    DataSourceSchema,
+    Dataset,
+    DatasetMediaResource,
+    ImageIndex,
+    QueryHistory,
+    User,
+    UserWorkspace,
+    VideoSegmentIndex,
+    Workspace,
 )
+from scripts.migrate_media_schema import migrate_media_schema
 
-def init_db():
-    # 创建所有表
+
+def init_db() -> None:
     Base.metadata.create_all(engine)
-    print("数据库表创建成功!")
+    migrate_media_schema(engine)
+    print("数据库表创建/迁移成功!")
+
 
 if __name__ == "__main__":
     init_db()

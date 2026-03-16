@@ -10,78 +10,20 @@ NL2SQL 多 Agent 规划服务（Intent -> Coder -> Reviewer -> Self-Correction�
 """
 
 import json
-import os
 import re
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
-@dataclass
-class QueryPlan:
-    """查询计划"""
-    intent: str
-    sql: str
-    params: List
-    filters: Dict
-
-
-def _parse_top_k(text: str, default: int = 20) -> int:
-    """解析 TOP K 数量"""
-    match = re.search(r"(前|top|TOP)\s*(\d+)", text)
-    if match:
-        return int(match.group(2))
-    match = re.search(r"(\d+)\s*条", text)
-    if match:
-        return int(match.group(1))
-    return default
-
-
-# 闲聊模式
-_CHAT_PATTERNS = [
-    # 问候
-    "你好", "您好", "hello", "hi", "嗨", "hey",
-    # 感谢/告别
-    "谢谢", "感谢", "再见", "拜拜", "bye",
-    # 自我介绍/能力询问
-    "你是谁", "你叫什么", "你能做什么", "你会什么", "怎么用", "使用说明", "帮助",
-    # 纯闲聊
-    "今天天气", "讲个笑话", "你好吗",
-]
-
-# 数据库查询关键词
-_QUERY_KEYWORDS = [
-    "查询", "查看", "搜索", "查找", "查一下", "找一下", "列出",
-    "统计", "多少", "数量", "总数", "分布", "TOP", "top", "排名",
-    "对比", "比较", "差异", "vs", "VS",
-    "告警", "事件", "设备", "街道", "区县", "置信度", "工单",
-    "最近", "今天", "昨天", "本月", "本周",
-]
-
-# 结构化查询强信号
-_STRUCTURED_KEYWORDS = [
-    "统计", "多少", "数量", "总数", "分布", "TOP", "top", "排名",
-    "对比", "比较", "差异", "vs", "VS",
-    "按街道", "按设备", "按类型", "按区", "按算法", "GROUP", "group",
-]
-
-# 视觉/内容描述关键词
-_VISUAL_KEYWORDS = [
-    # 颜色
-    "红色", "蓝色", "白色", "黑色", "黄色", "绿色", "灰色", "橙色", "棕色",
-    # 物体
-    "挖掘机", "卡车", "轿车", "货车", "吊车", "推土机", "铲车", "摩托", "自行车",
-    "人", "行人", "工人", "安全帽", "围栏", "塔吊", "电线杆", "铁塔",
-    # 场景描述
-    "沙地", "土坡", "工地", "草地", "马路", "停车场", "河边", "树林",
-    # 动作/状态
-    "停在", "停放", "行驶", "施工", "挖掘", "倒塌", "倾斜",
-    # 搜图意图
-    "找图", "找图片", "搜图", "类似的", "相似的", "像这样", "长什么样",
-    "有没有", "有什么图", "图片", "照片",
-]
+from app.services.llm_utils import (
+    call_llm_chat as _call_llm_chat,
+    get_llm_config as _get_llm_config,
+    has_llm_config as _has_llm_config,
+    parse_llm_json as _parse_llm_json,
+)
+from app.services.nl2intent import run_intent_agent as _run_intent_agent
+from app.services.nl2multimodal import build_multimodal_query_plan as _build_multimodal_query_plan
+from app.services.query_plan import QueryPlan
 
 _RAW_LIST_HINTS = [
     "明细", "详情", "样例", "样本", "原始数据",
@@ -93,39 +35,6 @@ _SHORT_SESSION_MAX_TURNS = 3
 _SHORT_SESSION_MAX_SCHEMA_COLUMNS = 8
 _SHORT_SESSION_MAX_SQL_LEN = 320
 _SHORT_SESSION_MAX_TEXT_LEN = 220
-
-
-def _is_visual_query(text: str) -> bool:
-    """判断是否为视觉内容描述类查询，应走向量检索"""
-    # 有结构化强信号 → 不走向量
-    if any(k in text for k in _STRUCTURED_KEYWORDS):
-        return False
-    # 命中视觉关键词
-    visual_hits = sum(1 for k in _VISUAL_KEYWORDS if k in text)
-    if visual_hits >= 1:
-        return True
-    return False
-
-
-def _parse_intent(text: str) -> str:
-    """解析用户意图"""
-    t = text.strip()
-    # 先检查是否是视觉内容描述（走向量检索）
-    if _is_visual_query(t):
-        return "search"
-    # 再检查是否命中查询关键词（优先级最高）
-    if any(k in t for k in _QUERY_KEYWORDS):
-        if any(k in t for k in ["多少", "统计", "数量", "总数", "分布", "TOP", "top", "排名", "对比", "比较", "差异", "vs", "VS", "构成", "结构", "占比", "组成", "拆分"]):
-            return "count"
-        return "list"
-    # 再检查是否是闲聊
-    t_lower = t.lower()
-    if any(p in t_lower for p in _CHAT_PATTERNS):
-        return "chat"
-    # 短文本且无查询关键词 → 大概率闲聊
-    if len(t) <= 6:
-        return "chat"
-    return "list"
 
 
 def _truncate_text(value: Any, max_len: int) -> str:
@@ -562,108 +471,6 @@ def _rank_candidate_tables(text: str, table_names: List[str], intent: str) -> Li
 
     ranked.sort(key=lambda item: (-int(item.get("score", 0)), int(item.get("order", 0))))
     return ranked
-
-
-def _get_llm_config(config: Dict):
-    """提取 LLM 连接配置"""
-    llm_cfg = config.get("llm", {})
-
-    # 优先使用环境变量 LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-    api_key = os.getenv("LLM_API_KEY") or llm_cfg.get("api_key")
-    if not api_key:
-        raise RuntimeError("LLM API key not configured")
-
-    base_url = os.getenv("LLM_BASE_URL") or llm_cfg.get("base_url", "https://api.deepseek.com")
-    model = os.getenv("LLM_MODEL") or llm_cfg.get("model", "deepseek-chat")
-    url = base_url.rstrip("/") + "/v1/chat/completions"
-    timeout = llm_cfg.get("timeout", 30)
-
-    return api_key, url, model, timeout
-
-
-def _call_llm_chat(api_key: str, url: str, model: str, timeout: int,
-                   system_prompt: str, user_prompt: str) -> str:
-    """通用 LLM 调用"""
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        status_code = exc.response.status_code if exc.response is not None else None
-        # 部分 OpenAI 兼容网关不支持 response_format，降级重试一次
-        if status_code in {400, 422}:
-            fallback_payload = dict(payload)
-            fallback_payload.pop("response_format", None)
-            response = requests.post(url, headers=headers, json=fallback_payload, timeout=timeout)
-            response.raise_for_status()
-        else:
-            raise
-    data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
-
-
-def _strip_think_blocks(text: str) -> str:
-    """去除常见推理标签，保留可解析内容"""
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<\s*/?\s*think\s*>", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip()
-
-
-def _extract_first_json_object(text: str) -> Optional[str]:
-    """从文本中提取第一个完整 JSON 对象"""
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        for idx in range(start, len(text)):
-            ch = text[idx]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start: idx + 1]
-        start = text.find("{", start + 1)
-    return None
-
-
-def _parse_llm_json(content: str) -> dict:
-    """从 LLM 输出中提取 JSON 对象"""
-    text = _strip_think_blocks(content.strip())
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [line for line in lines if not line.strip().startswith("```")]
-        text = "\n".join(lines)
-
-    candidate = _extract_first_json_object(text) or text
-    try:
-        return json.loads(candidate)
-    except Exception as exc:
-        raise RuntimeError(f"LLM 输出不是有效 JSON: {content}") from exc
 
 
 def _build_schema_prompt_for_selected_tables(table_names: List[str]) -> str:
@@ -1269,13 +1076,6 @@ def _call_deepseek_sql_from_dsl_with_retry(
     }
 
 
-def _has_llm_config(config: Dict) -> bool:
-    """是否存在可用 LLM 配置"""
-    llm_cfg = config.get("llm", {})
-    api_key = os.getenv("LLM_API_KEY") or llm_cfg.get("api_key")
-    return bool(api_key)
-
-
 def _is_sql_text_valid(sql: str) -> bool:
     """SQL 文本是否基本可用"""
     return bool(sql and sql.strip() and "FROM None" not in sql)
@@ -1537,58 +1337,6 @@ def _auto_correct_intent(plan: QueryPlan) -> QueryPlan:
     return plan
 
 
-def _run_intent_agent(question: str, config: Dict, context_prompt: str = "") -> Dict[str, Any]:
-    """Intent Agent：优先使用 LLM 识别意图，失败回退轻量规则"""
-    fallback_intent = _parse_intent(question)
-    if not _has_llm_config(config):
-        return {
-            "intent": fallback_intent,
-            "confidence": 0.55,
-            "source": "rule_fallback",
-            "reason": "LLM 不可用，使用规则回退",
-        }
-
-    try:
-        api_key, url, model, timeout = _get_llm_config(config)
-        system_prompt = (
-            "你是意图识别 Agent。请将用户问题识别为下列四类之一：chat/search/list/count。\n"
-            "注意：search 仅用于视觉内容检索（如图片、照片、相似图检索），\n"
-            "涉及数据库表/字段/统计/对比/金额/收入/账期等结构化数据问题必须归类为 list 或 count。\n"
-            "若用户当前提问明显是在追问上一轮结果，可结合短会话上下文补全理解；若当前问题已经完整自洽，以当前问题为准。\n"
-            "仅输出 JSON：{\"intent\":\"chat|search|list|count\",\"confidence\":0~1,\"reason\":\"...\"}"
-        )
-        user_prompt = f"{context_prompt}问题: {question}"
-        obj = _parse_llm_json(_call_llm_chat(api_key, url, model, timeout, system_prompt, user_prompt))
-        intent = str(obj.get("intent") or fallback_intent).lower()
-        if intent not in {"chat", "search", "list", "count"}:
-            intent = fallback_intent
-
-        reason = str(obj.get("reason") or "LLM intent classify")
-
-        # 强约束：仅视觉语义请求才允许进入向量检索，避免结构化查询被误分流。
-        if intent == "search" and not _is_visual_query(question):
-            intent = fallback_intent if fallback_intent in {"list", "count"} else "list"
-            reason = f"intent_guardrail_override_to_{intent}: non_visual_query"
-
-        try:
-            confidence = float(obj.get("confidence", 0.75))
-        except Exception:
-            confidence = 0.75
-        return {
-            "intent": intent,
-            "confidence": max(0.0, min(1.0, confidence)),
-            "source": "llm",
-            "reason": reason,
-        }
-    except Exception as exc:
-        return {
-            "intent": fallback_intent,
-            "confidence": 0.5,
-            "source": "rule_fallback",
-            "reason": f"intent_agent_fallback:{str(exc)[:120]}",
-        }
-
-
 def _run_reviewer_agent(
     plan: QueryPlan,
     *,
@@ -1658,21 +1406,8 @@ def build_query_plan(
             session_meta,
         )
     if parsed_intent == "search":
-        top_k = _parse_top_k(planning_text, default=10)
         return _apply_short_session_metadata(
-            QueryPlan(
-                intent="search",
-                sql="",
-                params=[],
-                filters={
-                    "query_text": planning_text,
-                    "top_k": top_k,
-                    "plan_source": "llm",
-                    "agent_mode": "multi_agent",
-                    "confidence": float(intent_meta.get("confidence", 1.0)),
-                    "intent_agent": intent_meta,
-                },
-            ),
+            _build_multimodal_query_plan(planning_text, intent_meta=intent_meta, request_context=context),
             session_meta,
         )
 

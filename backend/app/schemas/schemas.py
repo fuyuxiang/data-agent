@@ -193,8 +193,10 @@ class DatasetBase(BaseModel):
 
 
 class DatasetCreate(DatasetBase):
+    workspace_id: Optional[int] = None
     data_source_ids: Optional[List[int]] = None
     data_source_id: Optional[int] = None  # 兼容旧版
+    file_paths: Optional[List[str]] = None
     metrics: Optional[List[MetricDefinition]] = None
     dimensions: Optional[List[DimensionDefinition]] = None
     aliases: Optional[List[AliasMapping]] = None
@@ -220,6 +222,13 @@ class DatasetResponse(DatasetBase):
     data_source_id: Optional[int] = None
     data_source_ids: Optional[List[int]] = None
     status: str
+    processing_status: str = "ready"
+    progress: Optional[float] = None
+    error_message: Optional[str] = None
+    media_count: int = 0
+    processed_count: int = 0
+    failed_count: int = 0
+    last_processed_at: Optional[datetime] = None
     metrics: Optional[List[dict]] = None
     dimensions: Optional[List[dict]] = None
     aliases: Optional[List[dict]] = None
@@ -261,6 +270,29 @@ class QueryRequest(BaseModel):
     dataset_id: Optional[int] = None
     table_names: Optional[List[str]] = None  # 用户选择的表名列表
     context: Optional[QuerySessionContext] = None  # 短会话上下文
+    query_image_path: Optional[str] = None
+    query_video_path: Optional[str] = None
+
+
+class MultimodalSearchExtra(BaseModel):
+    caption_text: Optional[str] = None
+    asr_text: Optional[str] = None
+    ocr_text: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class MultimodalSearchResult(BaseModel):
+    type: str
+    image_id: Optional[int] = None
+    video_id: Optional[int] = None
+    start_sec: Optional[float] = None
+    end_sec: Optional[float] = None
+    score: float
+    preview_url: Optional[str] = None
+    preview_frame: Optional[str] = None
+    dataset_id: int
+    resource_id: int
+    extra: Optional[MultimodalSearchExtra] = None
 
 
 class ExecuteSqlRequest(BaseModel):

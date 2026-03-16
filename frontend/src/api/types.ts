@@ -84,6 +84,13 @@ export interface Dataset {
   name: string
   description?: string
   status: 'draft' | 'active' | 'deprecated'
+  processing_status: 'pending' | 'processing' | 'ready' | 'failed'
+  progress?: number
+  error_message?: string
+  media_count: number
+  processed_count: number
+  failed_count: number
+  last_processed_at?: string
   metrics?: MetricDefinition[]
   dimensions?: DimensionDefinition[]
   aliases?: AliasMapping[]
@@ -112,10 +119,12 @@ export interface AliasMapping {
 }
 
 export interface DatasetCreate {
+  workspace_id?: number
   name: string
   description?: string
   data_source_ids?: number[]
   data_source_id?: number
+  file_paths?: string[]
   metrics?: MetricDefinition[]
   dimensions?: DimensionDefinition[]
   aliases?: AliasMapping[]
@@ -130,6 +139,8 @@ export interface QueryRequest {
   dataset_id?: number
   table_names?: string[]  // 用户选择的表名列表
   context?: QuerySessionContext
+  query_image_path?: string
+  query_video_path?: string
 }
 
 export interface QueryContextTurn {

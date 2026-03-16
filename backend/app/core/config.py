@@ -45,6 +45,23 @@ class Settings(BaseSettings):
     TRACE_FILE_LOG_ENABLED: bool = True
     TRACE_LOG_DIR: str = "./logs/traces"
 
+    # Media ingestion / processing
+    MEDIA_STORAGE_DIR: str = "./data/media"
+    MEDIA_QUERY_UPLOAD_DIR: str = "./data/query_uploads"
+    MEDIA_TASK_WORKERS: int = 1
+    MEDIA_ENABLE_REMOTE_MODELS: bool = True
+    MEDIA_IMAGE_MAX_MB: int = 50
+    MEDIA_VIDEO_MAX_MB: int = 1024
+    VIDEO_SEGMENT_WINDOW_SEC: float = 8.0
+    VIDEO_SEGMENT_STRIDE_SEC: float = 4.0
+
+    # Multimodal model endpoints
+    VL_BASE_URL: Optional[str] = os.getenv("VL_BASE_URL")
+    VL_API_KEY: Optional[str] = os.getenv("VL_API_KEY")
+    VL_MODEL: Optional[str] = os.getenv("VL_MODEL")
+    EMBEDDING_QWEN_API_URL: Optional[str] = os.getenv("EMBEDDING_QWEN_API_URL")
+    RERANKER_API_URL: Optional[str] = os.getenv("RERANKER_API_URL")
+
     # 加密配置
     ENCRYPTION_KEY: Optional[bytes] = None
 

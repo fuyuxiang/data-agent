@@ -32,6 +32,7 @@ const datasets = ref<Dataset[]>([])
 const selectedDataset = ref<Dataset | null>(null)
 const tableSearch = ref('')
 const selectedTables = ref<TableItem[]>([])
+let datasetPollTimer: ReturnType<typeof setInterval> | null = null
 
 // 数据表（初始为空，选择数据集后加载）
 const allTables = ref<TableItem[]>([])
@@ -56,6 +57,23 @@ const filteredTables = computed(() => {
 // 已选数据表
 const selectedTableLabels = computed(() => {
   return allTables.value.filter(t => t.checked).map(t => t.label)
+})
+
+const selectedDatasetWarning = computed(() => {
+  if (!selectedDataset.value) return null
+  if (selectedDataset.value.processing_status === 'processing' || selectedDataset.value.processing_status === 'pending') {
+    return {
+      type: 'warning',
+      title: '当前数据集中的图片或视频仍在处理中，检索结果可能不完整',
+    }
+  }
+  if (selectedDataset.value.processing_status === 'failed') {
+    return {
+      type: 'error',
+      title: selectedDataset.value.error_message || '当前数据集中的部分图片或视频处理失败',
+    }
+  }
+  return null
 })
 
 type ResultViewMode = 'detail' | 'chart'
@@ -688,9 +706,17 @@ const loadDatasets = async () => {
         // 加载第一个数据集的表结构
         await handleDatasetChange(datasets.value[0])
       } else if (selectedDataset.value) {
-        // 刷新当前选中数据集的表结构
-        await handleDatasetChange(selectedDataset.value)
+        const latestSelected = datasets.value.find((item) => item.id === selectedDataset.value?.id) || null
+        if (latestSelected) {
+          const prevSourceIds = JSON.stringify(selectedDataset.value.data_source_ids || [selectedDataset.value.data_source_id].filter(Boolean))
+          const nextSourceIds = JSON.stringify(latestSelected.data_source_ids || [latestSelected.data_source_id].filter(Boolean))
+          selectedDataset.value = latestSelected
+          if (allTables.value.length === 0 || prevSourceIds !== nextSourceIds) {
+            await handleDatasetChange(latestSelected)
+          }
+        }
       }
+      syncDatasetPolling()
     } catch (e) {
       console.error('加载数据集失败', e)
     }
@@ -706,10 +732,26 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeAllCharts)
   messageChartInstances.forEach((chart) => chart.dispose())
   messageChartInstances.clear()
+  if (datasetPollTimer) {
+    clearInterval(datasetPollTimer)
+    datasetPollTimer = null
+  }
 })
 
 // 监听工作空间变化
 watch(() => userStore.currentWorkspace, loadDatasets)
+
+const syncDatasetPolling = () => {
+  const hasPending = datasets.value.some((item) => ['pending', 'processing'].includes(item.processing_status))
+  if (hasPending && !datasetPollTimer) {
+    datasetPollTimer = setInterval(() => loadDatasets(), 5000)
+    return
+  }
+  if (!hasPending && datasetPollTimer) {
+    clearInterval(datasetPollTimer)
+    datasetPollTimer = null
+  }
+}
 
 // 切换数据集
 const handleDatasetChange = async (dataset: Dataset) => {
@@ -766,6 +808,40 @@ const handleDatasetChange = async (dataset: Dataset) => {
   } else {
     console.log('该数据集没有关联的数据源')
   }
+}
+
+const getDatasetProcessingTagType = (status?: Dataset['processing_status']) => {
+  if (status === 'ready') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'processing') return 'warning'
+  return 'info'
+}
+
+const getDatasetProcessingText = (dataset?: Dataset | null) => {
+  if (!dataset) return ''
+  if (dataset.processing_status === 'ready') return dataset.media_count > 0 ? '可检索' : '已就绪'
+  if (dataset.processing_status === 'failed') return '处理失败'
+  if (dataset.processing_status === 'processing') return '处理中'
+  return '待处理'
+}
+
+const getSearchPreview = (row: Record<string, any>) => row.preview_url || row.preview_frame || ''
+
+const formatSearchExtra = (row: Record<string, any>) => {
+  const extra = row.extra || {}
+  return extra.caption_text || extra.asr_text || extra.ocr_text || '-'
+}
+
+const formatSearchTimeRange = (row: Record<string, any>) => {
+  if (typeof row.start_sec !== 'number' || typeof row.end_sec !== 'number') return '-'
+  return `${row.start_sec.toFixed(1)}s - ${row.end_sec.toFixed(1)}s`
+}
+
+const formatSearchScore = (row: Record<string, any>) => {
+  if (typeof row.score === 'number') return row.score.toFixed(3)
+  if (typeof row.hybrid_score === 'number') return row.hybrid_score.toFixed(3)
+  if (typeof row._distance === 'number') return (1 / (1 + row._distance)).toFixed(3)
+  return '-'
 }
 
 // 切换数据表选择
@@ -832,6 +908,7 @@ const handleRerunSql = async (msgIdx: number, msgData: any) => {
       msgData.evidence = response.data.evidence || null
       msgData.plan_source = response.data.plan_source || 'manual_sql'
       msgData.confidence = typeof response.data.confidence === 'number' ? response.data.confidence : 1
+      msgData.warnings = response.data.warnings || []
       msgData.clarification_needed = !!response.data.clarification_needed
       msgData.clarification_options = response.data.clarification_options || []
       msgData.table_names = tableNamesForRerun
@@ -1080,6 +1157,7 @@ const handleQuery = async () => {
                     confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
                       ? (finalData?.confidence ?? finalFilters?.confidence)
                       : undefined,
+                    warnings: finalData?.warnings || [],
                     clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
                     clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
                     // 保存生成 SQL 时使用的表名和数据集，用于重新执行
@@ -1174,6 +1252,7 @@ const handleQuery = async () => {
           confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
             ? (finalData?.confidence ?? finalFilters?.confidence)
             : undefined,
+          warnings: finalData?.warnings || [],
           clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
           clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
           table_names: selectedTableNames,
@@ -1246,9 +1325,25 @@ const handleQuery = async () => {
             :key="ds.id"
             :label="ds.name"
             :value="ds"
-          />
+          >
+            <div class="dataset-option">
+              <span>{{ ds.name }}</span>
+              <el-tag size="small" :type="getDatasetProcessingTagType(ds.processing_status)">
+                {{ getDatasetProcessingText(ds) }}
+              </el-tag>
+            </div>
+          </el-option>
         </el-select>
       </div>
+
+      <el-alert
+        v-if="selectedDatasetWarning"
+        :title="selectedDatasetWarning.title"
+        :type="selectedDatasetWarning.type as any"
+        :closable="false"
+        show-icon
+        class="dataset-warning"
+      />
 
       <div class="table-search" v-if="selectedDataset">
         <el-input
@@ -1421,6 +1516,15 @@ const handleQuery = async () => {
                   </div>
                 </div>
 
+                <el-alert
+                  v-if="msg.data && msg.data.warnings && msg.data.warnings.length > 0"
+                  :title="msg.data.warnings[0]"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="result-warning"
+                />
+
                 <!-- SQL卡片 - 可编辑 -->
                 <div v-if="msg.data && msg.data.sql" class="sql-card">
                   <div class="card-header">
@@ -1515,15 +1619,44 @@ const handleQuery = async () => {
                     <!-- 向量检索结果展示（包含相似度分数） -->
                     <template v-if="msg.data.intent === 'search'">
                       <el-table :data="msg.data.result_rows || []" border stripe size="small" max-height="350" class="result-table">
-                        <el-table-column v-for="col in msg.data.result_schema" :key="col.name" :prop="col.name" :label="col.name" min-width="120" show-overflow-tooltip />
-                        <el-table-column v-if="msg.data.result_rows && msg.data.result_rows[0] && msg.data.result_rows[0]._distance" label="相似度" width="100" align="center">
+                        <el-table-column label="类型" min-width="80" align="center">
                           <template #default="{ row }">
-                            <el-tag size="small" type="success">{{ (1 / (1 + (row._distance || 0))).toFixed(3) }}</el-tag>
+                            <el-tag size="small" :type="row.type === 'video' ? 'warning' : 'success'">
+                              {{ row.type === 'video' ? '视频' : '图片' }}
+                            </el-tag>
                           </template>
                         </el-table-column>
-                        <el-table-column v-if="msg.data.result_rows && msg.data.result_rows[0] && msg.data.result_rows[0].hybrid_score" label="综合得分" width="100" align="center">
+                        <el-table-column label="预览" min-width="120" align="center">
                           <template #default="{ row }">
-                            <el-tag size="small" type="success">{{ (row.hybrid_score || 0).toFixed(3) }}</el-tag>
+                            <el-image
+                              v-if="getSearchPreview(row)"
+                              :src="getSearchPreview(row)"
+                              fit="cover"
+                              style="width: 88px; height: 56px; border-radius: 6px"
+                              :preview-src-list="[getSearchPreview(row)]"
+                            />
+                            <span v-else>-</span>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="目标" min-width="140" show-overflow-tooltip>
+                          <template #default="{ row }">
+                            <span v-if="row.type === 'video'">视频 #{{ row.video_id }}</span>
+                            <span v-else>图片 #{{ row.image_id }}</span>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="时间段" min-width="140">
+                          <template #default="{ row }">
+                            {{ formatSearchTimeRange(row) }}
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="分数" width="100" align="center">
+                          <template #default="{ row }">
+                            <el-tag size="small" type="success">{{ formatSearchScore(row) }}</el-tag>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="描述" min-width="220" show-overflow-tooltip>
+                          <template #default="{ row }">
+                            {{ formatSearchExtra(row) }}
                           </template>
                         </el-table-column>
                       </el-table>
@@ -1798,6 +1931,17 @@ const handleQuery = async () => {
 
 .dataset-select {
   width: 100%;
+}
+
+.dataset-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dataset-warning {
+  margin: 12px 16px 0;
 }
 
 .table-search {
@@ -2535,6 +2679,10 @@ const handleQuery = async () => {
       border-radius: 0 0 8px 8px;
     }
   }
+}
+
+.result-warning {
+  margin-bottom: 12px;
 }
 
 // 失败状态卡片

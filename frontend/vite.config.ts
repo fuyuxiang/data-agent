@@ -41,6 +41,14 @@ export default defineConfig({
           console.error('[Proxy] 错误:', err)
         }
       },
+      '/media-files': {
+        target: 'http://localhost:50805',
+        changeOrigin: true,
+      },
+      '/query-files': {
+        target: 'http://localhost:50805',
+        changeOrigin: true,
+      },
     },
   },
 })

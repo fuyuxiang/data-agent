@@ -2,9 +2,11 @@
 数据源服务 - 连接管理、Schema 探查
 """
 import os
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
+from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, text
 from cryptography.fernet import Fernet
@@ -95,6 +97,127 @@ class DataSourceService:
         await self.db.refresh(data_source)
 
         logger.info(f"创建数据源: {name} (ID: {data_source.id})")
+
+        return data_source
+
+    async def create_csv_data_source_from_upload(
+        self,
+        *,
+        workspace_id: int,
+        upload: UploadFile,
+        data_source_id: Optional[int] = None,
+    ) -> DataSource:
+        """保存 CSV 上传并创建/更新数据源。"""
+        if not upload.filename or not upload.filename.endswith(".csv"):
+            raise ValueError("只支持 CSV 文件")
+
+        file_id = uuid.uuid4().hex[:8]
+        filename = f"{file_id}_{Path(upload.filename).name}"
+        file_path = str(UPLOAD_DIR / filename)
+
+        content = await upload.read()
+        with open(file_path, "wb") as file_obj:
+            file_obj.write(content)
+
+        file_size = len(content)
+        row_count = None
+        column_count = None
+        try:
+            import pandas as pd
+
+            df = pd.read_csv(file_path)
+            row_count = len(df)
+            column_count = len(df.columns)
+        except Exception as exc:
+            logger.warning(f"解析 CSV 文件失败: {exc}")
+
+        if data_source_id:
+            from sqlalchemy import select
+
+            result = await self.db.execute(select(DataSource).where(DataSource.id == data_source_id))
+            data_source = result.scalar_one_or_none()
+            if not data_source:
+                raise ValueError("数据源不存在")
+            if data_source.type != DataSourceType.CSV:
+                raise ValueError("只能上传 CSV 文件到 CSV 类型的数据源")
+        else:
+            data_source = DataSource(
+                workspace_id=workspace_id,
+                name=Path(upload.filename).stem,
+                type=DataSourceType.CSV,
+                is_active=True,
+            )
+            self.db.add(data_source)
+            await self.db.flush()
+
+        csv_file = CSVFile(
+            data_source_id=data_source.id,
+            filename=upload.filename,
+            file_path=file_path,
+            file_size=file_size,
+            row_count=row_count,
+            column_count=column_count,
+        )
+        self.db.add(csv_file)
+        await self.db.commit()
+        await self.db.refresh(data_source)
+
+        try:
+            await self.refresh_schema(data_source)
+        except Exception as exc:
+            logger.warning(f"自动刷新 Schema 失败: {exc}")
+
+        return data_source
+
+    async def create_csv_data_source_from_path(
+        self,
+        *,
+        workspace_id: int,
+        file_path: str,
+        data_source_name: Optional[str] = None,
+    ) -> DataSource:
+        """从服务端可访问路径接入 CSV 数据源。"""
+        normalized_path = str(Path(file_path).expanduser().resolve())
+        if not normalized_path.endswith(".csv") or not os.path.exists(normalized_path):
+            raise ValueError("CSV 路径不存在或类型不合法")
+
+        row_count = None
+        column_count = None
+        file_size = os.path.getsize(normalized_path)
+        try:
+            import pandas as pd
+
+            df = pd.read_csv(normalized_path)
+            row_count = len(df)
+            column_count = len(df.columns)
+        except Exception as exc:
+            logger.warning(f"解析 CSV 文件失败: {exc}")
+
+        data_source = DataSource(
+            workspace_id=workspace_id,
+            name=data_source_name or Path(normalized_path).stem,
+            type=DataSourceType.CSV,
+            is_active=True,
+        )
+        self.db.add(data_source)
+        await self.db.flush()
+
+        csv_file = CSVFile(
+            data_source_id=data_source.id,
+            filename=Path(normalized_path).name,
+            file_path=normalized_path,
+            file_size=file_size,
+            row_count=row_count,
+            column_count=column_count,
+        )
+        self.db.add(csv_file)
+        await self.db.commit()
+        await self.db.refresh(data_source)
+
+        try:
+            await self.refresh_schema(data_source)
+        except Exception as exc:
+            logger.warning(f"自动刷新 Schema 失败: {exc}")
 
         return data_source
 

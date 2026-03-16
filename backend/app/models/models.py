@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -150,6 +151,26 @@ class DatasetStatus(str, enum.Enum):
     DEPRECATED = "deprecated"
 
 
+class ProcessingStatus(str, enum.Enum):
+    """通用处理状态"""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class MediaResourceType(str, enum.Enum):
+    """媒体资源类型"""
+    IMAGE = "image"
+    VIDEO = "video"
+
+
+class MediaSourceType(str, enum.Enum):
+    """媒体输入来源"""
+    UPLOAD = "upload"
+    PATH = "path"
+
+
 class Dataset(Base):
     """数据集 - 语义层定义"""
     __tablename__ = "datasets"
@@ -161,6 +182,13 @@ class Dataset(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(SQLEnum(DatasetStatus), default=DatasetStatus.DRAFT)
+    processing_status = Column(SQLEnum(ProcessingStatus), default=ProcessingStatus.READY)
+    progress = Column(Float, default=100.0)
+    error_message = Column(Text, nullable=True)
+    media_count = Column(Integer, default=0)
+    processed_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+    last_processed_at = Column(DateTime, nullable=True)
 
     # 语义层配置
     metrics = Column(JSON, nullable=True)  # 指标定义
@@ -175,6 +203,96 @@ class Dataset(Base):
     # 关系
     workspace = relationship("Workspace", back_populates="datasets")
     data_source = relationship("DataSource", back_populates="datasets")
+    media_resources = relationship("DatasetMediaResource", back_populates="dataset")
+    image_indexes = relationship("ImageIndex", back_populates="dataset")
+    video_segments = relationship("VideoSegmentIndex", back_populates="dataset")
+
+
+class DatasetMediaResource(Base):
+    """数据集原始媒体资源"""
+    __tablename__ = "dataset_media_resources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    resource_type = Column(SQLEnum(MediaResourceType), nullable=False)
+    source_type = Column(SQLEnum(MediaSourceType), nullable=False)
+    original_path = Column(String(1024), nullable=False)
+    stored_path = Column(String(1024), nullable=True)
+    file_name = Column(String(255), nullable=True)
+    mime_type = Column(String(255), nullable=True)
+    file_size = Column(Integer, nullable=True)
+    checksum = Column(String(128), nullable=True)
+    dedupe_key = Column(String(255), nullable=True)
+    status = Column(SQLEnum(ProcessingStatus), default=ProcessingStatus.PENDING)
+    media_metadata = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_processed_at = Column(DateTime, nullable=True)
+
+    dataset = relationship("Dataset", back_populates="media_resources")
+    image_index = relationship("ImageIndex", back_populates="resource", uselist=False)
+    video_segments = relationship("VideoSegmentIndex", back_populates="resource")
+
+    __table_args__ = (
+        Index("ix_dataset_media_resources_dataset_status", "dataset_id", "status"),
+        Index("ix_dataset_media_resources_dataset_dedupe", "dataset_id", "dedupe_key"),
+    )
+
+
+class ImageIndex(Base):
+    """图片索引"""
+    __tablename__ = "image_indexes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    resource_id = Column(Integer, ForeignKey("dataset_media_resources.id"), nullable=False, unique=True)
+    preview_path = Column(String(1024), nullable=True)
+    embedding = Column(JSON, nullable=True)
+    ocr_text = Column(Text, nullable=True)
+    caption_text = Column(Text, nullable=True)
+    tags = Column(JSON, nullable=True)
+    index_metadata = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    dataset = relationship("Dataset", back_populates="image_indexes")
+    resource = relationship("DatasetMediaResource", back_populates="image_index")
+
+    __table_args__ = (
+        Index("ix_image_indexes_dataset_resource", "dataset_id", "resource_id"),
+    )
+
+
+class VideoSegmentIndex(Base):
+    """视频逻辑切片索引"""
+    __tablename__ = "video_segment_indexes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    resource_id = Column(Integer, ForeignKey("dataset_media_resources.id"), nullable=False, index=True)
+    video_id = Column(Integer, nullable=False, index=True)
+    segment_index = Column(Integer, nullable=False)
+    start_sec = Column(Float, nullable=False)
+    end_sec = Column(Float, nullable=False)
+    keyframe_path = Column(String(1024), nullable=True)
+    embedding = Column(JSON, nullable=True)
+    caption_text = Column(Text, nullable=True)
+    asr_text = Column(Text, nullable=True)
+    ocr_text = Column(Text, nullable=True)
+    scene_tags = Column(JSON, nullable=True)
+    object_tags = Column(JSON, nullable=True)
+    index_metadata = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    dataset = relationship("Dataset", back_populates="video_segments")
+    resource = relationship("DatasetMediaResource", back_populates="video_segments")
+
+    __table_args__ = (
+        Index("ix_video_segment_indexes_dataset_video", "dataset_id", "video_id"),
+        Index("ix_video_segment_indexes_resource_segment", "resource_id", "segment_index"),
+    )
 
 class QueryHistory(Base):
     """查询历史"""
