@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from app.api import router as v1
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.services.annotation_store import ensure_annotation_dirs
+from app.services.annotation_tasks import get_annotation_task_manager
 from app.services.media_tasks import get_media_task_manager
 from app.services.media_utils import MEDIA_ROOT, QUERY_UPLOAD_ROOT, ensure_media_dirs
 from app.services.trace import init_trace_manager
@@ -35,6 +37,7 @@ app.add_middleware(
 )
 
 ensure_media_dirs()
+ensure_annotation_dirs()
 
 # 注册 API 路由
 app.include_router(v1, prefix="/api/v1")
@@ -66,12 +69,15 @@ async def setup_trace_system():
         log_dir=trace_log_dir,
     )
     ensure_media_dirs()
+    ensure_annotation_dirs()
     await get_media_task_manager().startup()
+    await get_annotation_task_manager().startup()
 
 
 @app.on_event("shutdown")
 async def shutdown_background_workers():
     await get_media_task_manager().shutdown()
+    await get_annotation_task_manager().shutdown()
 
 # 健康检查
 @app.get("/health")

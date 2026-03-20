@@ -16,6 +16,11 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       {
+        path: 'annotation',
+        name: 'Annotation',
+        component: () => import('@/views/annotation/AnnotationPage.vue'),
+      },
+      {
         path: 'query',
         name: 'Query',
         component: () => import('@/views/query/QueryPage.vue'),

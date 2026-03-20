@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     VL_MODEL: Optional[str] = os.getenv("VL_MODEL")
     EMBEDDING_QWEN_API_URL: Optional[str] = os.getenv("EMBEDDING_QWEN_API_URL")
     RERANKER_API_URL: Optional[str] = os.getenv("RERANKER_API_URL")
+    ANNOTATION_STORAGE_DIR: str = "./data/annotations"
+    ANNOTATION_TASK_WORKERS: int = 1
+    ANNOTATION_YOLO_MODEL_PATH: Optional[str] = os.getenv("ANNOTATION_YOLO_MODEL_PATH")
 
     # 加密配置
     ENCRYPTION_KEY: Optional[bytes] = None

@@ -3,6 +3,10 @@ import type {
   User,
   LoginParams,
   LoginResponse,
+  AnnotationMeta,
+  AnnotationOperationResponse,
+  AnnotationSession,
+  AnnotationSessionRequest,
   Workspace,
   DataSource,
   DataSourceCreate,
@@ -106,6 +110,61 @@ export const datasetApi = {
 
   delete: (id: number) =>
     api.delete<any, AxiosResponse<void>>(`/datasets/${id}`),
+}
+
+// ── 智能标注 API ─────────────────────────────────────────────────────────
+
+export const annotationApi = {
+  getMeta: () =>
+    api.get<any, AxiosResponse<AnnotationMeta>>('/annotations/meta'),
+
+  restore: (workspaceId: number, mediaType: 'image' | 'video', sourceDir: string) =>
+    api.get<any, AxiosResponse<AnnotationSession>>('/annotations/restore', {
+      params: { workspace_id: workspaceId, media_type: mediaType, source_dir: sourceDir },
+    }),
+
+  scan: (data: AnnotationSessionRequest) =>
+    api.post<any, AxiosResponse<AnnotationSession>>('/annotations/scan', data),
+
+  getSession: (sessionId: string, workspaceId: number) =>
+    api.get<any, AxiosResponse<AnnotationSession>>(`/annotations/sessions/${sessionId}`, {
+      params: { workspace_id: workspaceId },
+    }),
+
+  updateCursor: (sessionId: string, workspaceId: number, currentIndex: number) =>
+    api.patch<any, AxiosResponse<AnnotationSession>>(`/annotations/sessions/${sessionId}/cursor`, {
+      current_index: currentIndex,
+    }, {
+      params: { workspace_id: workspaceId },
+    }),
+
+  updateItemAnnotations: (
+    sessionId: string,
+    itemId: string,
+    workspaceId: number,
+    annotations: any[],
+  ) =>
+    api.patch<any, AxiosResponse<any>>(`/annotations/sessions/${sessionId}/items/${itemId}/annotations`, {
+      annotations,
+    }, {
+      params: { workspace_id: workspaceId },
+    }),
+
+  saveItem: (sessionId: string, itemId: string, workspaceId: number) =>
+    api.post<any, AxiosResponse<AnnotationOperationResponse>>(`/annotations/sessions/${sessionId}/items/${itemId}/save`, null, {
+      params: { workspace_id: workspaceId },
+    }),
+
+  exportSession: (sessionId: string, workspaceId: number) =>
+    api.post<any, AxiosResponse<AnnotationOperationResponse>>(`/annotations/sessions/${sessionId}/export`, null, {
+      params: { workspace_id: workspaceId },
+    }),
+
+  getItemFile: (sessionId: string, itemId: string, workspaceId: number, kind: 'source' | 'preview' | 'tracking' = 'source') =>
+    api.get<any, AxiosResponse<Blob>>(`/annotations/sessions/${sessionId}/items/${itemId}/file`, {
+      params: { workspace_id: workspaceId, kind },
+      responseType: 'blob',
+    }),
 }
 
 // ── 查询 API ─────────────────────────────────────────────────────────────

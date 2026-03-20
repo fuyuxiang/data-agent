@@ -240,6 +240,39 @@ class DatasetResponse(DatasetBase):
         from_attributes = True
 
 
+# ── Annotation ───────────────────────────────────────────────────────────
+
+class AnnotationSessionRequest(BaseModel):
+    workspace_id: int
+    media_type: str
+    source_dir: str
+    output_dir: Optional[str] = None
+    use_tracking: bool = True
+    frame_interval: int = 1
+    detect_size: int = 640
+    force_reprocess: bool = False
+
+
+class AnnotationCursorUpdateRequest(BaseModel):
+    current_index: int
+
+
+class AnnotationAnnotationsUpdateRequest(BaseModel):
+    annotations: List[dict]
+
+
+class AnnotationFileResponse(BaseModel):
+    key: str
+    class_name: str
+    label: str
+    class_id: int
+
+
+class AnnotationOperationResponse(BaseModel):
+    message: str
+    saved_paths: Optional[List[str]] = None
+
+
 # ── Query / NL2SQL ──────────────────────────────────────────────────────
 
 class QueryContextTurn(BaseModel):
