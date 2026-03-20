@@ -132,6 +132,99 @@ export interface DatasetCreate {
   status?: string
 }
 
+// 智能标注
+export type AnnotationMediaType = 'image' | 'video'
+
+export interface AnnotationClassInfo {
+  key: string
+  class_name: string
+  label: string
+  class_id: number
+}
+
+export interface AnnotationEngineInfo {
+  vision_available: boolean
+  yolo_available: boolean
+  vision_model?: string | null
+  yolo_model_path?: string | null
+  confidence_threshold?: number
+}
+
+export interface AnnotationMeta {
+  classes: AnnotationClassInfo[]
+  engine: AnnotationEngineInfo
+  defaults: {
+    image_dir?: string
+    video_dir?: string
+    output_dir?: string
+  }
+}
+
+export interface AnnotationBox {
+  class: string
+  class_id: number
+  confidence: number
+  bbox: number[]
+  manual: boolean
+  track_id?: number
+  age?: number
+  hits?: number
+}
+
+export interface AnnotationItem {
+  id: string
+  order_index: number
+  file_name: string
+  status: 'pending' | 'processing' | 'ready' | 'failed'
+  error_message?: string | null
+  description?: string
+  annotations: AnnotationBox[]
+  stats: Record<string, any>
+  width?: number | null
+  height?: number | null
+}
+
+export interface AnnotationSession {
+  id: string
+  workspace_id: number
+  media_type: AnnotationMediaType
+  source_dir: string
+  output_dir: string
+  status: 'pending' | 'processing' | 'ready' | 'failed'
+  current_index: number
+  progress: {
+    total: number
+    processed: number
+    failed: number
+    percent: number
+    message: string
+  }
+  options: {
+    use_tracking: boolean
+    frame_interval: number
+    detect_size: number
+  }
+  engine: AnnotationEngineInfo
+  items: AnnotationItem[]
+  restored?: boolean
+}
+
+export interface AnnotationSessionRequest {
+  workspace_id: number
+  media_type: AnnotationMediaType
+  source_dir: string
+  output_dir?: string
+  use_tracking?: boolean
+  frame_interval?: number
+  detect_size?: number
+  force_reprocess?: boolean
+}
+
+export interface AnnotationOperationResponse {
+  message: string
+  saved_paths?: string[]
+}
+
 // 查询
 export interface QueryRequest {
   question: string

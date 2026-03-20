@@ -20,6 +20,7 @@ cryptography>=42.0.0
 
 # LLM
 requests>=2.31.0
+openai>=1.40.0
 langchain>=0.3.0
 langgraph>=0.2.0
 
@@ -28,6 +29,7 @@ pandas>=2.2.0
 numpy>=1.26.4
 Pillow>=10.2.0
 opencv-python-headless>=4.10.0.84
+ultralytics>=8.3.0
 
 # 日志
 python-json-logger>=2.0.7

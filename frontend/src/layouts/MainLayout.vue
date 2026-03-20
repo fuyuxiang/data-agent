@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { authApi, systemApi } from '@/api'
@@ -9,7 +9,6 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 
-const activeMenu = ref('query')
 const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000
 
 type LlmMonitorStatus = 'checking' | 'up' | 'down'
@@ -27,6 +26,7 @@ let llmHeartbeatTimer: number | null = null
 
 const menuItems = [
   { key: 'query', title: '智能取数', icon: 'ChatDotRound', path: '/query' },
+  { key: 'annotation', title: '智能标注', icon: 'CollectionTag', path: '/annotation' },
   { key: 'config', title: '数据配置', icon: 'Setting', path: '/config' },
   { key: 'history', title: '历史记录', icon: 'Clock', path: '/history' },
   { key: 'settings', title: '系统设置', icon: 'Tools', path: '/settings' },
@@ -54,7 +54,6 @@ onBeforeUnmount(() => {
 })
 
 const handleMenuClick = (item: any) => {
-  activeMenu.value = item.key
   router.push(item.path)
 }
 
@@ -68,6 +67,9 @@ const handleLogout = () => {
 }
 
 const currentPath = computed(() => route.path)
+const activeMenu = computed(() => {
+  return menuItems.find(item => currentPath.value.startsWith(item.path))?.key || 'query'
+})
 const isFullWidthPage = computed(() => ['/query', '/config'].includes(route.path))
 const llmStatusClass = computed(() => {
   if (llmMonitor.value.status === 'up') return 'is-up'
