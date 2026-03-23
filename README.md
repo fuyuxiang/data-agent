@@ -1,153 +1,321 @@
 # 智能问数平台
 
-企业级自然语言取数与分析平台，提供完整的前后端实现：用户认证、工作空间、多数据源与数据集管理、CSV 导入、DuckDB 执行、LangGraph 编排的 NL2SQL、流式查询、手工 SQL、执行追踪与 SQL 长期复用。
+一个把结构化问数、多模态检索、智能标注放在同一套前后端里的桌面型应用仓库。当前代码已经实现：
 
-## 特性概览
+- 用户登录、工作空间切换与新建
+- 数据源与数据集管理
+- CSV 导入后加载到 DuckDB 的自然语言查询
+- `verified_queries`、`sql_cache`、LLM 多 Agent 的 NL2SQL 规划
+- 查询流式反馈、SQL 可编辑重跑、历史记录、Trace 与 LLM 心跳
+- 图片/视频离线处理、图片检索、视频片段检索、重排序
+- 图片自动标注、视频跟踪标注、图片框选修正、YOLO 标签导出
 
-- 用户体系与工作空间管理，支持注册、登录、工作空间切换与新建
-- 数据源管理，支持 `MySQL`、`PostgreSQL`、`SQL Server`、`DuckDB`、`CSV`
-- 数据集语义层配置，支持多数据源绑定、指标/维度/别名/业务规则定义
-- CSV 上传后自动保存到本地，并尝试抽取行列信息与 Schema
-- 查询页支持数据集选择、表选择、多轮短会话上下文、流式执行反馈
-- 查询结果支持明细表格与统计图表展示
-- 支持手工 SQL 执行，并自动校验表范围与 SQL 安全性
-- 内置 `trace`、结构化证据、`audit_id`、`trace_id`
-- 成功查询会自动写入长期 `sql_cache`，后续同类问题可直接复用
-- 侧边栏内置 LLM 心跳探测，前端可见环境状态
+## 代码现状说明
 
-## 当前查询链路
+这份 README 按当前代码实际行为整理，几个重要边界先说明：
 
-### 1. 数据准备
+- 查询主链路当前真正执行的是 `CSV -> DuckDB`。`MySQL`、`PostgreSQL`、`SQL Server`、`DuckDB` 类型数据源已经支持保存连接信息、连通性测试和 schema 刷新，但还没有接入 `/api/v1/queries` 的实际数据执行。
+- 数据集模型里有 `metrics`、`dimensions`、`aliases`、`business_rules` 字段，API 也能写入；但当前前端没有对应编辑界面，NL2SQL 链路也还没有消费这些语义字段。
+- 查询页当前是文本查询 UI。后端 `QueryRequest` 已支持 `query_image_path` / `query_video_path`，也实现了“以图搜图/搜视频”的服务逻辑，但前端还没有查询图片/视频上传入口。
+- 图片标注支持手工修框与 YOLO 标签导出；视频标注当前只支持自动检测、跟踪预览、统计和下载预览视频，不支持手工框编辑，也不导出 YOLO 标签。
+- `deploy/` 下的容器配置仍然更像草稿，不能视为已经打磨完成的生产部署方案。
 
-查询请求进入后，后端会先把数据集关联的 CSV 文件加载到 DuckDB，并为表名加上数据集作用域前缀：
+## 当前功能总览
+
+### 1. 账户与工作空间
+
+- 用户注册、登录、JWT 鉴权
+- 登录成功后自动选中用户的第一个工作空间
+- 注册时自动创建一个“默认工作空间”
+- 支持新建多个工作空间
+- 前端侧边栏可随时切换当前工作空间
+
+### 2. 数据源管理
+
+- 支持创建以下类型的数据源记录：
+  - `mysql`
+  - `postgresql`
+  - `sqlserver`
+  - `duckdb`
+  - `csv`
+- 支持数据库连接测试
+- 支持 schema 刷新并持久化表结构信息
+- 支持 CSV 上传到已有 CSV 数据源，或上传时自动创建新的 CSV 数据源
+- 支持列出某个数据源下的 CSV 文件
+- 支持删除单个 CSV 文件并自动尝试刷新 schema
+- 支持编辑、软删除数据源
+- 数据库密码使用 Fernet 加密存储
+
+### 3. 数据集管理
+
+- 数据集支持绑定一个或多个数据源
+- 创建数据集时支持混合接入：
+  - CSV 上传
+  - 图片上传
+  - 视频上传
+  - 服务端可访问路径
+- `file_paths` 既可以是单个文件，也可以是目录；目录会递归扫描支持的图片/视频文件
+- 新建包含图片/视频的数据集后，会自动进入异步离线处理队列
+- 数据集会维护媒体处理状态：
+  - `pending`
+  - `processing`
+  - `ready`
+  - `failed`
+- 同时维护处理进度、已处理数量、失败数量、最近处理时间、错误信息
+- 删除数据集采用软删除，状态改为 `deprecated`
+
+### 4. CSV 查询链路
+
+- 查询前会把数据集关联的 CSV 文件加载进 DuckDB
+- 表名会自动加上数据集作用域前缀，格式为：
 
 ```text
 ds{dataset_id}_{table_name}
 ```
 
-这样可以避免不同数据集出现同名表污染。
+- 这样可以避免不同数据集之间同名表相互污染
+- CSV 加载包含多轮容错策略：
+  - 基于表头探测分隔符
+  - 容错模式重试
+  - 单列表头异常自愈重载
+  - 历史绝对路径迁移修复
 
-### 2. 查询规划
+### 5. NL2SQL 与查询编排
 
-当前查询规划由以下模块协同完成：
+- 支持四类意图：
+  - `chat`
+  - `search`
+  - `list`
+  - `count`
+- 意图识别优先走 LLM，失败回退规则
+- 支持短会话上下文：
+  - 从当前前端会话里提取最近 3 轮有效查询
+  - 先由 LLM 判断当前问题是否是追问
+  - 若判定为追问，再把上一轮问题拼接成“补充要求”参与规划
+- `search` 直接进入多模态检索
+- `chat` 直接返回问答文本
+- `list` / `count` 的规划优先级为：
+  1. `verified_queries.json`
+  2. `sql_cache`
+  3. LLM 生成 DSL
+  4. LLM 基于 DSL 生成 SQL
+  5. Reviewer 校验
+  6. 自我修正
+  7. 失败时返回 `reject`
+- LLM 规划链路包含：
+  - Intent Agent
+  - Coder Agent
+  - Reviewer Agent
+  - Self-Correction
+- 规划结果会回填：
+  - `plan_source`
+  - `confidence`
+  - `candidate_tables`
+  - `context_applied`
+  - `clarification_needed`
+  - `clarification_options`
 
-- `backend/app/services/nl2intent.py`：负责意图识别，输出 `chat` / `search` / `list` / `count`
-- `backend/app/services/nl2multimodal.py`：负责 `search` 意图的检索计划与执行接口
-- `backend/app/services/nl2sql.py`：仅负责结构化 `list` / `count` SQL 规划
+### 6. SQL 安全与执行
 
-主规划顺序为：
+- 仅允许 `SELECT`
+- 禁止危险关键词与注释注入
+- 禁止堆叠语句
+- 支持表白名单校验
+- 执行前统一做 DuckDB `EXPLAIN`
+- 手工 SQL 会先做：
+  - 去注释
+  - 反引号转双引号
+  - 作用域表名映射
+  - 参数清洗
+- DuckDB 执行器默认会对无 `LIMIT` 的查询补一个默认限制
+- 执行结果会返回：
+  - 行数据
+  - schema
+  - 答案摘要
+  - 图表建议
+  - 结构化证据
+  - 执行历史
 
-1. 识别意图：`chat` / `search` / `list` / `count`
-2. 非结构化问答或内容检索直接分流
-3. 在候选表范围内优先匹配 `verified_queries.json`
-4. 若未命中，再尝试命中 `sql_cache`
-5. 若仍未命中，再走 LLM 多 Agent 生成 SQL
-6. Reviewer 不通过时执行自动修正
-7. 若仍无法生成可靠 SQL，则返回 `reject`
+### 7. Trace、SQL Cache 与历史
 
-### 3. 执行与回写
+- 每次编排执行都会记录 execution history
+- 查询结束后自动写入 `traces.db`
+- 成功 SQL 会自动沉淀到 `sql_cache`
+- `sql_cache` 命中后仍会再次过安全校验与 `EXPLAIN`
+- 失效缓存会自动移除
+- 前端在流式查询完成后会额外调用 `/api/v1/history` 写入 `query_histories`
+- `/api/v1/queries/{trace_id}/replay` 依赖 `query_histories`，所以只有被记录进历史的查询才能直接回放
 
-生成出的 SQL 在真正执行前会经过：
+### 8. 多模态检索
 
-- `SQLGuardrail.validate_sql()` 只允许安全 `SELECT`
-- DuckDB `EXPLAIN` 预检
-- 参数清洗与表白名单检查
+- 数据集中的图片会被处理为：
+  - 缩略预览图
+  - embedding
+  - caption
+  - tags
+- 数据集中的视频会被按时间窗口切片，当前默认：
+  - `VIDEO_SEGMENT_WINDOW_SEC=8`
+  - `VIDEO_SEGMENT_STRIDE_SEC=4`
+- 每个视频切片会生成：
+  - 关键帧
+  - embedding
+  - caption
+  - tags
+- 检索时优先在当前数据集的 `image_indexes` / `video_segment_indexes` 中搜索
+- 文本检索和图片检索都支持
+- 视频检索结果会合并相邻命中片段，返回时间范围与关键帧预览
+- 检索结果会经过 rerank
+- 若当前数据集没有媒体索引，会退回旧的 LanceDB 检索路径
 
-执行成功后会：
+### 9. 媒体模型回退机制
 
-- 返回结构化结果、答案摘要、图表建议、执行历史
-- 记录 `trace_id` / `audit_id`
-- 持久化到 `traces.db`
-- 自动写入 `sql_cache`，形成长期复用能力
+- 远程模型可用时，会优先调用：
+  - 文本/图片 embedding 服务
+  - 视觉大模型 caption 服务
+  - reranker 服务
+- 远程模型不可用时，会回退到本地确定性特征：
+  - 文本 hash embedding
+  - 图片颜色/缩略 embedding
+  - 基于文件名和主色的 caption
+  - 基于关键词命中的 rerank
 
-### plan_source 说明
+### 10. 智能标注
 
-接口返回里的 `plan_source` 常见值如下：
+- 图片标注：
+  - 优先 YOLO 检测
+  - 若视觉模型可用，再对裁剪目标做类别细分
+  - 生成预览图、描述文本、框列表
+- 视频标注：
+  - YOLO 逐帧检测
+  - 简化卡尔曼 + IoU 跟踪
+  - 生成预览视频和 tracking JSON
+  - 生成视频场景描述
+- 支持会话恢复：
+  - 后端会按 `workspace_id + media_type + source_dir` 生成稳定 session id
+  - 启动时会自动恢复未完成的标注任务
+- 图片标注页支持：
+  - 两次点击画框
+  - 修改类别
+  - 删除单个框
+  - 清空全部框
+  - 导出单张 YOLO 标签
+  - 批量导出全部 YOLO 标签
+- 视频标注页支持：
+  - 查看跟踪预览视频
+  - 下载预览视频
+  - 查看跟踪统计
+
+### 11. 前端交互体验
+
+- 查询页使用 SSE 流式展示处理过程
+- 每个查询结果都可以显示：
+  - 处理进度
+  - 意图识别结果
+  - 成功/失败状态
+  - SQL 编辑器
+  - 证据卡片
+  - 执行历史卡片
+  - 明细表
+  - 图表
+- 图表支持：
+  - 普通 ECharts 柱/线/饼图
+  - 排名结果的榜单式展示
+- 查询失败且需要澄清时，前端会展示候选表按钮
+- 侧边栏每 3 分钟检查一次 LLM 心跳
+- 数据集页和查询页都会轮询媒体处理状态
+
+## 当前前端页面
+
+### `/login`
+
+- 用户名密码登录
+- 登录后拉取用户信息与工作空间
+
+### `/query`
+
+- 选择当前工作空间下的数据集
+- 根据数据集关联数据源加载可选表
+- 支持多表勾选
+- 支持快捷示例
+- 支持短会话追问
+- 支持流式查询
+- 支持查看并修改生成 SQL 后重跑
+- 支持明细/图表切换
+- 支持查看 warnings、evidence、execution history、plan_source、confidence
+
+### `/config`
+
+- 查看工作空间下全部数据集
+- 新建/编辑/删除数据集
+- 内联新建数据库型数据源并绑定到数据集
+- 上传 CSV
+- 上传图片/视频
+- 填写服务端可访问路径
+- 展示媒体处理状态和错误
+
+### `/annotation`
+
+- 获取模型可用性与默认目录
+- 扫描目录并启动标注
+- 自动恢复已有标注会话
+- 图片标注修正与导出
+- 视频跟踪预览与统计
+
+### `/history`
+
+- 按数据集筛选历史查询
+- 展示问题、意图、状态、耗时、Trace ID、时间
+
+### `/settings`
+
+- 查看当前用户信息
+- 创建新工作空间
+
+## 查询链路
+
+```mermaid
+flowchart LR
+    U[用户问题] --> Q[前端 QueryPage]
+    Q --> SSE[/POST /api/v1/queries/stream/]
+    SSE --> P[Intent + Query Plan]
+    P -->|chat| A1[直接回复]
+    P -->|search| A2[多模态检索]
+    P -->|list/count| V[SQL Guardrail + EXPLAIN]
+    V --> E[DuckDB 执行]
+    E --> S[结构化证据 + 执行历史]
+    S --> T[Trace / SQL Cache]
+    T --> R[前端结果卡片]
+```
+
+### `plan_source` 取值
 
 | 值 | 含义 |
 | --- | --- |
 | `verified_query` | 命中人工维护的可信模板 |
 | `sql_cache` | 命中历史成功 SQL 缓存 |
-| `llm` | 由 LLM 规划生成 |
-| `manual_sql` | 由用户提交手工 SQL 执行 |
-| `reject` | 当前问题未通过规划或审查 |
+| `llm` | 由 LLM 多 Agent 生成 |
+| `manual_sql` | 用户手工 SQL 执行 |
+| `reject` | 当前问题被拒绝执行 |
 
-## 系统架构
+## 多媒体与标注链路
 
-```mermaid
-flowchart LR
-    U[User] --> F[Vue 3 Frontend]
-    F --> B[FastAPI Backend]
-    B --> A[Auth / Workspace / Dataset APIs]
-    B --> O[LangGraph Orchestrator]
-    O --> VQ[Verified Queries]
-    O --> SC[SQL Cache]
-    O --> LLM[LLM Multi-Agent]
-    O --> G[SQL Guardrail + EXPLAIN]
-    G --> D[DuckDB Engine]
-    B --> S1[(chatbot.db)]
-    B --> S2[(traces.db)]
-    B --> S3[(uploads/)]
-    D --> S4[(duckdb.duckdb)]
-```
+### 媒体数据集处理
 
-## 前端页面
+1. 新建数据集时上传图片/视频或填入路径
+2. 后端创建 `dataset_media_resources`
+3. `MediaTaskManager` 异步消费数据集
+4. 图片生成 `image_indexes`
+5. 视频生成 `video_segment_indexes`
+6. 数据集状态更新为 `ready` / `failed`
 
-### `/query`
+### 标注任务处理
 
-主查询页面，支持：
-
-- 选择工作空间、数据集、数据表
-- 输入自然语言问题
-- 流式显示执行阶段反馈
-- 展示答案、结果表格、统计图
-- 结合最近若干轮上下文理解追问
-
-页面内置的快捷示例包括：
-
-- `查询两个表中相同省份、相同账期的收入对比`
-- `查询2025年12月各二级发展渠道的收入分布`
-- `统计2025年11月各渠道类型的渠道数量`
-- `查询最近10条渠道收入明细`
-
-### `/config`
-
-数据配置页，支持：
-
-- 新建数据源
-- 上传 CSV
-- 创建与编辑数据集
-- 给数据集绑定多个数据源
-- 设置数据集状态
-
-### `/history`
-
-历史记录列表页，支持按数据集筛选查看 `QueryHistory`。
-
-### `/settings`
-
-系统设置页，支持查看用户信息与创建工作空间。
-
-## 技术栈
-
-### 后端
-
-- FastAPI
-- SQLAlchemy + SQLite
-- DuckDB
-- LangGraph
-- Pydantic / pydantic-settings
-- Requests
-
-### 前端
-
-- Vue 3
-- TypeScript
-- Vite
-- Pinia
-- Vue Router
-- Element Plus
-- ECharts
+1. 标注页提交目录扫描请求
+2. 后端生成稳定 session 文件
+3. `AnnotationTaskManager` 异步处理 session
+4. 图片写预览图、结果 JSON、描述
+5. 视频写预览视频、tracking JSON、描述
+6. 图片可继续手工修正并导出 YOLO 标签
 
 ## 目录结构
 
@@ -155,28 +323,30 @@ flowchart LR
 .
 ├── backend
 │   ├── app
-│   │   ├── api                 # 认证、数据源、数据集、查询、历史、系统监控接口
-│   │   ├── core                # 配置、数据库、日志、安全
-│   │   ├── models              # SQLAlchemy 模型
-│   │   ├── services            # NL2SQL、trace、guardrail、verified query 等服务
-│   │   ├── orchestrator_*.py   # DuckDB 与 LangGraph 编排
-│   │   └── schemas             # Pydantic 请求/响应模型
-│   ├── data                    # SQLite / DuckDB / Trace / 上传文件 / verified_queries
-│   ├── logs                    # Trace 文件日志
-│   ├── requirements.txt
+│   │   ├── api                  # 认证、数据源、数据集、查询、历史、监控、标注
+│   │   ├── core                 # 配置、数据库、日志、安全
+│   │   ├── models               # SQLAlchemy 模型
+│   │   ├── schemas              # Pydantic 请求/响应
+│   │   ├── services             # NL2SQL、多模态、媒体处理、标注、trace
+│   │   ├── orchestrator_*.py    # DuckDB 执行器与 LangGraph 编排
+│   │   └── ...
+│   ├── data                     # SQLite、DuckDB、上传文件、媒体产物
+│   ├── scripts                  # 增量 schema 迁移脚本
+│   ├── tests                    # 多媒体与检索测试
 │   ├── init_db.py
-│   └── main.py
+│   ├── main.py
+│   └── requirements.txt
 ├── frontend
 │   ├── src
-│   │   ├── api                 # 前端 API 封装
-│   │   ├── layouts             # 布局
-│   │   ├── router              # 路由
-│   │   ├── stores              # Pinia 状态
-│   │   └── views               # 登录、查询、配置、历史、设置页面
+│   │   ├── api                  # 前端 API 封装与类型
+│   │   ├── layouts              # 主布局
+│   │   ├── router               # 路由与鉴权守卫
+│   │   ├── stores               # Pinia 用户态
+│   │   └── views                # login/query/config/history/settings/annotation
 │   ├── package.json
 │   └── vite.config.ts
-├── deploy                      # 容器化草稿
-├── logs                        # start.sh / stop.sh 启动日志与 pid
+├── deploy                       # Docker / nginx 草稿
+├── logs                         # start/stop 脚本日志与 pid
 ├── start.sh
 ├── stop.sh
 └── restart.sh
@@ -192,27 +362,27 @@ flowchart LR
 
 ### 1. 初始化数据库
 
-首次运行建议先初始化业务表：
-
 ```bash
 cd backend
 python init_db.py
 ```
 
-这一步会创建 `users`、`workspaces`、`data_sources`、`datasets`、`query_histories` 等业务表。
+这一步会：
 
-### 2. 配置 LLM
+- 创建业务表
+- 补齐媒体相关增量 schema
 
-后端通过 `backend/.env` 读取主要配置。建议先复制示例文件：
+### 2. 配置环境变量
 
 ```bash
 cp backend/.env.example backend/.env
 ```
 
-最小配置示例：
+最小可运行配置：
 
 ```dotenv
 SECRET_KEY=change-me-in-production
+
 LLM_BASE_URL=https://your-openai-compatible-endpoint
 LLM_API_KEY=your-api-key
 LLM_MODEL=your-model-name
@@ -220,25 +390,38 @@ LLM_MODEL=your-model-name
 TRACE_DB_PATH=./data/traces.db
 TRACE_FILE_LOG_ENABLED=true
 TRACE_LOG_DIR=./logs/traces
+```
 
-# 可选：多模态远程模型
+如果要启用多模态远程模型，再补充：
+
+```dotenv
+MEDIA_ENABLE_REMOTE_MODELS=true
 VL_BASE_URL=
 VL_API_KEY=
 VL_MODEL=
 EMBEDDING_QWEN_API_URL=
 RERANKER_API_URL=
+ANNOTATION_YOLO_MODEL_PATH=
 ```
 
-说明：
+### 3. 推荐补充的配置
 
-- `LLM_*` 用于 NL2SQL 主链路与心跳检查
-- `TRACE_*` 用于追踪与 SQL 缓存持久化
-- `VL_*`、`EMBEDDING_QWEN_API_URL`、`RERANKER_API_URL` 用于多模态远程模型；留空时自动回退本地特征链路
-- 请不要把密钥直接写入仓库脚本或提交到 Git
+当前代码还有几个值得显式说明的配置点：
 
-### 3. 创建第一个用户
+| 配置 | 说明 |
+| --- | --- |
+| `ENCRYPTION_KEY` | 推荐配置。否则数据库连接密码会使用进程内临时密钥加密，重启后旧密码可能无法解密。 |
+| `MEDIA_STORAGE_DIR` | 媒体存储根目录，默认 `./data/media` |
+| `MEDIA_QUERY_UPLOAD_DIR` | 查询图片/视频路径静态目录，默认 `./data/query_uploads` |
+| `MEDIA_TASK_WORKERS` | 媒体离线处理 worker 数 |
+| `VIDEO_SEGMENT_WINDOW_SEC` | 视频切片窗口，默认 8 秒 |
+| `VIDEO_SEGMENT_STRIDE_SEC` | 视频切片步长，默认 4 秒 |
+| `ANNOTATION_STORAGE_DIR` | 标注会话与产物目录，默认 `./data/annotations` |
+| `ANNOTATION_TASK_WORKERS` | 标注任务 worker 数 |
 
-当前前端只有登录页，没有注册页。首次使用请调用后端注册接口：
+### 4. 创建第一个用户
+
+当前前端没有注册页，首次使用请直接调后端注册接口：
 
 ```bash
 curl -X POST http://localhost:50805/api/v1/auth/register \
@@ -251,31 +434,28 @@ curl -X POST http://localhost:50805/api/v1/auth/register \
   }'
 ```
 
-注册成功后，系统会自动创建一个默认工作空间并建立用户关联。
-
-### 4. 一键启动前后端
-
-在仓库根目录执行：
+### 5. 一键启动
 
 ```bash
 ./start.sh
 ```
 
-脚本会：
+脚本会自动：
 
-- 检查 Python / Node / npm / pip
+- 检查 `python` / `pip` / `node` / `npm`
 - 按需安装后端依赖
 - 按需安装前端依赖
-- 启动后端 `50805`
-- 启动前端 `50803`
+- 启动后端：`50805`
+- 启动前端：`50803`
+- 写入 `logs/backend.log`、`logs/frontend.log`、PID 文件
 
-启动后可访问：
+访问地址：
 
-- 前端：http://localhost:50803
-- 后端健康检查：http://localhost:50805/health
-- Swagger 文档：http://localhost:50805/docs
+- 前端：<http://localhost:50803>
+- 后端健康检查：<http://localhost:50805/health>
+- Swagger：<http://localhost:50805/docs>
 
-### 5. 关闭或重启
+### 6. 关闭与重启
 
 ```bash
 ./stop.sh
@@ -301,52 +481,6 @@ npm install
 npm run dev -- --host 0.0.0.0 --port 50803
 ```
 
-## 使用流程
-
-### 1. 登录
-
-用注册好的账号登录前端。
-
-### 2. 创建或导入数据
-
-在“数据配置”页面可以：
-
-- 新建数据库型数据源
-- 上传 CSV 文件
-- 刷新数据源 Schema
-- 创建数据集并绑定多个数据源
-
-### 3. 进入查询页
-
-在“智能取数”页面：
-
-- 选择工作空间
-- 选择数据集
-- 勾选要参与查询的数据表
-- 输入自然语言问题
-
-### 4. 查看结果
-
-查询返回后可以看到：
-
-- SQL
-- SQL 参数
-- 结果表格
-- 图表建议与图表展示
-- `trace_id`
-- `audit_id`
-- 执行阶段历史
-- `plan_source`
-
-### 5. 手工修正 SQL
-
-如果需要，也可以通过后端 `execute-sql` 接口执行人工编辑后的 SQL。系统会做：
-
-- SELECT 白名单限制
-- 表白名单校验
-- 参数清洗
-- EXPLAIN 预检
-
 ## API 概览
 
 ### 认证与工作空间
@@ -357,26 +491,48 @@ npm run dev -- --host 0.0.0.0 --port 50803
 - `GET /api/v1/auth/workspaces`
 - `POST /api/v1/auth/workspaces`
 
-### 数据源与数据集
+### 数据源
 
 - `POST /api/v1/data-sources`
 - `POST /api/v1/data-sources/upload-csv`
+- `GET /api/v1/data-sources`
+- `GET /api/v1/data-sources/{data_source_id}`
+- `PATCH /api/v1/data-sources/{data_source_id}`
+- `DELETE /api/v1/data-sources/{data_source_id}`
 - `POST /api/v1/data-sources/test`
-- `GET /api/v1/data-sources/{id}/schema`
-- `POST /api/v1/data-sources/{id}/refresh-schema`
+- `GET /api/v1/data-sources/{data_source_id}/schema`
+- `POST /api/v1/data-sources/{data_source_id}/refresh-schema`
+- `GET /api/v1/data-sources/{data_source_id}/csv-files`
+- `DELETE /api/v1/data-sources/{data_source_id}/csv-files/{csv_file_id}`
+
+### 数据集
+
 - `POST /api/v1/datasets`
 - `GET /api/v1/datasets`
-- `PATCH /api/v1/datasets/{id}`
-- `DELETE /api/v1/datasets/{id}`
+- `GET /api/v1/datasets/{dataset_id}`
+- `PATCH /api/v1/datasets/{dataset_id}`
+- `DELETE /api/v1/datasets/{dataset_id}`
+
+### 智能标注
+
+- `GET /api/v1/annotations/meta`
+- `GET /api/v1/annotations/restore`
+- `POST /api/v1/annotations/scan`
+- `GET /api/v1/annotations/sessions/{session_id}`
+- `PATCH /api/v1/annotations/sessions/{session_id}/cursor`
+- `PATCH /api/v1/annotations/sessions/{session_id}/items/{item_id}/annotations`
+- `POST /api/v1/annotations/sessions/{session_id}/items/{item_id}/save`
+- `POST /api/v1/annotations/sessions/{session_id}/export`
+- `GET /api/v1/annotations/sessions/{session_id}/items/{item_id}/file`
 
 ### 查询
 
 - `POST /api/v1/queries/stream`
 - `POST /api/v1/queries`
-- `POST /api/v1/queries/execute-sql`
 - `GET /api/v1/queries/{trace_id}/replay`
+- `POST /api/v1/queries/execute-sql`
 
-### 历史与监控
+### 历史与系统
 
 - `POST /api/v1/history`
 - `GET /api/v1/history`
@@ -384,89 +540,52 @@ npm run dev -- --host 0.0.0.0 --port 50803
 - `GET /api/v1/system/llm-heartbeat`
 - `GET /health`
 
-## 数据落盘说明
+## 数据落盘
 
-当前仓库里主要有四类本地数据：
-
-| 路径 | 作用 |
+| 路径 | 用途 |
 | --- | --- |
-| `backend/data/chatbot.db` | 业务元数据，存储用户、工作空间、数据源、数据集、历史等 |
-| `backend/data/traces.db` | 查询 Trace 与 `sql_cache` |
-| `backend/data/duckdb.duckdb` | DuckDB 执行引擎持久化文件 |
-| `backend/data/uploads/` | 上传的 CSV 原始文件 |
+| `backend/data/chatbot.db` | 业务主库：用户、工作空间、数据源、数据集、历史等 |
+| `backend/data/traces.db` | Trace 与 `sql_cache` |
+| `backend/data/duckdb.duckdb` | DuckDB 持久化文件 |
+| `backend/data/uploads/` | CSV 上传文件 |
+| `backend/data/media/` | 图片/视频原始文件与派生关键帧 |
+| `backend/data/annotations/` | 标注 session、产物、导出 |
+| `logs/` | 启停脚本日志与 pid |
+| `backend/logs/traces/` | Trace JSONL 日志 |
 
-另外还有两类日志目录：
+后端还会挂载两个静态目录：
 
-- `logs/`：`start.sh` 生成的前后端启动日志与 PID
-- `backend/logs/traces/`：Trace 文件日志
+- `/media-files`
+- `/query-files`
 
-## Verified Query 与 SQL Cache
+## 测试
 
-### Verified Query
+仓库内已经包含以下自动化测试：
 
-`backend/data/verified_queries.json` 是人工维护的可信模板库。
+- 数据集创建与媒体处理流程
+- 图片索引与视频切片生成
+- 多模态检索结果与 rerank
+- 查询接口在媒体处理中返回 warning
 
-用途：
+运行方式：
 
-- 对固定问法做稳定复用
-- 规避 LLM 幻觉
-- 提供可审计、可版本化的 SQL 模板沉淀
+```bash
+cd backend
+pytest tests -q
+```
 
-注意：
+## 当前已知限制
 
-- 当前文件默认是空数组
-- 它不会自动根据每次成功查询写入
-- 需要人工维护或单独建设晋升流程
-
-### SQL Cache
-
-`sql_cache` 是当前已经生效的长期复用能力：
-
-- 成功查询后自动写入
-- 记录问题、SQL、参数、表作用域、命中次数
-- 下次相同问题且表范围一致时优先复用
-- 命中后仍会做安全校验与 EXPLAIN
-- 若缓存 SQL 失效，会自动删除并回退到 LLM
-
-## 常见问题
-
-### 1. 页面显示“环境启动异常”
-
-侧边栏状态来自 `/api/v1/system/llm-heartbeat`。优先检查：
-
-- `LLM_BASE_URL`
-- `LLM_API_KEY`
-- `LLM_MODEL`
-- LLM 服务是否支持 `/v1/models` 或 OpenAI 兼容 `chat/completions`
-
-### 2. 查询时报“未找到可查询的数据表”
-
-通常说明：
-
-- 当前数据集没有关联 CSV 数据源
-- 关联的 CSV 文件路径已经失效
-- 查询时未选中任何可用表
-
-### 3. CSV 被错误识别成单列
-
-代码里已经做了多轮分隔符探测与容错重载，但仍建议保证：
-
-- 文件头完整
-- 编码尽量使用 UTF-8 / UTF-8-SIG
-- 分隔符明确
-
-### 4. 为什么 trace 已经有了，但 replay 仍然不可用？
-
-因为 `trace/sql_cache` 是后端主链路自动持久化的，而 `query_histories` 目前依赖前端额外调用 `/history` 或业务方自行落库。直接调用查询接口但不补写历史时，`replay` 无法命中记录。
-
-## 后续适合继续完善的方向
-
-- 打通外部数据库直连查询，而不只依赖 CSV 落地到 DuckDB
-- 给 `verified_queries` 增加后台维护界面与审核流
-- 自动把合格查询沉淀为可审核模板，而不是只停留在 `sql_cache`
-- 把 `query_histories` 写入下沉到后端主链路，避免依赖前端补写
-- 整理并修正容器化部署配置
+- 远程数据库型数据源当前还没有打通到实际查询执行，查询主链路只消费 CSV。
+- `DATABASE_URL` 虽然出现在配置和 `docker-compose.yml` 中，但当前 `app/core/database.py` 仍固定使用 `backend/data/chatbot.db`。
+- 前端数据配置页当前只允许在“新建数据集”时接入图片/视频；已有数据集编辑时会阻止追加媒体。
+- 查询页还没有图片/视频检索上传入口，只能通过 API 传服务端可访问路径。
+- 视频标注不支持手工修框，也不导出 YOLO 标签。
+- `verified_queries.json` 默认是空数组，需要人工维护。
+- 旧的 LanceDB 检索回退路径依赖额外组件；如果你打算使用这条链路，需要自行检查相关依赖是否安装。
+- 智能标注默认目录来自 `backend/app/services/annotation_constants.py` 里的本地路径约定；如果你的机器没有对应目录，需要在页面中手工填写。
+- `deploy/` 目录目前仍需整理，不建议直接视为生产部署方案。
 
 ## License
 
-当前仓库未声明开源许可证。如需公开分发，请补充明确的 `LICENSE` 文件。
+当前仓库未声明开源许可证。如需公开分发，请补充 `LICENSE` 文件。
