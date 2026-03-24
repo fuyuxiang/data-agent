@@ -29,6 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.openai_compat import ensure_v1_path
 from app.services.annotation_constants import (
     CLASS_NAMES_CN,
     TARGET_CLASSES,
@@ -78,19 +79,19 @@ BOX_COLORS: dict[str, tuple[int, int, int]] = {
 
 def _candidate_yolo_paths() -> list[str]:
     explicit = (settings.ANNOTATION_YOLO_MODEL_PATH or "").strip()
+    model_root = Path(__file__).resolve().parents[2] / "data" / "model"
     candidates = [
         explicit,
-        str((Path(__file__).resolve().parents[2] / "data" / "models" / "yolo26x.pt").resolve()),
-        "/Users/fuyuxiang/Desktop/多模态检索-铁塔/poc/data/pretrainModel/yolo26x.pt",
-        "/Users/fuyuxiang/Desktop/多模态检索-铁塔/poc/data/pretrainModel/yolov8x-worldv2.pt",
+        str((model_root / "yolo26x.pt").resolve()),
+        str((model_root / "yolov8x-worldv2.pt").resolve()),
     ]
     return [path for path in candidates if path]
 
 
 def _peek_engine_info() -> dict[str, Any]:
-    base_url = (settings.VL_BASE_URL or settings.LLM_BASE_URL or "").strip()
-    api_key = (settings.VL_API_KEY or settings.LLM_API_KEY or "").strip()
-    model = (settings.VL_MODEL or settings.LLM_MODEL or "").strip()
+    base_url = (settings.LLM_BASE_URL or "").strip()
+    api_key = (settings.LLM_API_KEY or "").strip()
+    model = (settings.LLM_MODEL or "").strip()
     yolo_model_path = next((path for path in _candidate_yolo_paths() if Path(path).exists()), None)
     return {
         "vision_available": bool(base_url and api_key and model),
@@ -99,14 +100,6 @@ def _peek_engine_info() -> dict[str, Any]:
         "yolo_model_path": yolo_model_path,
         "confidence_threshold": 0.25,
     }
-
-
-def _ensure_v1_path(base_url: str) -> str:
-    url = base_url.rstrip("/")
-    if url.endswith("/v1"):
-        return url
-    return f"{url}/v1"
-
 
 def _image_to_data_url(image_path: str) -> str:
     suffix = Path(image_path).suffix.lower().lstrip(".") or "jpeg"
@@ -346,9 +339,9 @@ class AutoAnnotationEngine:
 
     def _load_vision_config(self) -> VisionClientConfig:
         return VisionClientConfig(
-            base_url=(settings.VL_BASE_URL or settings.LLM_BASE_URL or "").strip() or None,
-            api_key=(settings.VL_API_KEY or settings.LLM_API_KEY or "").strip() or None,
-            model=(settings.VL_MODEL or settings.LLM_MODEL or "").strip() or None,
+            base_url=(settings.LLM_BASE_URL or "").strip() or None,
+            api_key=(settings.LLM_API_KEY or "").strip() or None,
+            model=(settings.LLM_MODEL or "").strip() or None,
         )
 
     def _init_openai_client(self) -> None:
@@ -358,7 +351,7 @@ class AutoAnnotationEngine:
             from openai import OpenAI
 
             self._client = OpenAI(
-                base_url=_ensure_v1_path(self._vision_config.base_url),
+                base_url=ensure_v1_path(self._vision_config.base_url),
                 api_key=self._vision_config.api_key,
             )
         except Exception as exc:

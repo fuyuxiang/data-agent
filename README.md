@@ -18,6 +18,8 @@
 - 数据集模型里有 `metrics`、`dimensions`、`aliases`、`business_rules` 字段，API 也能写入；但当前前端没有对应编辑界面，NL2SQL 链路也还没有消费这些语义字段。
 - 查询页当前是文本查询 UI。后端 `QueryRequest` 已支持 `query_image_path` / `query_video_path`，也实现了“以图搜图/搜视频”的服务逻辑，但前端还没有查询图片/视频上传入口。
 - 图片标注支持手工修框与 YOLO 标签导出；视频标注当前只支持自动检测、跟踪预览、统计和下载预览视频，不支持手工框编辑，也不导出 YOLO 标签。
+- `LLM_BASE_URL` 当前按 OpenAI 兼容根地址处理，可以直接填厂商根 URL 或已经带 `/v1` 的地址；心跳检测会优先请求 `/v1/models`，不支持时自动回退到 `chat/completions`。
+- 配置模型中虽然保留了 `VL_BASE_URL` / `VL_API_KEY` / `VL_MODEL`，但当前多模态 caption 与标注视觉细分实际仍复用 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`。
 - `deploy/` 下的容器配置仍然更像草稿，不能视为已经打磨完成的生产部署方案。
 
 ## 当前功能总览
@@ -62,6 +64,7 @@
   - `ready`
   - `failed`
 - 同时维护处理进度、已处理数量、失败数量、最近处理时间、错误信息
+- 服务重启后会自动恢复 `pending` / `processing` 的媒体处理任务
 - 删除数据集采用软删除，状态改为 `deprecated`
 
 ### 4. CSV 查询链路
@@ -163,6 +166,7 @@ ds{dataset_id}_{table_name}
   - tags
 - 检索时优先在当前数据集的 `image_indexes` / `video_segment_indexes` 中搜索
 - 文本检索和图片检索都支持
+- 查询接口请求体支持 `query_image_path` / `query_video_path` 两个服务端路径字段，用于“以图搜图 / 查相关视频”一类请求
 - 视频检索结果会合并相邻命中片段，返回时间范围与关键帧预览
 - 检索结果会经过 rerank
 - 若当前数据集没有媒体索引，会退回旧的 LanceDB 检索路径
@@ -171,8 +175,9 @@ ds{dataset_id}_{table_name}
 
 - 远程模型可用时，会优先调用：
   - 文本/图片 embedding 服务
-  - 视觉大模型 caption 服务
+  - OpenAI 兼容 `chat/completions` 视觉 caption 服务
   - reranker 服务
+- `LLM_BASE_URL` 不要求手工补 `/v1`，代码会自动规范成 OpenAI 兼容路径
 - 远程模型不可用时，会回退到本地确定性特征：
   - 文本 hash embedding
   - 图片颜色/缩略 embedding
@@ -190,14 +195,31 @@ ds{dataset_id}_{table_name}
   - 简化卡尔曼 + IoU 跟踪
   - 生成预览视频和 tracking JSON
   - 生成视频场景描述
+- 标注元信息接口会返回：
+  - 可选类别列表
+  - 视觉模型 / YOLO 模型可用性
+  - 默认图片目录、视频目录、导出目录
+- 标注任务创建支持：
+  - `use_tracking`
+  - `frame_interval`
+  - `detect_size`
+  - `force_reprocess`
+- YOLO 权重加载顺序为：
+  1. `ANNOTATION_YOLO_MODEL_PATH`
+  2. `backend/data/model/yolo26x.pt`
+  3. `backend/data/model/yolov8x-worldv2.pt`
 - 支持会话恢复：
   - 后端会按 `workspace_id + media_type + source_dir` 生成稳定 session id
+  - 同目录文件列表未变化时可直接恢复既有 session
   - 启动时会自动恢复未完成的标注任务
 - 图片标注页支持：
   - 两次点击画框
   - 修改类别
   - 删除单个框
   - 清空全部框
+  - 自动框 / 手工框显隐切换
+  - 按类别筛选
+  - 自动框置信度阈值筛选
   - 导出单张 YOLO 标签
   - 批量导出全部 YOLO 标签
 - 视频标注页支持：
@@ -258,7 +280,9 @@ ds{dataset_id}_{table_name}
 - 获取模型可用性与默认目录
 - 扫描目录并启动标注
 - 自动恢复已有标注会话
+- 支持强制重跑已有目录
 - 图片标注修正与导出
+- 支持自动框/手工框切换、类别过滤、自动框阈值过滤
 - 视频跟踪预览与统计
 
 ### `/history`
@@ -291,6 +315,7 @@ flowchart LR
 
 | 值 | 含义 |
 | --- | --- |
+| `rule` | 命中规则/启发式策略直接生成规划 |
 | `verified_query` | 命中人工维护的可信模板 |
 | `sql_cache` | 命中历史成功 SQL 缓存 |
 | `llm` | 由 LLM 多 Agent 生成 |
@@ -304,18 +329,20 @@ flowchart LR
 1. 新建数据集时上传图片/视频或填入路径
 2. 后端创建 `dataset_media_resources`
 3. `MediaTaskManager` 异步消费数据集
-4. 图片生成 `image_indexes`
-5. 视频生成 `video_segment_indexes`
-6. 数据集状态更新为 `ready` / `failed`
+4. 服务启动时会自动恢复 `pending` / `processing` 的旧任务
+5. 图片生成 `image_indexes`
+6. 视频生成 `video_segment_indexes`
+7. 数据集状态更新为 `ready` / `failed`
 
 ### 标注任务处理
 
 1. 标注页提交目录扫描请求
 2. 后端生成稳定 session 文件
 3. `AnnotationTaskManager` 异步处理 session
-4. 图片写预览图、结果 JSON、描述
-5. 视频写预览视频、tracking JSON、描述
-6. 图片可继续手工修正并导出 YOLO 标签
+4. 同目录且文件列表未变化时直接恢复既有 session
+5. 图片写预览图、结果 JSON、描述
+6. 视频写预览视频、tracking JSON、描述
+7. 图片可继续手工修正并导出 YOLO 标签
 
 ## 目录结构
 
@@ -324,7 +351,7 @@ flowchart LR
 ├── backend
 │   ├── app
 │   │   ├── api                  # 认证、数据源、数据集、查询、历史、监控、标注
-│   │   ├── core                 # 配置、数据库、日志、安全
+│   │   ├── core                 # 配置、数据库、日志、安全、OpenAI 兼容 URL
 │   │   ├── models               # SQLAlchemy 模型
 │   │   ├── schemas              # Pydantic 请求/响应
 │   │   ├── services             # NL2SQL、多模态、媒体处理、标注、trace
@@ -392,16 +419,30 @@ TRACE_FILE_LOG_ENABLED=true
 TRACE_LOG_DIR=./logs/traces
 ```
 
+说明：
+
+- `LLM_BASE_URL` 可以填写厂商根地址，例如 `https://api.deepseek.com`，也可以直接写成 `.../v1`；代码会自动补齐 OpenAI 兼容的 `/v1/*` 路径。
+- 当前 NL2SQL、LLM 心跳、媒体 caption、标注视觉细分类别细化共用同一组 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`。
+
 如果要启用多模态远程模型，再补充：
 
 ```dotenv
+# 关闭后仍可运行，系统会回退到本地确定性特征
 MEDIA_ENABLE_REMOTE_MODELS=true
+
+# embedding 服务可填写根地址，代码会尝试 <url> / <url>/embeddings / <url>/v1/embeddings
+EMBEDDING_QWEN_API_URL=
+
+# reranker 服务可填写根地址，代码会尝试 <url> / <url>/rerank / <url>/v1/rerank
+RERANKER_API_URL=
+
+# 显式指定 YOLO 权重；不填时会自动尝试 backend/data/model 下的常见文件名
+ANNOTATION_YOLO_MODEL_PATH=
+
+# 预留配置，当前主流程未消费
 VL_BASE_URL=
 VL_API_KEY=
 VL_MODEL=
-EMBEDDING_QWEN_API_URL=
-RERANKER_API_URL=
-ANNOTATION_YOLO_MODEL_PATH=
 ```
 
 ### 3. 推荐补充的配置
@@ -411,6 +452,7 @@ ANNOTATION_YOLO_MODEL_PATH=
 | 配置 | 说明 |
 | --- | --- |
 | `ENCRYPTION_KEY` | 推荐配置。否则数据库连接密码会使用进程内临时密钥加密，重启后旧密码可能无法解密。 |
+| `MEDIA_ENABLE_REMOTE_MODELS` | 是否启用远程 embedding / caption / rerank。关闭后会回退到本地确定性特征。 |
 | `MEDIA_STORAGE_DIR` | 媒体存储根目录，默认 `./data/media` |
 | `MEDIA_QUERY_UPLOAD_DIR` | 查询图片/视频路径静态目录，默认 `./data/query_uploads` |
 | `MEDIA_TASK_WORKERS` | 媒体离线处理 worker 数 |
@@ -418,6 +460,7 @@ ANNOTATION_YOLO_MODEL_PATH=
 | `VIDEO_SEGMENT_STRIDE_SEC` | 视频切片步长，默认 4 秒 |
 | `ANNOTATION_STORAGE_DIR` | 标注会话与产物目录，默认 `./data/annotations` |
 | `ANNOTATION_TASK_WORKERS` | 标注任务 worker 数 |
+| `ANNOTATION_YOLO_MODEL_PATH` | 显式指定 YOLO 权重路径；不填时会自动尝试 `backend/data/model/yolo26x.pt` 和 `backend/data/model/yolov8x-worldv2.pt` |
 
 ### 4. 创建第一个用户
 
@@ -443,6 +486,7 @@ curl -X POST http://localhost:50805/api/v1/auth/register \
 脚本会自动：
 
 - 检查 `python` / `pip` / `node` / `npm`
+- 自动加载 `backend/.env`
 - 按需安装后端依赖
 - 按需安装前端依赖
 - 启动后端：`50805`
@@ -540,6 +584,20 @@ npm run dev -- --host 0.0.0.0 --port 50803
 - `GET /api/v1/system/llm-heartbeat`
 - `GET /health`
 
+### 接口补充说明
+
+- `POST /api/v1/queries` 与 `POST /api/v1/queries/stream` 的请求体除 `question`、`workspace_id`、`dataset_id` 外，还支持：
+  - `context.recent_turns`
+  - `query_image_path`
+  - `query_video_path`
+- `POST /api/v1/annotations/scan` 还支持：
+  - `use_tracking`
+  - `frame_interval`
+  - `detect_size`
+  - `force_reprocess`
+- `GET /api/v1/annotations/meta` 会返回类别列表、模型可用性、默认源目录与默认导出目录
+- `GET /api/v1/system/llm-heartbeat` 会优先探测 `/v1/models`，失败时回退到 `chat/completions`
+
 ## 数据落盘
 
 | 路径 | 用途 |
@@ -549,7 +607,12 @@ npm run dev -- --host 0.0.0.0 --port 50803
 | `backend/data/duckdb.duckdb` | DuckDB 持久化文件 |
 | `backend/data/uploads/` | CSV 上传文件 |
 | `backend/data/media/` | 图片/视频原始文件与派生关键帧 |
+| `backend/data/query_uploads/` | 查询接口图片/视频路径静态挂载目录 |
 | `backend/data/annotations/` | 标注 session、产物、导出 |
+| `backend/data/annotation_exports/auto/` | 智能标注默认 YOLO 标签导出目录 |
+| `backend/data/model/` | 默认 YOLO 权重目录 |
+| `backend/data/warning_img/` | 标注页默认图片源目录 |
+| `backend/data/warning_file/` | 标注页默认视频源目录 |
 | `logs/` | 启停脚本日志与 pid |
 | `backend/logs/traces/` | Trace JSONL 日志 |
 
@@ -583,7 +646,8 @@ pytest tests -q
 - 视频标注不支持手工修框，也不导出 YOLO 标签。
 - `verified_queries.json` 默认是空数组，需要人工维护。
 - 旧的 LanceDB 检索回退路径依赖额外组件；如果你打算使用这条链路，需要自行检查相关依赖是否安装。
-- 智能标注默认目录来自 `backend/app/services/annotation_constants.py` 里的本地路径约定；如果你的机器没有对应目录，需要在页面中手工填写。
+- `VL_BASE_URL` / `VL_API_KEY` / `VL_MODEL` 当前仍是预留字段，媒体 caption 与标注视觉细分尚未接到这组配置。
+- 智能标注默认目录当前固定约定为 `backend/data/warning_img`、`backend/data/warning_file`，默认导出目录为 `backend/data/annotation_exports/auto`；如果你的机器没有这些目录，需要在页面中手工填写。
 - `deploy/` 目录目前仍需整理，不建议直接视为生产部署方案。
 
 ## License

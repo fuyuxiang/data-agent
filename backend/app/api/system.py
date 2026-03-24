@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends
 from app.api.auth import get_current_user
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.openai_compat import build_v1_endpoint
 from app.models.models import User
 
 logger = get_logger(__name__)
@@ -53,7 +54,7 @@ def _build_up_payload(message: str, latency_ms: int, model: str = "", detail: st
 
 def _chat_completion_probe(base_url: str, api_key: str, model: str, timeout_sec: int) -> Dict[str, Any]:
     """对不支持 /v1/models 的兼容网关，回退用 chat/completions 做连通性探测。"""
-    url = base_url.rstrip("/") + "/v1/chat/completions"
+    url = build_v1_endpoint(base_url, "/chat/completions")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -101,7 +102,7 @@ async def llm_heartbeat(_: User = Depends(get_current_user)):
 
 def _probe_llm_sync(base_url: str, api_key: str, model: str) -> Dict[str, Any]:
     """在线程池中执行心跳探测，避免阻塞事件循环。"""
-    models_url = base_url.rstrip("/") + "/v1/models"
+    models_url = build_v1_endpoint(base_url, "/models")
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout_sec = 8
     started = time.perf_counter()

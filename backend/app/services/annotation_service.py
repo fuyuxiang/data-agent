@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -18,6 +19,7 @@ from app.services.annotation_constants import (
 )
 from app.services.annotation_engine import get_annotation_engine_boot_info, get_auto_annotation_engine
 from app.services.annotation_store import (
+    build_session_id,
     build_item_artifact_paths,
     build_item_id,
     load_session,
@@ -63,6 +65,7 @@ class AnnotationService:
         session = load_session_for_source(workspace_id, media_type, source_dir)
         if not session:
             return None
+        session = self._repair_session_from_artifacts(session)
         try:
             current_files = scan_source_files(source_dir, media_type)
         except Exception:
@@ -161,6 +164,7 @@ class AnnotationService:
         session = load_session(session_id)
         if not session:
             raise ValueError("标注会话不存在")
+        session = self._repair_session_from_artifacts(session)
         return sanitize_session(session)
 
     def update_cursor(self, session_id: str, current_index: int) -> dict[str, Any]:
@@ -179,6 +183,7 @@ class AnnotationService:
         item["annotations"] = [self._normalize_annotation_payload(annotation) for annotation in annotations]
         item["status"] = "ready"
         item["stats"] = self._summarize_image_annotations(item["annotations"])
+        self.engine.save_image_preview(item["source_path"], item["annotations"], preview_dir=item["artifact_dir"])
         saved = save_session(session)
         return self._sanitize_item(self._require_item(saved, item_id))
 
@@ -249,10 +254,13 @@ class AnnotationService:
 
         processed = 0
         failed = 0
-        for index, item in enumerate(session.get("items", [])):
+        total = len(items)
+        for index in range(total):
+            item = session["items"][index]
             item["status"] = "processing"
-            session["progress"]["message"] = f"处理中 {index + 1}/{len(items)}: {item['file_name']}"
+            session["progress"]["message"] = f"处理中 {index + 1}/{total}: {item['file_name']}"
             session = save_session(session)
+            item = session["items"][index]
             try:
                 if session.get("media_type") == "image":
                     self._process_image_item(session, item)
@@ -267,11 +275,11 @@ class AnnotationService:
                 item["error_message"] = str(exc)
                 failed += 1
             session["progress"] = {
-                "total": len(items),
+                "total": total,
                 "processed": processed,
                 "failed": failed,
-                "percent": round(((processed + failed) / max(len(items), 1)) * 100, 2),
-                "message": f"已完成 {processed + failed}/{len(items)}",
+                "percent": round(((processed + failed) / max(total, 1)) * 100, 2),
+                "message": f"已完成 {processed + failed}/{total}",
             }
             session = save_session(session)
 
@@ -357,7 +365,102 @@ class AnnotationService:
         session = load_session(session_id)
         if not session:
             raise ValueError("标注会话不存在")
-        return session
+        return self._repair_session_from_artifacts(session)
+
+    def _repair_session_from_artifacts(self, session: dict[str, Any]) -> dict[str, Any]:
+        if session.get("media_type") != "image":
+            return session
+
+        changed = False
+        for item in session.get("items", []):
+            changed = self._repair_image_item_from_artifacts(item) or changed
+        changed = self._repair_session_progress(session) or changed
+
+        if not changed:
+            return session
+        return save_session(session)
+
+    def _repair_image_item_from_artifacts(self, item: dict[str, Any]) -> bool:
+        changed = False
+        preview_result_path = Path(str(item.get("preview_result_path") or ""))
+        preview_image_path = Path(str(item.get("preview_image_path") or ""))
+        description_path = Path(str(item.get("description_path") or ""))
+        source_path = str(item.get("source_path") or "")
+
+        if not item.get("annotations") and preview_result_path.exists():
+            try:
+                with open(preview_result_path, "r", encoding="utf-8") as file_obj:
+                    payload = json.load(file_obj)
+                if isinstance(payload, list):
+                    item["annotations"] = [self._normalize_annotation_payload(annotation) for annotation in payload]
+                    changed = True
+            except Exception:
+                logger.warning("修复标注会话时读取结果文件失败: %s", preview_result_path, exc_info=True)
+
+        if not item.get("description") and description_path.exists():
+            try:
+                item["description"] = description_path.read_text(encoding="utf-8").strip()
+                changed = True
+            except Exception:
+                logger.warning("修复标注会话时读取描述文件失败: %s", description_path, exc_info=True)
+
+        if source_path and (not item.get("width") or not item.get("height")):
+            image = cv2.imread(source_path)
+            if image is not None:
+                height, width = image.shape[:2]
+                if item.get("width") != width:
+                    item["width"] = width
+                    changed = True
+                if item.get("height") != height:
+                    item["height"] = height
+                    changed = True
+
+        annotations = item.get("annotations", [])
+        expected_stats = self._summarize_image_annotations(annotations)
+        if item.get("stats") != expected_stats:
+            item["stats"] = expected_stats
+            changed = True
+
+        if (preview_image_path.exists() or preview_result_path.exists()) and item.get("status") in {"pending", "processing"}:
+            item["status"] = "ready"
+            item["error_message"] = None
+            changed = True
+
+        return changed
+
+    def _repair_session_progress(self, session: dict[str, Any]) -> bool:
+        items = session.get("items", [])
+        total = len(items)
+        ready = sum(1 for item in items if item.get("status") == "ready")
+        failed = sum(1 for item in items if item.get("status") == "failed")
+        completed = ready + failed
+
+        progress = dict(session.get("progress") or {})
+        expected_progress = {
+            "total": total,
+            "processed": ready,
+            "failed": failed,
+            "percent": round((completed / max(total, 1)) * 100, 2),
+            "message": progress.get("message") or "等待开始",
+        }
+
+        if total and completed >= total:
+            expected_progress["message"] = "标注完成" if ready else "标注失败"
+            expected_status = "failed" if ready == 0 and failed > 0 else "ready"
+        elif completed > 0:
+            expected_progress["message"] = progress.get("message") or f"已完成 {completed}/{total}"
+            expected_status = "processing"
+        else:
+            expected_status = session.get("status") or "pending"
+
+        changed = False
+        if session.get("progress") != expected_progress:
+            session["progress"] = expected_progress
+            changed = True
+        if session.get("status") != expected_status:
+            session["status"] = expected_status
+            changed = True
+        return changed
 
     def _require_item(self, session: dict[str, Any], item_id: str) -> dict[str, Any]:
         for item in session.get("items", []):

@@ -37,6 +37,7 @@ const showConf = ref(false)
 const classFilter = ref('全部')
 const confThreshold = ref(0.1)
 const drawStart = ref<{ x: number; y: number } | null>(null)
+const manualEditMode = ref(false)
 const currentMediaUrl = ref('')
 const previewMediaUrl = ref('')
 const previewMissing = ref(false)
@@ -50,6 +51,18 @@ const currentItem = computed<AnnotationItem | null>(() => {
 })
 
 const currentAnnotations = computed<AnnotationBox[]>(() => currentItem.value?.annotations || [])
+const showImagePreview = computed(() => {
+  return (
+    session.value?.media_type === 'image'
+    && currentItem.value?.status === 'ready'
+    && !!previewMediaUrl.value
+    && !manualEditMode.value
+    && !drawStart.value
+  )
+})
+const displayedImageUrl = computed(() => {
+  return showImagePreview.value ? previewMediaUrl.value : currentMediaUrl.value
+})
 
 const visibleAnnotations = computed<AnnotationBox[]>(() => {
   return currentAnnotations.value.filter((annotation) => {
@@ -67,6 +80,22 @@ const imageStats = computed(() => {
   const manual = total - auto
   return { total, auto, manual }
 })
+
+const summarizeAnnotations = (annotations: AnnotationBox[]) => {
+  const total = annotations.length
+  const auto = annotations.filter(item => !item.manual).length
+  const manual = total - auto
+  const byClass: Record<string, number> = {}
+  annotations.forEach((annotation) => {
+    byClass[annotation.class] = (byClass[annotation.class] || 0) + 1
+  })
+  return {
+    total,
+    auto,
+    manual,
+    by_class: byClass,
+  }
+}
 
 const videoStats = computed(() => {
   const stats = currentItem.value?.stats || {}
@@ -177,8 +206,16 @@ const loadItemMedia = async () => {
 
   try {
     if (session.value.media_type === 'image') {
-      const response = await annotationApi.getItemFile(session.value.id, currentItem.value.id, userStore.currentWorkspace.id, 'source')
-      currentMediaUrl.value = URL.createObjectURL(response.data)
+      if (currentItem.value.status === 'ready') {
+        try {
+          const previewResponse = await annotationApi.getItemFile(session.value.id, currentItem.value.id, userStore.currentWorkspace.id, 'preview')
+          previewMediaUrl.value = URL.createObjectURL(previewResponse.data)
+        } catch {
+          previewMediaUrl.value = ''
+        }
+      }
+      const sourceResponse = await annotationApi.getItemFile(session.value.id, currentItem.value.id, userStore.currentWorkspace.id, 'source')
+      currentMediaUrl.value = URL.createObjectURL(sourceResponse.data)
       return
     }
 
@@ -295,6 +332,13 @@ const replaceCurrentItem = (updatedItem: AnnotationItem) => {
 
 const persistAnnotations = async (nextAnnotations: AnnotationBox[]) => {
   if (!session.value || !currentItem.value || !userStore.currentWorkspace) return
+  const previousItem = JSON.parse(JSON.stringify(currentItem.value)) as AnnotationItem
+  replaceCurrentItem({
+    ...previousItem,
+    annotations: nextAnnotations,
+    status: 'ready',
+    stats: summarizeAnnotations(nextAnnotations),
+  })
   actionLoading.value = true
   try {
     const response = await annotationApi.updateItemAnnotations(
@@ -304,7 +348,9 @@ const persistAnnotations = async (nextAnnotations: AnnotationBox[]) => {
       nextAnnotations,
     )
     replaceCurrentItem(response.data)
+    await loadItemMedia()
   } catch (error: any) {
+    replaceCurrentItem(previousItem)
     ElMessage.error(error.response?.data?.detail || '保存标注失败')
   } finally {
     actionLoading.value = false
@@ -313,6 +359,7 @@ const persistAnnotations = async (nextAnnotations: AnnotationBox[]) => {
 
 const handleImageClick = async (event: MouseEvent) => {
   if (!session.value || session.value.media_type !== 'image' || !currentItem.value || !currentMediaUrl.value) return
+  manualEditMode.value = true
   const target = event.currentTarget as HTMLElement | null
   if (!target) return
   const rect = target.getBoundingClientRect()
@@ -357,6 +404,7 @@ const cancelDrawing = () => {
 }
 
 const updateAnnotationClass = async (index: number, className: string) => {
+  manualEditMode.value = true
   const nextAnnotations = currentAnnotations.value.map((annotation, annotationIndex) => {
     if (annotationIndex !== index) return annotation
     return {
@@ -369,11 +417,13 @@ const updateAnnotationClass = async (index: number, className: string) => {
 }
 
 const deleteAnnotation = async (index: number) => {
+  manualEditMode.value = true
   const nextAnnotations = currentAnnotations.value.filter((_annotation, annotationIndex) => annotationIndex !== index)
   await persistAnnotations(nextAnnotations)
 }
 
 const clearAnnotations = async () => {
+  manualEditMode.value = true
   await persistAnnotations([])
 }
 
@@ -468,18 +518,25 @@ watch(() => session.value?.status, () => {
 })
 
 watch(() => currentItem.value?.id, () => {
+  manualEditMode.value = false
+  void loadItemMedia()
+})
+
+watch(() => currentItem.value?.status, () => {
   void loadItemMedia()
 })
 
 watch(() => sourceForm.media_type, async () => {
   sourceForm.source_dir = localStorage.getItem(`annotation_source_dir_${sourceForm.media_type}`) || (sourceForm.media_type === 'video' ? meta.value?.defaults.video_dir : meta.value?.defaults.image_dir) || ''
   drawStart.value = null
+  manualEditMode.value = false
   classFilter.value = '全部'
   await tryRestoreSession()
 })
 
 watch(() => userStore.currentWorkspace?.id, async () => {
   session.value = null
+  manualEditMode.value = false
   clearSessionMedia()
   if (userStore.currentWorkspace) {
     await loadMeta()
@@ -695,8 +752,9 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="image-stage" @click="handleImageClick">
-                <img v-if="currentMediaUrl" :src="currentMediaUrl" class="image-main" alt="annotation-source" />
+                <img v-if="displayedImageUrl" :src="displayedImageUrl" class="image-main" alt="annotation-source" />
                 <div
+                  v-if="!showImagePreview"
                   v-for="(annotation, index) in visibleAnnotations"
                   :key="`${annotation.class}-${index}`"
                   class="ann-box"
@@ -722,6 +780,12 @@ onBeforeUnmount(() => {
                     />
                   </el-select>
                   <el-button v-if="drawStart" @click="cancelDrawing">取消画框</el-button>
+                  <el-button
+                    v-if="currentItem.status === 'ready' && previewMediaUrl"
+                    @click="manualEditMode = !manualEditMode"
+                  >
+                    {{ manualEditMode ? '查看标注预览' : '进入编辑模式' }}
+                  </el-button>
                 </div>
                 <div class="tip-text">
                   图片尺寸：{{ currentItem.width }} × {{ currentItem.height }}，显示 {{ visibleAnnotations.length }}/{{ currentAnnotations.length }} 个标注

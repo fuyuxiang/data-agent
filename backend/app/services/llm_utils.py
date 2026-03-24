@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
+from app.core.openai_compat import build_v1_endpoint
+
 
 def get_llm_config(config: Dict[str, Any]) -> Tuple[str, str, str, int]:
     """提取 LLM 连接配置。"""
@@ -20,7 +22,7 @@ def get_llm_config(config: Dict[str, Any]) -> Tuple[str, str, str, int]:
 
     base_url = os.getenv("LLM_BASE_URL") or llm_cfg.get("base_url", "https://api.deepseek.com")
     model = os.getenv("LLM_MODEL") or llm_cfg.get("model", "deepseek-chat")
-    url = base_url.rstrip("/") + "/v1/chat/completions"
+    url = build_v1_endpoint(base_url, "/chat/completions")
     timeout = llm_cfg.get("timeout", 30)
     return api_key, url, model, timeout
 

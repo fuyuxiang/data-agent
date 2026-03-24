@@ -15,7 +15,6 @@ from app.services.annotation_constants import (
     BACKEND_ROOT,
     IMAGE_EXTENSIONS,
     PROJECT_ROOT,
-    REFERENCE_ROOT,
     VIDEO_EXTENSIONS,
 )
 
@@ -44,7 +43,7 @@ def normalize_input_path(raw_path: str, *, allow_missing: bool = True) -> str:
     if candidate.is_absolute():
         return str(candidate.resolve(strict=False))
 
-    candidate_roots = [PROJECT_ROOT, BACKEND_ROOT, REFERENCE_ROOT]
+    candidate_roots = [PROJECT_ROOT]
     resolved_candidates = [(root / candidate).resolve(strict=False) for root in candidate_roots]
 
     for resolved in resolved_candidates:

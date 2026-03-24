@@ -19,6 +19,7 @@ import requests
 from PIL import Image
 
 from app.core.config import settings
+from app.core.openai_compat import build_v1_endpoint
 
 
 class MediaModelClient:
@@ -31,9 +32,9 @@ class MediaModelClient:
     def _can_remote_caption(self) -> bool:
         return bool(
             settings.MEDIA_ENABLE_REMOTE_MODELS
-            and (settings.VL_BASE_URL or "").strip()
-            and (settings.VL_API_KEY or "").strip()
-            and (settings.VL_MODEL or "").strip()
+            and (settings.LLM_BASE_URL or "").strip()
+            and (settings.LLM_API_KEY or "").strip()
+            and (settings.LLM_MODEL or "").strip()
         )
 
     def _can_remote_rerank(self) -> bool:
@@ -114,10 +115,10 @@ class MediaModelClient:
         raise RuntimeError("embedding service returned empty vector")
 
     def _remote_caption(self, image_path: str) -> Optional[str]:
-        url = (settings.VL_BASE_URL or "").rstrip("/") + "/v1/chat/completions"
+        url = build_v1_endpoint(settings.LLM_BASE_URL or "", "/chat/completions")
         data_url = self._image_to_data_url(image_path)
         payload = {
-            "model": settings.VL_MODEL,
+            "model": settings.LLM_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -130,7 +131,7 @@ class MediaModelClient:
             "temperature": 0.0,
         }
         headers = {
-            "Authorization": f"Bearer {settings.VL_API_KEY}",
+            "Authorization": f"Bearer {settings.LLM_API_KEY}",
             "Content-Type": "application/json",
         }
         response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
