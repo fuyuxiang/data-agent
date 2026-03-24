@@ -37,6 +37,13 @@ backend/data/*.duckdb
 backend/data/uploads/
 backend/data/media/
 backend/data/query_uploads/
+backend/data/annotations/
+backend/data/.claude/
+
+# Keep source assets in Git:
+# - backend/data/warning_file/
+# - backend/data/warning_img/
+# - backend/data/model/
 
 # Local test dependencies
 backend/.test-deps/

@@ -1,0 +1,2 @@
+backend/data/warning_file/*.mp4 filter=lfs diff=lfs merge=lfs -text
+backend/data/model/*.pt filter=lfs diff=lfs merge=lfs -text

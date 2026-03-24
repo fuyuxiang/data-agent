@@ -59,7 +59,8 @@ VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm"}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-REFERENCE_ROOT = Path("/Users/fuyuxiang/Desktop/多模态检索-铁塔")
+DEFAULT_IMAGE_SOURCE_DIR = BACKEND_ROOT / "data" / "warning_img"
+DEFAULT_VIDEO_SOURCE_DIR = BACKEND_ROOT / "data" / "warning_file"
 
 
 def get_track_color(track_id: int) -> tuple[int, int, int]:
@@ -68,10 +69,10 @@ def get_track_color(track_id: int) -> tuple[int, int, int]:
 
 def get_default_source_dir(media_type: str) -> str:
     if media_type == "video":
-        candidate = REFERENCE_ROOT / "warning_file"
+        candidate = DEFAULT_VIDEO_SOURCE_DIR
     else:
-        candidate = REFERENCE_ROOT / "warning_img"
-    return str(candidate) if candidate.exists() else ""
+        candidate = DEFAULT_IMAGE_SOURCE_DIR
+    return str(candidate.resolve())
 
 
 def get_default_output_dir() -> str:
