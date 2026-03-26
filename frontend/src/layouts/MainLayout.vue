@@ -25,7 +25,7 @@ const llmMonitor = ref<LlmMonitorState>({
 let llmHeartbeatTimer: number | null = null
 
 const menuItems = [
-  { key: 'query', title: '智能取数', icon: 'ChatDotRound', path: '/query' },
+  { key: 'query', title: '智能问答', icon: 'ChatDotRound', path: '/query' },
   { key: 'annotation', title: '智能标注', icon: 'CollectionTag', path: '/annotation' },
   { key: 'config', title: '数据配置', icon: 'Setting', path: '/config' },
   { key: 'history', title: '历史记录', icon: 'Clock', path: '/history' },
@@ -100,7 +100,7 @@ const checkLlmHeartbeat = async () => {
     <div class="app-sidebar">
       <div class="sidebar-logo">
         <el-icon :size="24"><DataAnalysis /></el-icon>
-        <span class="logo-text">智能取数平台</span>
+        <span class="logo-text">智能问答平台</span>
       </div>
 
       <el-menu
@@ -149,7 +149,7 @@ const checkLlmHeartbeat = async () => {
       <!-- 头部 -->
       <div class="main-header">
         <div class="header-title">
-          <h3>{{ menuItems.find(m => m.path === currentPath)?.title || '智能取数平台' }}</h3>
+          <h3>{{ menuItems.find(m => m.path === currentPath)?.title || '智能问答平台' }}</h3>
         </div>
         <div class="header-actions">
           <el-dropdown @command="handleLogout">

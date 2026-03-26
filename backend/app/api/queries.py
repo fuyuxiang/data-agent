@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, select, text
@@ -23,6 +23,7 @@ from app.orchestrator_duckdb import get_engine
 from app.orchestrator_graph import LangGraphOrchestrator, run_stream
 from app.schemas.schemas import ExecuteSqlRequest, QueryRequest, QueryResponse
 from app.services.guardrails import SQLGuardrail, SQLSecurityError
+from app.services.media_utils import QUERY_UPLOAD_ROOT, ensure_media_dirs, guess_media_type
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -200,6 +201,44 @@ def _next_or_done(iterator) -> Tuple[bool, Optional[str]]:
         return False, next(iterator)
     except StopIteration:
         return True, None
+
+
+def _parse_query_form_payload(payload: str) -> QueryRequest:
+    try:
+        raw_payload = json.loads(payload)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"payload 不是合法的 JSON: {exc}",
+        ) from exc
+
+    try:
+        return QueryRequest(**raw_payload)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"查询参数校验失败: {exc}",
+        ) from exc
+
+
+async def _save_query_upload_file(upload: UploadFile, workspace_id: int, user_id: int) -> tuple[str, str]:
+    media_type = guess_media_type(upload.filename or "")
+    if not media_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持上传图片或视频文件",
+        )
+
+    ensure_media_dirs()
+    target_dir = QUERY_UPLOAD_ROOT / f"workspace_{workspace_id}" / f"user_{user_id}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = upload.filename or "query_upload.bin"
+    target_path = target_dir / f"{uuid.uuid4().hex[:12]}_{Path(original_name).name}"
+    content = await upload.read()
+    with open(target_path, "wb") as file_obj:
+        file_obj.write(content)
+    return str(target_path), media_type.value
 
 
 def _build_result_schema(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -563,11 +602,10 @@ def _build_dataset_processing_warnings(dataset: Optional[Dataset]) -> List[str]:
     return []
 
 
-@router.post("/stream")
-async def stream_query(
+async def _stream_query_impl(
     request: QueryRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    current_user: User,
+    db: AsyncSession,
 ):
     """流式执行自然语言查询 - Server-Sent Events"""
     logger.info("==================== 收到流式查询请求 ====================")
@@ -657,6 +695,38 @@ async def stream_query(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/stream")
+async def stream_query(
+    request: QueryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _stream_query_impl(request, current_user, db)
+
+
+@router.post("/stream-upload")
+async def stream_query_with_upload(
+    payload: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    request = _parse_query_form_payload(payload)
+    await _ensure_workspace_access(db, current_user, request.workspace_id)
+
+    stored_path, media_type = await _save_query_upload_file(file, request.workspace_id, current_user.id)
+    if media_type == "image":
+        request.query_image_path = stored_path
+        if not request.question.strip():
+            request.question = "查找与上传图片相似的图片和视频"
+    else:
+        request.query_video_path = stored_path
+        if not request.question.strip():
+            request.question = "查找与上传视频内容相似的图片和视频"
+
+    return await _stream_query_impl(request, current_user, db)
 
 
 @router.post("", response_model=QueryResponse)

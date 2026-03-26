@@ -4,7 +4,7 @@ import { useUserStore } from '@/stores/user'
 import { queryApi, datasetApi, dataSourceApi, historyApi } from '@/api'
 import type { QueryContextTurn, QueryResponse, QuerySessionContext, Dataset, SchemaColumn } from '@/api/types'
 import { ElMessage } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, UploadFilled } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
 const userStore = useUserStore()
@@ -37,12 +37,12 @@ let datasetPollTimer: ReturnType<typeof setInterval> | null = null
 // 数据表（初始为空，选择数据集后加载）
 const allTables = ref<TableItem[]>([])
 
-// 快捷示例（基于 dm_m_kd_charge_info_sichuan 表的实际字段）
+// 快捷示例
 const quickExamples = [
-  '查询两个表中相同省份、相同账期的收入对比',
-  '查询2025年12月各二级发展渠道的收入分布',
-  '统计2025年11月各渠道类型的渠道数量',
-  '查询最近10条渠道收入明细',
+  '分析近三个月各渠道新增用户和转化率变化',
+  '统计本月高价值用户的 ARPU、留存率和付费转化情况',
+  '检索与“人员聚集”相关的图片和视频片段',
+  '查找与“机房巡检告警”相似的监控画面',
 ]
 
 // 过滤后的数据表
@@ -844,6 +844,24 @@ const formatSearchScore = (row: Record<string, any>) => {
   return '-'
 }
 
+const validateQueryMediaFile = (file: File) => {
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|bmp|webp)$/i.test(file.name)
+  const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|m4v|webm)$/i.test(file.name)
+
+  if (!isImage && !isVideo) {
+    ElMessage.error('只支持上传图片或视频文件')
+    return false
+  }
+
+  const maxMb = isImage ? 50 : 1024
+  if (file.size / 1024 / 1024 > maxMb) {
+    ElMessage.error(`${isImage ? '图片' : '视频'}大小不能超过 ${maxMb}MB`)
+    return false
+  }
+
+  return true
+}
+
 // 切换数据表选择
 const handleTableCheckChange = (table: any) => {
   const idx = selectedTables.value.findIndex(t => t.id === table.id)
@@ -939,45 +957,42 @@ const handleRerunSql = async (msgIdx: number, msgData: any) => {
   }
 }
 
-// 执行查询
-const handleQuery = async () => {
-  console.log('handleQuery called, question:', question.value)
+const executeStreamQuery = async (userQuestion: string, uploadFile?: File) => {
+  console.log('executeStreamQuery called, question:', userQuestion)
   console.log('selectedDataset:', selectedDataset.value)
   console.log('dataset_id:', selectedDataset.value?.id)
-
-  if (!question.value.trim()) {
-    ElMessage.warning('请输入问题')
-    return
-  }
 
   if (!userStore.currentWorkspace) {
     ElMessage.warning('请先选择工作空间')
     return
   }
 
-  const userQuestion = question.value
-  question.value = ''
-  loading.value = true
+  const currentQuestion = userQuestion.trim()
+  if (!currentQuestion) {
+    ElMessage.warning('请输入问题')
+    return
+  }
 
-  // 添加用户消息
+  loading.value = true
+  const mediaLabel = uploadFile
+    ? `（已上传${uploadFile.type.startsWith('image/') || /\.(png|jpe?g|bmp|webp)$/i.test(uploadFile.name) ? '图片' : '视频'}：${uploadFile.name}）`
+    : ''
+
   messages.value.push({
     role: 'user',
-    content: userQuestion,
+    content: `${currentQuestion}${mediaLabel}`,
   })
 
-  // 添加一个空的助手消息，实时更新 - 使用 reactive 确保响应式
   const assistantMsg = reactive({
     role: 'assistant',
     content: '',
     data: null as any,
-    thinkingLines: [] as string[],  // 实时思考过程
+    thinkingLines: [] as string[],
   })
   messages.value.push(assistantMsg)
 
-  // 用于累积思考过程
   let thinkingContent = ''
   let lastThinkingLine = ''
-  // 用于保存历史记录的 trace_id 和 audit_id
   let currentTraceId = ''
   let currentAuditId = ''
   let finalExecutionHistory: Record<string, any>[] = []
@@ -993,11 +1008,9 @@ const handleQuery = async () => {
 
     lastThinkingLine = cleanedText
     thinkingContent += cleanedText + '\n'
-    // 实时更新最后一条消息
     const lastMsg = messages.value[messages.value.length - 1] as any
     if (lastMsg) {
       lastMsg.content = thinkingContent
-      // 同时添加到 thinkingLines 用于实时显示
       if (!lastMsg.thinkingLines) {
         lastMsg.thinkingLines = []
       }
@@ -1006,18 +1019,19 @@ const handleQuery = async () => {
   }
 
   try {
-    // 显示开始思考
-    updateThinking('收到你的问题，正在处理中')
+    updateThinking(uploadFile ? '收到你上传的文件，正在发起多模态检索' : '收到你的问题，正在处理中')
 
-    console.log('[DEBUG] 发送查询请求, table_names:', selectedTableNames)
-
-    const response = await queryApi.streamExecute({
-      question: userQuestion,
+    const requestPayload = {
+      question: currentQuestion,
       workspace_id: userStore.currentWorkspace.id,
       dataset_id: selectedDataset.value?.id,
       table_names: selectedTableNames.length > 0 ? selectedTableNames : undefined,
       context: sessionContext,
-    })
+    }
+
+    const response = uploadFile
+      ? await queryApi.streamExecuteUpload(requestPayload, uploadFile)
+      : await queryApi.streamExecute(requestPayload)
 
     if (!response.ok) {
       throw new Error(response.statusText)
@@ -1043,172 +1057,158 @@ const handleQuery = async () => {
       buffer = lines.pop() || ''
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            console.log('[Query] 事件:', data.type, data.step || '', data.summary?.substring(0, 30))
+        if (!line.startsWith('data: ')) continue
 
-            if (data.type === 'run_start') {
-              updateThinking('正在理解你的需求')
-            } else if (data.type === 'node_start') {
-              const startText = getFriendlyStepStartText(data.step)
-              if (startText) {
-                updateThinking(startText)
-              }
-            } else if (data.type === 'node_end') {
-              if (!data.outputs) {
-                continue
-              }
+        try {
+          const data = JSON.parse(line.slice(6))
+          console.log('[Query] 事件:', data.type, data.step || '', data.summary?.substring(0, 30))
 
-              if (data.step === 'format_node' && data.outputs?.final_answer) {
-                // 格式化节点完成，提取最终结果
-                finalData = data.outputs.final_answer
-                console.log('[Query] 收到 format_node 结果:', JSON.stringify(finalData, null, 2))
-                if (finalData?.answer_text) {
-                  updateThinking('结果说明：' + finalData.answer_text)
-                }
-              } else {
-                const endLines = getFriendlyStepEndLines(data.step, data.outputs)
-                endLines.forEach(lineText => updateThinking(lineText))
-              }
-            } else if (data.type === 'node_error') {
-              updateThinking('处理过程中出现问题：' + (data.error?.message || '执行失败'))
-            } else if (data.type === 'final') {
-              // 提取 trace_id 和 audit_id
-              if (data.trace_id) {
-                currentTraceId = data.trace_id
-                console.log('[Query] 获取到 trace_id:', currentTraceId)
-              }
-              if (data.audit_id) {
-                currentAuditId = data.audit_id
-                console.log('[Query] 获取到 audit_id:', currentAuditId)
-              }
-              if (Array.isArray(data.meta?.execution_history)) {
-                finalExecutionHistory = data.meta.execution_history
-              }
-              if (typeof data.meta?.intent === 'string') {
-                finalMetaIntent = data.meta.intent
-              }
-              if (data.meta?.filters && typeof data.meta.filters === 'object') {
-                finalFilters = data.meta.filters
-              }
-              if (typeof data.meta?.sql === 'string') {
-                finalSqlFromMeta = data.meta.sql
-              }
-              if (Array.isArray(data.meta?.sql_params)) {
-                finalSqlParamsFromMeta = data.meta.sql_params
-              }
-              // final 事件中也可能包含结果数据
-              finalData = data.result || data.outputs || data
-              console.log('[Query] 收到 final, outputs:', finalData)
-              if (finalData?.answer_text || finalData?.message) {
-                updateThinking('结果说明：' + (finalData?.answer_text || finalData?.message))
-              }
-              // 收到 final 后也更新消息数据
-              if (finalData) {
-                const lastMsg = messages.value[messages.value.length - 1]
-                if (lastMsg) {
-                  // 处理不同格式的数据
-                  let columns: any[] = []
-                  let rows: any[] = []
+          if (data.type === 'run_start') {
+            updateThinking(uploadFile ? '正在分析上传内容并理解你的需求' : '正在理解你的需求')
+          } else if (data.type === 'node_start') {
+            const startText = getFriendlyStepStartText(data.step)
+            if (startText) {
+              updateThinking(startText)
+            }
+          } else if (data.type === 'node_end') {
+            if (!data.outputs) {
+              continue
+            }
 
-                  if (finalData?.value && Array.isArray(finalData.value)) {
-                    // search/list 类型的数据结构
-                    rows = finalData.value
-                    if (rows.length > 0) {
-                      columns = Object.keys(rows[0])
-                    }
-                  } else {
-                    columns = finalData?.result?.columns || finalData?.columns || []
-                    rows = finalData?.result?.rows || finalData?.rows || []
+            if (data.step === 'format_node' && data.outputs?.final_answer) {
+              finalData = data.outputs.final_answer
+              console.log('[Query] 收到 format_node 结果:', JSON.stringify(finalData, null, 2))
+              if (finalData?.answer_text) {
+                updateThinking('结果说明：' + finalData.answer_text)
+              }
+            } else {
+              const endLines = getFriendlyStepEndLines(data.step, data.outputs)
+              endLines.forEach(lineText => updateThinking(lineText))
+            }
+          } else if (data.type === 'node_error') {
+            updateThinking('处理过程中出现问题：' + (data.error?.message || '执行失败'))
+          } else if (data.type === 'final') {
+            if (data.trace_id) {
+              currentTraceId = data.trace_id
+            }
+            if (data.audit_id) {
+              currentAuditId = data.audit_id
+            }
+            if (Array.isArray(data.meta?.execution_history)) {
+              finalExecutionHistory = data.meta.execution_history
+            }
+            if (typeof data.meta?.intent === 'string') {
+              finalMetaIntent = data.meta.intent
+            }
+            if (data.meta?.filters && typeof data.meta.filters === 'object') {
+              finalFilters = data.meta.filters
+            }
+            if (typeof data.meta?.sql === 'string') {
+              finalSqlFromMeta = data.meta.sql
+            }
+            if (Array.isArray(data.meta?.sql_params)) {
+              finalSqlParamsFromMeta = data.meta.sql_params
+            }
+
+            finalData = data.result || data.outputs || data
+            if (finalData?.answer_text || finalData?.message) {
+              updateThinking('结果说明：' + (finalData?.answer_text || finalData?.message))
+            }
+
+            if (finalData) {
+              const lastMsg = messages.value[messages.value.length - 1]
+              if (lastMsg) {
+                let columns: any[] = []
+                let rows: any[] = []
+
+                if (finalData?.value && Array.isArray(finalData.value)) {
+                  rows = finalData.value
+                  if (rows.length > 0) {
+                    columns = Object.keys(rows[0])
                   }
-
-                  const rowCount = finalData?.row_count || rows.length
-                  let resultSchema = columns.map((c: string) => ({ name: c, type: 'string' }))
-                  if (resultSchema.length === 0 && rows.length > 0) {
-                    resultSchema = Object.keys(rows[0]).map(key => ({ name: key, type: 'string' }))
-                  }
-                  const statusValue = finalData?.status || 'success'
-
-                  // 处理不同意图类型（错误态优先回退到后端 meta.intent，避免误显示为 list）
-                  let intentValue = finalData?.intent || finalMetaIntent || 'list'
-                  if (finalData?.type === 'chat') intentValue = 'chat'
-                  if (finalData?.type === 'search') intentValue = 'search'
-                  if (finalData?.type === 'count') intentValue = 'count'
-
-                  lastMsg.data = reactive<QueryResponse>({
-                    question: userQuestion,
-                    intent: intentValue,
-                    intent_text: finalData?.intent_text || getIntentLabel(intentValue),
-                    sql: finalData?.sql || finalSqlFromMeta || '',
-                    sql_params: Array.isArray(finalData?.sql_params) ? finalData.sql_params : finalSqlParamsFromMeta,
-                    result_rows: rows,
-                    result_schema: resultSchema,
-                    chart_suggestion: finalData?.chart_suggestion || (intentValue === 'count' ? 'bar' : 'table'),
-                    row_count: rowCount,
-                    status: statusValue,
-                    error: finalData?.error?.message || finalData?.message,
-                    answer: finalData?.message || finalData?.answer_text || '',
-                    trace_id: currentTraceId,
-                    audit_id: currentAuditId,
-                    execution_history: finalExecutionHistory,
-                    evidence: finalData?.evidence,
-                    plan_source: finalData?.plan_source || finalFilters?.plan_source,
-                    confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
-                      ? (finalData?.confidence ?? finalFilters?.confidence)
-                      : undefined,
-                    warnings: finalData?.warnings || [],
-                    clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
-                    clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
-                    // 保存生成 SQL 时使用的表名和数据集，用于重新执行
-                    table_names: selectedTableNames,
-                    dataset_id: selectedDataset.value?.id,
-                  })
+                } else {
+                  columns = finalData?.result?.columns || finalData?.columns || []
+                  rows = finalData?.result?.rows || finalData?.rows || []
                 }
-              }
-            } else if (data.type === 'done') {
-              updateThinking('处理完成，结果已返回')
-              loading.value = false
-              // 在流结束时保存历史记录
-              if (currentTraceId) {
-                const lastMsg = messages.value[messages.value.length - 1]
-                const msgData = lastMsg?.data
-                try {
-                  await historyApi.create({
-                    workspace_id: userStore.currentWorkspace?.id || 0,
-                    dataset_id: selectedDataset.value?.id,
-                    question: userQuestion,
-                    normalized_question: userQuestion,
-                    intent: msgData?.intent || 'list',
-                    semantic_sql: msgData?.sql || '',
-                    executable_sql: msgData?.sql || '',
-                    sql_params: Array.isArray(msgData?.sql_params) ? msgData.sql_params : [],
-                    result_schema: msgData?.result_schema || [],
-                    result_rows: (msgData?.result_rows || []).slice(0, 100),
-                    row_count: msgData?.row_count || 0,
-                    status: msgData?.status || 'success',
-                    error_message: msgData?.error || '',
-                    trace_id: currentTraceId,
-                    audit_id: currentAuditId,
-                  })
-                  console.log('[History] 历史记录保存成功')
-                } catch (historyError) {
-                  console.error('[History] 保存历史记录失败:', historyError)
+
+                const rowCount = finalData?.row_count || rows.length
+                let resultSchema = columns.map((c: string) => ({ name: c, type: 'string' }))
+                if (resultSchema.length === 0 && rows.length > 0) {
+                  resultSchema = Object.keys(rows[0]).map(key => ({ name: key, type: 'string' }))
                 }
+                const statusValue = finalData?.status || 'success'
+
+                let intentValue = finalData?.intent || finalMetaIntent || 'list'
+                if (finalData?.type === 'chat') intentValue = 'chat'
+                if (finalData?.type === 'search') intentValue = 'search'
+                if (finalData?.type === 'count') intentValue = 'count'
+
+                lastMsg.data = reactive<QueryResponse>({
+                  question: currentQuestion,
+                  intent: intentValue,
+                  intent_text: finalData?.intent_text || getIntentLabel(intentValue),
+                  sql: finalData?.sql || finalSqlFromMeta || '',
+                  sql_params: Array.isArray(finalData?.sql_params) ? finalData.sql_params : finalSqlParamsFromMeta,
+                  result_rows: rows,
+                  result_schema: resultSchema,
+                  chart_suggestion: finalData?.chart_suggestion || (intentValue === 'count' ? 'bar' : 'table'),
+                  row_count: rowCount,
+                  status: statusValue,
+                  error: finalData?.error?.message || finalData?.message,
+                  answer: finalData?.message || finalData?.answer_text || '',
+                  trace_id: currentTraceId,
+                  audit_id: currentAuditId,
+                  execution_history: finalExecutionHistory,
+                  evidence: finalData?.evidence,
+                  plan_source: finalData?.plan_source || finalFilters?.plan_source,
+                  confidence: typeof (finalData?.confidence ?? finalFilters?.confidence) === 'number'
+                    ? (finalData?.confidence ?? finalFilters?.confidence)
+                    : undefined,
+                  warnings: finalData?.warnings || [],
+                  clarification_needed: !!(finalData?.clarification_needed ?? finalFilters?.needs_clarification),
+                  clarification_options: finalData?.clarification_options || finalFilters?.clarification_options || [],
+                  table_names: selectedTableNames,
+                  dataset_id: selectedDataset.value?.id,
+                })
               }
             }
-          } catch (e) {
-            console.error('Parse error:', e)
+          } else if (data.type === 'done') {
+            updateThinking('处理完成，结果已返回')
+            loading.value = false
+            if (currentTraceId) {
+              const lastMsg = messages.value[messages.value.length - 1]
+              const msgData = lastMsg?.data
+              try {
+                await historyApi.create({
+                  workspace_id: userStore.currentWorkspace?.id || 0,
+                  dataset_id: selectedDataset.value?.id,
+                  question: currentQuestion,
+                  normalized_question: currentQuestion,
+                  intent: msgData?.intent || 'list',
+                  semantic_sql: msgData?.sql || '',
+                  executable_sql: msgData?.sql || '',
+                  sql_params: Array.isArray(msgData?.sql_params) ? msgData.sql_params : [],
+                  result_schema: msgData?.result_schema || [],
+                  result_rows: (msgData?.result_rows || []).slice(0, 100),
+                  row_count: msgData?.row_count || 0,
+                  status: msgData?.status || 'success',
+                  error_message: msgData?.error || '',
+                  trace_id: currentTraceId,
+                  audit_id: currentAuditId,
+                })
+              } catch (historyError) {
+                console.error('[History] 保存历史记录失败:', historyError)
+              }
+            }
           }
+        } catch (e) {
+          console.error('Parse error:', e)
         }
       }
     }
 
-    // 更新消息结果
-    console.log('[DEBUG] finalData:', finalData)
     if (finalData) {
       const lastMsg = messages.value[messages.value.length - 1]
-      // 只在还未写入消息数据时兜底，避免覆盖 node/final 事件中已构建的结果
       if (lastMsg && !lastMsg.data) {
         let columns: any[] = []
         let rows: any[] = []
@@ -1232,7 +1232,7 @@ const handleQuery = async () => {
         const statusValue = finalData?.status || 'success'
         const fallbackIntent = finalData?.intent || finalMetaIntent || finalData?.type || 'list'
         const fallbackData = reactive<QueryResponse>({
-          question: userQuestion,
+          question: currentQuestion,
           intent: fallbackIntent,
           intent_text: finalData?.intent_text || getIntentLabel(fallbackIntent),
           sql: finalData?.sql || finalSqlFromMeta || '',
@@ -1261,9 +1261,6 @@ const handleQuery = async () => {
         lastMsg.data = fallbackData
         messages.value = [...messages.value]
       }
-
-    } else {
-      console.log('[DEBUG] finalData 为空，没有结果数据')
     }
   } catch (e: any) {
     console.error('Query error:', e)
@@ -1273,7 +1270,7 @@ const handleQuery = async () => {
     if (lastMsg) {
       lastMsg.content = '查询失败'
       lastMsg.data = {
-        question: userQuestion,
+        question: currentQuestion,
         status: 'error',
         row_count: 0,
         error: e.message || '查询失败',
@@ -1283,14 +1280,13 @@ const handleQuery = async () => {
         dataset_id: selectedDataset.value?.id,
       } as QueryResponse
     }
-    // 保存失败记录到历史
     if (currentTraceId) {
       try {
         await historyApi.create({
           workspace_id: userStore.currentWorkspace?.id || 0,
           dataset_id: selectedDataset.value?.id,
-          question: userQuestion,
-          normalized_question: userQuestion,
+          question: currentQuestion,
+          normalized_question: currentQuestion,
           intent: 'list',
           row_count: 0,
           status: 'error',
@@ -1305,6 +1301,44 @@ const handleQuery = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const handleQuery = async () => {
+  if (!question.value.trim()) {
+    ElMessage.warning('请输入问题')
+    return
+  }
+
+  const userQuestion = question.value
+  question.value = ''
+  await executeStreamQuery(userQuestion)
+}
+
+const handleQueryMediaUpload = async (uploadFile: any) => {
+  const file = uploadFile.raw as File | undefined
+  if (!file || !validateQueryMediaFile(file)) return
+
+  if (loading.value) {
+    ElMessage.warning('当前任务仍在执行，请稍后再上传')
+    return
+  }
+
+  if (!selectedDataset.value) {
+    ElMessage.warning('请先选择数据集后再上传图片或视频')
+    return
+  }
+
+  if (selectedDataset.value.media_count <= 0) {
+    ElMessage.warning('当前数据集暂无图片或视频索引，无法执行多模态检索')
+    return
+  }
+
+  const fallbackQuestion = file.type.startsWith('image/') || /\.(png|jpe?g|bmp|webp)$/i.test(file.name)
+    ? '查找与上传图片相似的图片和视频'
+    : '查找与上传视频内容相似的图片和视频'
+  const userQuestion = question.value.trim() || fallbackQuestion
+  question.value = ''
+  await executeStreamQuery(userQuestion, file)
 }
 </script>
 
@@ -1405,34 +1439,34 @@ const handleQuery = async () => {
           <!-- 欢迎页 -->
           <div v-if="messages.length === 0" class="welcome-page">
             <h1 class="welcome-title">
-              您好！欢迎使用 <span class="highlight">智能取数</span>
+              您好！欢迎使用 <span class="highlight">智能问答</span>
             </h1>
             <p class="welcome-desc">
-              用自然语言描述需求，系统自动生成 SQL 并返回结果。您可以直接选择数据表后提问，也可以从下方示例开始。
+              用自然语言描述业务问题或检索需求，系统可自动理解结构化数据并生成结果，也支持围绕图片、视频内容进行多模态检索。您可以直接选择数据表后提问，也可以从下方示例开始。
             </p>
 
             <div class="support-section">
-              <h3 class="support-title">支持数据领域</h3>
+              <h3 class="support-title">核心能力</h3>
               <div class="support-list">
                 <div class="support-item">
-                  <span class="support-icon">✅</span>
-                  <span class="support-text">用户分析：用户增长、活跃度、留存率等</span>
+                  <span class="support-icon">💬</span>
+                  <span class="support-text">智能问答：理解自然语言问题，自动生成查询并返回结果</span>
                 </div>
                 <div class="support-item">
-                  <span class="support-icon">📱</span>
-                  <span class="support-text">业务运营：套餐使用、流量消耗、通话时长等</span>
+                  <span class="support-icon">🗂️</span>
+                  <span class="support-text">结构化数据分析：支持用户、运营、渠道、财务等业务场景分析</span>
                 </div>
                 <div class="support-item">
-                  <span class="support-icon">🏠</span>
-                  <span class="support-text">渠道分析：各渠道获客、转化、ROI等</span>
+                  <span class="support-icon">🖼️</span>
+                  <span class="support-text">图片相似检索：快速定位相似图片与关联线索</span>
                 </div>
                 <div class="support-item">
-                  <span class="support-icon">🧾</span>
-                  <span class="support-text">财务报表：收入、成本、利润等财务指标</span>
+                  <span class="support-icon">🎬</span>
+                  <span class="support-text">视频内容检索：根据场景描述查找相似视频片段</span>
                 </div>
                 <div class="support-item">
-                  <span class="support-icon">💰</span>
-                  <span class="support-text">用户价值：ARPU、LTV、付费转化等</span>
+                  <span class="support-icon">🔗</span>
+                  <span class="support-text">多模态融合：结合文本、图片、视频与结构化数据进行综合分析</span>
                 </div>
               </div>
             </div>
@@ -1748,10 +1782,24 @@ const handleQuery = async () => {
         <div class="chat-input">
           <div class="input-container">
             <div class="input-wrapper">
+              <el-upload
+                class="upload-trigger"
+                :auto-upload="false"
+                :show-file-list="false"
+                :file-list="[]"
+                :multiple="false"
+                accept=".jpg,.jpeg,.png,.bmp,.webp,.mp4,.mov,.avi,.mkv,.m4v,.webm,image/*,video/*"
+                :on-change="handleQueryMediaUpload"
+              >
+                <el-button plain class="upload-btn" :disabled="loading">
+                  <el-icon><UploadFilled /></el-icon>
+                  上传图片/视频
+                </el-button>
+              </el-upload>
               <el-input
                 v-model="question"
                 type="textarea"
-                placeholder="只需自然语言描述需求..."
+                placeholder="请输入业务问题、分析诉求或检索需求..."
                 :rows="3"
                 :autosize="{ minRows: 2, maxRows: 6 }"
                 resize="none"
@@ -1768,6 +1816,7 @@ const handleQuery = async () => {
                 <el-icon><Promotion /></el-icon>
               </el-button>
             </div>
+            <div class="input-tip">上传图片或视频后将直接触发多模态检索；也可先输入补充说明再上传。</div>
           </div>
         </div>
       </div>
@@ -3080,6 +3129,12 @@ const handleQuery = async () => {
   margin: 0 auto;
 }
 
+.input-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+
 .input-wrapper {
   display: flex;
   gap: 12px;
@@ -3110,6 +3165,15 @@ const handleQuery = async () => {
       box-shadow: none;
     }
   }
+}
+
+.upload-trigger {
+  flex-shrink: 0;
+}
+
+.upload-btn {
+  height: 40px;
+  border-radius: 8px;
 }
 
 .send-btn {
