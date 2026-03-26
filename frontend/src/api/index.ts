@@ -195,6 +195,28 @@ export const queryApi = {
     })
   },
 
+  streamExecuteUpload: (data: QueryRequest, file: File) => {
+    const token = localStorage.getItem('token')
+    const formData = new FormData()
+    formData.append('payload', JSON.stringify(data))
+    formData.append('file', file)
+
+    return fetch('/api/v1/queries/stream-upload', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+      body: formData,
+    }).then(response => {
+      console.log('[API] Upload response status:', response.status)
+      console.log('[API] Upload response ok:', response.ok)
+      return response
+    }).catch(err => {
+      console.error('[API] Upload fetch error:', err)
+      throw err
+    })
+  },
+
   // 执行编辑后的 SQL
   executeSql: (data: {
     sql: string

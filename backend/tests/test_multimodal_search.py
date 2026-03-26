@@ -74,6 +74,23 @@ def test_image_to_video_search_returns_time_range(client, test_context):
     assert top["score"] > 0
 
 
+def test_video_to_video_search_returns_time_range(client, test_context):
+    dataset_id, _ = prepare_ready_video_dataset(client, test_context)
+    query_video = create_test_video(test_context["tmp_path"] / "query_video.avi")
+    results = run_multimodal_search(
+        "查找相似视频",
+        dataset_id=dataset_id,
+        query_video_path=str(query_video),
+        top_k=5,
+    )
+    assert results
+    top = results[0]
+    assert top["type"] == "video"
+    assert isinstance(top["video_id"], int)
+    assert top["start_sec"] < top["end_sec"]
+    assert top["score"] > 0
+
+
 def test_multimodal_search_applies_rerank_order(client, test_context, monkeypatch):
     dataset_id = prepare_ready_image_dataset(client, test_context)
 

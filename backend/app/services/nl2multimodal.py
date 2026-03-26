@@ -7,8 +7,11 @@ search intent 仍统一从这里进入，再按当前数据集内的 image / vid
 from __future__ import annotations
 
 import re
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import cv2
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,7 +19,7 @@ from app.core.database import engine
 from app.models.models import Dataset, DatasetMediaResource, ImageIndex, ProcessingStatus, VideoSegmentIndex
 from app.services.media_models import media_model_client
 from app.services.media_processing import cosine_similarity, text_match_score
-from app.services.media_utils import resolve_preview_path
+from app.services.media_utils import QUERY_UPLOAD_ROOT, ensure_media_dirs, resolve_preview_path
 from app.services.query_plan import QueryPlan
 from app.services.vector_search import vector_search
 
@@ -73,9 +76,9 @@ def run_multimodal_search(
     query_video_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """执行多模态检索。"""
+    query_reference_image_path = query_image_path
     if query_video_path:
-        # TODO: 预留视频搜视频接口。当前阶段不完整，后续可引入视频级表征与时序匹配。
-        return []
+        query_reference_image_path = _extract_query_video_frame(query_video_path)
 
     if not dataset_id:
         effective_config = config or {"search": {"lancedb_dir": "data/lancedb"}}
@@ -101,34 +104,66 @@ def run_multimodal_search(
             effective_config = config or {"search": {"lancedb_dir": "data/lancedb"}}
             return vector_search(effective_config, query_text, top_k=top_k)
 
-        target_mode = _resolve_target_mode(query_text, query_image_path)
+        target_mode = _resolve_target_mode(query_text, query_reference_image_path, query_video_path)
         query_embedding = None
-        if query_image_path:
-            query_embedding = media_model_client.embed_image(query_image_path)
+        if query_reference_image_path:
+            query_embedding = media_model_client.embed_image(query_reference_image_path)
         else:
             query_embedding = media_model_client.embed_text(query_text)
 
         candidate_k = max(top_k * 5, 20)
         results: list[dict[str, Any]] = []
         if target_mode in {"image", "both"}:
-            results.extend(_search_images(image_rows, query_text, query_embedding, query_image_path, candidate_k))
+            results.extend(_search_images(image_rows, query_text, query_embedding, query_reference_image_path, candidate_k))
         if target_mode in {"video", "both"}:
-            results.extend(_search_videos(segment_rows, query_text, query_embedding, query_image_path, candidate_k))
+            results.extend(_search_videos(segment_rows, query_text, query_embedding, query_reference_image_path, candidate_k))
 
-        rerank_query = _build_rerank_query_text(query_text, query_image_path)
+        rerank_query = _build_rerank_query_text(query_text, query_reference_image_path)
         reranked_results = _apply_rerank(rerank_query, results, top_k=top_k)
         reranked_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return reranked_results[:top_k]
 
 
-def _resolve_target_mode(query_text: str, query_image_path: Optional[str]) -> str:
+def _resolve_target_mode(
+    query_text: str,
+    query_image_path: Optional[str],
+    query_video_path: Optional[str],
+) -> str:
     if any(keyword in query_text for keyword in VIDEO_KEYWORDS):
         return "video"
     if any(keyword in query_text for keyword in IMAGE_KEYWORDS):
         return "image"
-    if query_image_path:
+    if query_image_path or query_video_path:
         return "both"
     return "both"
+
+
+def _extract_query_video_frame(video_path: str) -> Optional[str]:
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        return None
+
+    try:
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        target_frame = max(frame_count // 2, 0)
+        if target_frame > 0:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = capture.read()
+        if not ok or frame is None:
+            return None
+
+        ensure_media_dirs()
+        target_dir = QUERY_UPLOAD_ROOT / "query_frames"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"{uuid.uuid4().hex[:12]}_{Path(video_path).stem}.jpg"
+        cv2.imwrite(str(target_path), frame)
+        return str(target_path)
+    finally:
+        capture.release()
 
 
 def _search_images(
