@@ -411,7 +411,7 @@ class QueryIntent(BaseModel):
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd backend && python -m pytest tests/intent/test_schema.py -v`
-Expected: PASS（9 项）
+Expected: PASS（8 项）
 
 - [ ] **Step 5: 提交**
 
@@ -426,7 +426,7 @@ git commit -F - <<'EOF'
 - slot_signature 排除置信度与原始问法，使同一问题的不同表述命中同一缓存
 - merge_followup 按字段覆盖过滤条件，实现结构化多轮而非聊天记录堆叠
 - 时间范围校验起止顺序，聚合类意图强制要求至少一个指标
-- 验证：pytest tests/intent/test_schema.py 9 项通过
+- 验证：pytest tests/intent/test_schema.py 8 项通过
 EOF
 ```
 
@@ -1759,7 +1759,7 @@ Expected: PASS（14 项）
 - [ ] **Step 5: 运行全部测试**
 
 Run: `cd backend && python -m pytest -v`
-Expected: PASS（计划 01 的 25 项 + 本计划 56 项）
+Expected: PASS（计划 01 的 29 项 + 本计划 55 项）
 
 - [ ] **Step 6: 提交**
 
