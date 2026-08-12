@@ -1047,7 +1047,7 @@ class OpenAiCompatClient:
 - [ ] **Step 7: 运行测试确认通过**
 
 Run: `cd backend && python -m pytest tests/intent -v`
-Expected: PASS（9 项来自计划 02 + 本任务 23 项）
+Expected: PASS（8 项来自计划 02 + 本任务 23 项）
 
 注意 `_FilterPayload` 用 `field` 作为 JSON 键但 Python 侧命名为 `field_name`，因为 `field` 与 Pydantic 的导入名冲突；`ConfigDict` 未开启 `populate_by_name`，构造时必须用别名。
 
@@ -1066,7 +1066,7 @@ git commit -F - <<'EOF'
 - 缺少置信度视为不合法，避免无置信度的意图直接往下走
 - 缺少时间范围不算识别失败，交由后续澄清处理
 - 生产客户端固定 temperature 为 0 并要求 JSON 输出
-- 验证：pytest tests/intent 共 32 项通过
+- 验证：pytest tests/intent 共 31 项通过
 EOF
 ```
 
@@ -3294,7 +3294,7 @@ def test_from_payload_ignores_unknown_keys():
 - [ ] **Step 6: 运行测试确认通过**
 
 Run: `cd backend && python -m pytest tests/pipeline/test_orchestrator.py tests/intent/test_schema.py -v`
-Expected: PASS（编排 20 项 + 意图 Schema 11 项）
+Expected: PASS（编排 20 项 + 意图 Schema 10 项）
 
 - [ ] **Step 7: 提交**
 
@@ -3311,7 +3311,7 @@ git commit -F - <<'EOF'
 - 越权与超范围统一回固定文案，异常明细只进 Trace
 - 会话保存结构化槽位与澄清轮数，追问在槽位上做覆盖式合并
 - 意图新增与序列化对称的还原方法，支持槽位回填与重放
-- 验证：pytest 编排 20 项、意图 Schema 11 项通过
+- 验证：pytest 编排 20 项、意图 Schema 10 项通过
 EOF
 ```
 

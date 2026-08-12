@@ -1968,7 +1968,7 @@ app.include_router(semantic_router)
 - [ ] **Step 7: 运行全部测试确认通过**
 
 Run: `cd backend && python -m pytest -v`
-Expected: PASS（Task 1~6 累计 25 项）
+Expected: PASS（Task 1~6 累计 29 项）
 
 - [ ] **Step 8: 提交**
 
@@ -1982,7 +1982,7 @@ git commit -F - <<'EOF'
 - 提供数据集列表、详情、体检报告三个查询接口
 - 发布接口在体检未通过时返回 409 并回传问题清单，且不修改发布状态
 - 响应模型显式暴露禁用场景与指标版本，供答案引证使用
-- 验证：pytest 全量 25 项通过
+- 验证：pytest 全量 29 项通过
 EOF
 ```
 

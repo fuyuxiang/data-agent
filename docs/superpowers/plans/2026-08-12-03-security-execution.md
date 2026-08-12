@@ -2524,7 +2524,7 @@ Expected: PASS（20 项）
 - [ ] **Step 8: 运行全部测试**
 
 Run: `cd backend && python -m pytest -v`
-Expected: PASS（计划 01 的 25 项 + 计划 02 的 56 项 + 本计划 94 项）
+Expected: PASS（计划 01 的 29 项 + 计划 02 的 55 项 + 本计划 94 项）
 
 - [ ] **Step 9: 提交**
 
