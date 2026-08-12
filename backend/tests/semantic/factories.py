@@ -44,6 +44,14 @@ def build_orders_dataset(session: Session, *, published: bool = True) -> Dataset
             is_groupable=False,
         ),
         FieldRow(
+            name="order_no",
+            physical_column="order_no",
+            business_name="订单编号",
+            semantic_type=SemanticType.ID.value,
+            allowed_aggregations=[Aggregation.DISTINCT_COUNT.value],
+            is_groupable=False,
+        ),
+        FieldRow(
             name="customer_id",
             physical_column="customer_id",
             business_name="客户ID",
