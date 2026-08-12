@@ -10,6 +10,10 @@ from sqlalchemy import text
 from app.core.db import meta_engine, sample_engine
 from app.semantic.orm import META_SCHEMA, Base
 
+# Imported for the side effect of registering tables on MetaBase.metadata.
+from app.security import orm as security_orm  # noqa: F401
+from app.semantic import orm as semantic_orm  # noqa: F401
+
 SAMPLE_SCHEMA = "sample"
 SQL_FILE = Path(__file__).parent / "sample_data.sql"
 
