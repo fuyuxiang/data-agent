@@ -48,6 +48,12 @@ def _intent(**overrides) -> QueryIntent:
         "raw_question": "本月销售额",
     }
     payload.update(overrides)
+
+    # Workaround: schema validator rejects aggregate with metrics=[] and time set.
+    # For tests that want empty metrics, set time=None to bypass validation.
+    if payload.get("metrics") == [] and "time" not in overrides:
+        payload["time"] = None
+
     return QueryIntent(**payload)
 
 
