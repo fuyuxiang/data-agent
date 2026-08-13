@@ -88,6 +88,9 @@ class DatasetDef:
     def has_field(self, name: str) -> bool:
         return any(item.name == name for item in self.fields)
 
+    def has_metric(self, name: str) -> bool:
+        return any(item.name == name for item in self.metrics)
+
     def resolve_enum(self, field_name: str, spoken: str) -> str | None:
         """Map a spoken business value or alias to its physical value.
 
