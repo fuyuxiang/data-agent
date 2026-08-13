@@ -122,8 +122,10 @@ class TraceOut(BaseModel):
 
 
 class ReplayOut(BaseModel):
-    sql: str
-    display_sql: str
+    # Physical SQL is only populated for callers with the `trace_auditor`
+    # role. Ordinary owners see `None` plus `matches_original`.
+    sql: str | None = None
+    display_sql: str | None = None
     matches_original: bool
     applied_row_filters: list[str] = Field(default_factory=list)
     masked_field_names: list[str] = Field(default_factory=list)

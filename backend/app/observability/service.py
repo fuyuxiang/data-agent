@@ -37,6 +37,12 @@ from app.semantic.loader import load_dataset
 from app.semantic.model import SemanticError
 
 
+# Roles allowed to see the physical SQL for a replay. Ordinary owners only
+# learn whether the replay matches the original query and what filters
+# were applied — never the SQL itself.
+_SQL_AUDIT_ROLES = frozenset({"trace_auditor", "security_admin"})
+
+
 class NotFoundError(Exception):
     """Missing or not owned by the caller — the endpoint answers 404 either way."""
 
@@ -134,10 +140,12 @@ def replay_turn(
         # schema): treat replay as not available, not as a crash.
         raise NotReplayableError
 
+    matches = secured.sql == _original_sql(session, turn_id)
+    can_see_sql = bool(principal.roles & _SQL_AUDIT_ROLES)
     return ReplayOut(
-        sql=secured.sql,
-        display_sql=secured.display_sql,
-        matches_original=secured.sql == _original_sql(session, turn_id),
+        sql=secured.sql if can_see_sql else None,
+        display_sql=secured.display_sql if can_see_sql else None,
+        matches_original=matches,
         applied_row_filters=[
             item.field_business_name for item in secured.applied_row_filters
         ],

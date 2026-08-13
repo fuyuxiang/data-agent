@@ -17,10 +17,31 @@ def stub():
 
 @pytest.fixture
 def client(meta_session, sample_conn, stub):
-    from app.api import chat
+    from sqlalchemy import select
 
+    from app.api import chat
+    from app.security.orm import RoleRow, UserRow
+    from scripts.seed_roles import seed_roles
+
+    seed_roles(meta_session)
     build_orders_dataset(meta_session)
     build_principals(meta_session)
+    # Grant trace_auditor to both `admin` and `east_manager` so the replay
+    # tests can assert the SQL body without standing up a separate audit
+    # identity. The "ordinary owners see no SQL" rule is covered by
+    # test_replay_hides_sql_from_ordinary_owners, which uses analyst (no
+    # role grants beyond the build).
+    auditor = meta_session.execute(
+        select(RoleRow).where(RoleRow.name == "trace_auditor")
+    ).scalar_one()
+    for username in ("admin", "east_manager"):
+        user = meta_session.execute(
+            select(UserRow).where(UserRow.username == username)
+        ).scalar_one()
+        if auditor not in user.roles:
+            user.roles.append(auditor)
+            meta_session.flush()
+
     app.dependency_overrides[get_meta_session] = lambda: meta_session
     app.dependency_overrides[get_sample_connection] = lambda: sample_conn
     app.dependency_overrides[chat.get_llm_client] = lambda: stub
@@ -116,7 +137,9 @@ def test_replay_does_not_call_the_model(client, stub):
 
 
 def test_replay_applies_the_current_permissions(client, stub):
-    """Replay is a diagnosis tool, not a permission bypass: rewriting happens again."""
+    """Replay is a diagnosis tool, not a permission bypass: rewriting happens
+    again with the *current* permissions. `east_manager` is owner + auditor
+    so it can both see and assert the rewritten SQL."""
     turn_id = _ask(client, username="east_manager")["turn_id"]
 
     body = client.post(
@@ -124,6 +147,20 @@ def test_replay_applies_the_current_permissions(client, stub):
     ).json()
 
     assert "'EC'" in body["sql"]
+
+
+def test_replay_hides_sql_from_ordinary_owners(client):
+    """A non-audit caller must see `matches_original` and `applied_row_filters`
+    but not the physical SQL itself."""
+    turn_id = _ask(client, username="analyst")["turn_id"]
+
+    body = client.post(
+        f"/api/trace/turns/{turn_id}/replay", headers={"X-Username": "analyst"}
+    ).json()
+
+    assert body["sql"] is None
+    assert body["display_sql"] is None
+    assert body["matches_original"] is True
 
 
 def test_replay_of_a_turn_without_snapshot_is_409(client, stub):
