@@ -27,4 +27,11 @@ def get_meta_session() -> Iterator[Session]:
         session.close()
 
 
+def get_sample_connection() -> Iterator["Connection"]:
+    """Read-only business-data connection. Committing is never needed here;
+    the connection is closed per request so a cancelled query cannot leak."""
+    with sample_engine.connect() as connection:
+        yield connection
+
+
 from app.semantic.orm import Base as MetaBase, META_SCHEMA  # noqa: F401,E402

@@ -104,8 +104,6 @@ class QueryOrchestrator:
             return self._fail(turn, "查询无法安全执行，已阻止")
         except QueryTooExpensiveError as error:
             return self._fail(turn, error.estimate.message)
-        except SemanticError:
-            return self._refuse(turn, _OUT_OF_SCOPE)
         except CompileError:
             return self._fail(turn, "语义配置存在问题，已记录待管理员处理")
         except IntentRecognitionError:
@@ -114,6 +112,8 @@ class QueryOrchestrator:
             return self._fail(turn, "查询执行失败，已记录详情")
         except ResultNotAnswerableError as error:
             return self._fail(turn, str(error))
+        # SemanticError (including UnknownDatasetError from load_dataset) is
+        # intentionally propagated: chat.py maps it to HTTP 404.
 
     # --- stages -----------------------------------------------------------
 
