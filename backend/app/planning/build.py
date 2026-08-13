@@ -97,6 +97,37 @@ def _build_typed_filters(intent: QueryIntent) -> tuple[TypedFilter, ...]:
     return tuple(filters)
 
 
+def _collect_metric_lineage(
+    metric: MetricDef,
+    dataset: DatasetDef,
+    lineage: set[str],
+    seen_metrics: set[str],
+) -> None:
+    """Recursively collect physical columns for a metric and its dependencies.
+
+    Composite / ratio metrics reference other metrics via their expression.
+    Each dependency's source_field contributes to lineage, so the policy
+    compiler can verify access to the full chain.
+    """
+    if metric.name in seen_metrics:
+        return  # Avoid infinite recursion
+    seen_metrics.add(metric.name)
+
+    # Atomic source field
+    if metric.source_field:
+        lineage.add(f"{dataset.physical_table}.{metric.source_field}")
+
+    # Time field
+    if metric.time_field:
+        lineage.add(f"{dataset.physical_table}.{metric.time_field}")
+
+    # Composite / ratio: recurse into dependencies
+    if metric.kind in ("composite", "ratio"):
+        from app.compiler.metrics import resolve_metric_dependencies
+        for dep in resolve_metric_dependencies(dataset, metric):
+            _collect_metric_lineage(dep, dataset, lineage, seen_metrics)
+
+
 def _build_required_field_lineage(
     intent: QueryIntent,
     dataset: DatasetDef,
@@ -104,18 +135,19 @@ def _build_required_field_lineage(
     """Collect physical columns this plan will read.
 
     Lineage is used by the policy compiler to grant/deny access without
-    walking the AST. Currently includes source columns of all metrics.
+    walking the AST. Includes:
+    - All metric source fields (atomic, composite, ratio dependencies)
+    - All metric time fields
+    - All dimension physical columns
+    - All filter physical columns
     """
     lineage: set[str] = set()
+    seen_metrics: set[str] = set()
 
-    # Metric source fields
+    # Metric chain: source fields + recursive dependencies
     for metric_name in intent.metrics:
         metric = dataset.metric(metric_name)
-        if metric.source_field:
-            lineage.add(f"{dataset.physical_table}.{metric.source_field}")
-        # Time field
-        if metric.time_field:
-            lineage.add(f"{dataset.physical_table}.{metric.time_field}")
+        _collect_metric_lineage(metric, dataset, lineage, seen_metrics)
 
     # Dimension fields
     for dim in intent.dimensions:
