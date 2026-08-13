@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     cost_warn_rows: int = 1_000_000
     cost_reject_rows: int = 50_000_000
 
+    # Execution retry budget for transient failures only (spec 5.4).
+    execution_retry_attempts: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:
