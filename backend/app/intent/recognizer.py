@@ -26,6 +26,7 @@ from app.intent.schema import (
     TimeGrain,
     TimeRange,
 )
+from app.llm.structured import schema_from_model
 from app.semantic.model import DatasetDef
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -219,7 +220,10 @@ def recognize(
 
 
 class OpenAiCompatClient:
-    """Production client against an OpenAI-compatible endpoint."""
+    """Production client against an OpenAI-compatible endpoint.
+
+    Uses Structured Outputs (response_format: json_schema) for strict validation.
+    """
 
     def __init__(self, settings: Settings) -> None:
         from openai import OpenAI
@@ -229,6 +233,10 @@ class OpenAiCompatClient:
         self._timeout = settings.llm_timeout_seconds
 
     def complete(self, system: str, user: str) -> LlmCompletion:
+        """Call OpenAI with Structured Outputs for strict JSON schema validation."""
+        # Generate JSON schema from IntentPayload
+        schema = schema_from_model(IntentPayload)
+
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -237,7 +245,14 @@ class OpenAiCompatClient:
             ],
             # Intent recognition must be as reproducible as the API allows.
             temperature=0,
-            response_format={"type": "json_object"},
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "IntentPayload",
+                    "schema": schema,
+                    "strict": True,
+                },
+            },
             timeout=self._timeout,
         )
         usage = response.usage
