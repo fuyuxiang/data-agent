@@ -8,6 +8,7 @@ from scripts.init_db import create_schemas, load_sample_data
 # Imported for the side effect of registering tables on MetaBase.metadata.
 from app.security import orm as security_orm  # noqa: F401
 from app.semantic import orm as semantic_orm  # noqa: F401
+from app.observability import orm as observability_orm  # noqa: F401
 
 
 @pytest.fixture(scope="session", autouse=True)
