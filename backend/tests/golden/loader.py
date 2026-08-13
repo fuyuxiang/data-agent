@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from app.intent.schema import ComparisonKind, FilterOperator, TimeGrain
+from app.evals.layers import Tolerance
 
 _VALID_STATUSES = ("ANSWERED", "CLARIFYING", "REFUSED", "FAILED")
 _VALID_POLICY_KINDS = ("row_policy", "column_deny")
@@ -51,8 +52,21 @@ class Expectation:
     first_row: dict | None = None
     citation_has: tuple[CitationExpectation, ...] = ()
     refused_leaks: tuple[str, ...] = ()
-    intent_diff: str = "xfail"
+    # Field-level tolerance for intent differences (replaces old "xfail" string)
+    # Default: all fields LENIENT (backward compatible with xfail semantics)
+    intent_tolerances: dict[str, str] = field(default_factory=lambda: {
+        "metrics": "lenient",
+        "time": "lenient",
+        "dimensions": "lenient",
+        "filters": "lenient",
+        "comparison": "lenient",
+        "top_n": "lenient",
+    })
     clarify_kind: str | None = None
+    # Field-level permission policies that override global policies for this case.
+    # Format: {resource_name: {"fields": [...], "row_filter": "...", ...}}
+    # Applied by permission_layer evaluation instead of global policy.
+    ephemeral_policy: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,18 @@ def _load_expect(payload: dict) -> Expectation:
         CitationExpectation(kind=item["kind"], text=item.get("text", ""))
         for item in payload.get("citation_has", ())
     )
+
+    # Load intent tolerances from YAML, or use defaults
+    intent_tolerances = payload.get("intent_tolerances", {})
+    if not isinstance(intent_tolerances, dict):
+        raise ValueError(f"intent_tolerances must be a dict, got {type(intent_tolerances)}")
+
+    # Validate tolerance values
+    valid_tolerances = {"strict", "lenient"}
+    for field, tol in intent_tolerances.items():
+        if tol not in valid_tolerances:
+            raise ValueError(f"intent_tolerances[{field!r}] must be 'strict' or 'lenient', got {tol!r}")
+
     return Expectation(
         status=status,
         intent=_load_intent(payload.get("intent")),
@@ -117,7 +143,7 @@ def _load_expect(payload: dict) -> Expectation:
         first_row=payload.get("first_row"),
         citation_has=citation_has,
         refused_leaks=tuple(payload.get("refused_leaks", ())),
-        intent_diff=payload.get("intent_diff", "xfail"),
+        intent_tolerances=intent_tolerances,
         clarify_kind=payload.get("clarify_kind"),
     )
 

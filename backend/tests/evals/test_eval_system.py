@@ -112,6 +112,55 @@ class TestIntentLayer:
         report = evaluate_intent_layer({"metrics": ["x"]}, None)
         assert report.outcome == LayerOutcome.FAIL
 
+    def test_tolerance_strict_diff_fails(self):
+        """With STRICT tolerance, intent diff causes FAIL."""
+        from app.evals.layers import (
+            evaluate_intent_layer, LayerOutcome, Tolerance
+        )
+
+        expected = {"metrics": ["sales"], "dimensions": ["region"]}
+        actual = {"metrics": ["refund"], "dimensions": ["region"]}
+        report = evaluate_intent_layer(expected, actual, tolerance=Tolerance.STRICT)
+
+        assert report.outcome == LayerOutcome.FAIL
+        assert len(report.diffs) == 1
+
+    def test_tolerance_lenient_diff_passes(self):
+        """With LENIENT tolerance, intent diffs are recorded but don't fail."""
+        from app.evals.layers import (
+            evaluate_intent_layer, LayerOutcome, Tolerance
+        )
+
+        expected = {"metrics": ["sales"], "dimensions": ["region"]}
+        actual = {"metrics": ["refund"], "dimensions": ["region"]}
+        report = evaluate_intent_layer(expected, actual, tolerance=Tolerance.LENIENT)
+
+        assert report.outcome == LayerOutcome.PASS
+        assert len(report.diffs) == 1  # diff is still recorded
+        assert "lenient mode" in report.message
+
+    def test_tolerance_lenient_missing_intent_passes(self):
+        """With LENIENT tolerance, missing intent doesn't fail."""
+        from app.evals.layers import (
+            evaluate_intent_layer, LayerOutcome, Tolerance
+        )
+
+        report = evaluate_intent_layer(
+            {"metrics": ["x"]}, None, tolerance=Tolerance.LENIENT
+        )
+        assert report.outcome == LayerOutcome.PASS
+
+    def test_tolerance_strict_missing_intent_fails(self):
+        """With STRICT tolerance (default), missing intent fails."""
+        from app.evals.layers import (
+            evaluate_intent_layer, LayerOutcome, Tolerance
+        )
+
+        report = evaluate_intent_layer(
+            {"metrics": ["x"]}, None, tolerance=Tolerance.STRICT
+        )
+        assert report.outcome == LayerOutcome.FAIL
+
 
 class TestStatusLayer:
     """Test status layer evaluation."""
