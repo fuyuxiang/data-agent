@@ -90,8 +90,23 @@ def inject_row_policies(
 
 
 def _reads_physical_table(select: exp.Select, dataset: DatasetDef) -> bool:
+    """The SELECT's direct FROM / JOIN targets, nothing nested.
+
+    ``find_all`` recurses into subqueries, which would make the outer SELECT of
+    a comparison query look like it reads the physical table (the CTE's body
+    does). The policy belongs on the CTE, not on the join above it.
+    """
     table_name = dataset.physical_table.split(".")[-1]
-    return any(
-        isinstance(source, exp.Table) and source.name == table_name
-        for source in select.find_all(exp.Table)
-    )
+
+    def is_target(source: exp.Expression) -> bool:
+        return isinstance(source, exp.Table) and source.name == table_name
+
+    from_clause = select.args.get("from_")
+    if from_clause is not None and is_target(from_clause.this):
+        return True
+
+    for join in select.args.get("joins") or []:
+        if is_target(join.this):
+            return True
+
+    return False

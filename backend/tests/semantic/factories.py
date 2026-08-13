@@ -1,5 +1,6 @@
 """Shared semantic configuration matching sample.orders."""
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.semantic.enums import (
@@ -21,6 +22,22 @@ _NUMERIC_AGGS = [
 
 
 def build_orders_dataset(session: Session, *, published: bool = True) -> DatasetRow:
+    """Idempotent: if a dataset with this name already exists, reuse it.
+
+    Earlier debugging left committed rows outside the test transaction's
+    rollback boundary; without this guard every test would hit UniqueViolation.
+    The published flag is reconciled so a caller asking for ``published=False``
+    after the table was already populated with ``published=True`` still gets an
+    unpublished dataset for that test.
+    """
+    existing = session.execute(
+        select(DatasetRow).where(DatasetRow.name == "orders")
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.is_published != published:
+            existing.is_published = published
+            session.flush()
+        return existing
     dataset = DatasetRow(
         name="orders",
         business_name="订单",
