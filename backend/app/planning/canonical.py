@@ -121,7 +121,7 @@ class CanonicalQueryPlan:
                     "time_basis": m.time_basis,
                     "alias": m.alias,
                 }
-                for m in self.measures
+                for m in sorted(self.measures, key=lambda m: m.metric_name)
             ],
             "group_by": sorted(self.group_by),
             "typed_filters": [
