@@ -4288,9 +4288,8 @@ EOF
 |---|---|---|
 | `QueryIntent.to_payload()` | 计划 02 的意图 Schema | Trace 快照、槽位持久化、Verified 登记都需要可序列化视图 |
 | `QueryIntent.from_payload()` | 计划 02 的意图 Schema（Task 6 Step 5） | 追问合并与重放需要从持久化槽位还原 |
-| `Settings` 新增 `llm_api_key`/`llm_base_url`/`llm_model`/`llm_timeout_seconds` | 计划 01 的配置 | Task 2 的模型客户端 |
-| `Settings` 新增 `clarify_confidence_threshold`/`clarify_max_rounds` | 计划 01 的配置 | Task 3 的澄清阈值与轮数上限（spec 5.2 要求全局配置） |
-| `get_sample_connection` | 计划 01 的 `app/core/db.py`（Task 7 Step 4） | 执行与护栏需要请求级样本库连接 |
+| `Settings` 新增 `llm_timeout_seconds: float = 30.0` | 在计划 01 Task 1 Step 4 的 Settings 上补这一项 | Task 2 的模型客户端；其余三项计划 01 已定义 |
+| `get_sample_connection` | `app/core/db.py`（计划 04 Task 7 Step 4 自身新增） | 执行与护栏需要请求级样本库连接 |
 
 **一处有意的简化**：Task 6 中 Verified Query 命中时的引证块取数据集首个指标构造（`_verified_citation`）。严格做法是从 `VerifiedQueryRow.intent_snapshot` 还原意图再取口径。之所以先不做：本轮 Verified Query 只由管理员从已成功的轮次登记，快照与固定 SQL 必然同源，而完整还原会把「重放」的逻辑复制一份到编排器里。实施时若发现引证与实际 SQL 不符，改为从快照还原，这是一处局部替换。
 

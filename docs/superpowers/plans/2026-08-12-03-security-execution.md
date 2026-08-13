@@ -48,6 +48,8 @@
   - `app.security.principal.Principal` — frozen dataclass `user_id`/`username`/`role_names`/`max_sensitivity`/`row_rules`/`column_overrides`；方法 `row_rules_for(dataset_name)`、`column_access(field)`
   - `app.security.principal.load_principal(session, username) -> Principal`
 
+- 回填计划 01 Task 1 Step 2：`app/core/db.py` re-export `MetaBase = app.semantic.orm.Base` 与 `META_SCHEMA = app.semantic.orm.META_SCHEMA`，让本 Task 的 import 路径生效
+
 - [ ] **Step 1: 写失败的权限主体测试**
 
 `backend/tests/security/test_principal.py`：
@@ -2571,7 +2573,9 @@ EOF
 
 **类型一致性**：`SecuredQuery.sql`/`row_limit` 满足 `runner._Executable` 协议；`SecuredQuery.applied_row_filters`/`masked_field_names` 供计划 04 拼引证块；`validate_result` 的 `comparison_columns` 由计划 04 从 `CompiledQuery.metric_names` 与 `comparison_metric_names` 配对得出。
 
-**对计划 02 的两处回填**：`CompiledQuery.sql_compact`（Task 2 Step 2）与 `DatasetDef.has_metric`（Task 3 Step 4）。实施时若计划 02 已完成，这两处作为独立小改动提交。
+**对计划 01 的一处回填**：`DatasetDef.has_metric(name: str) -> bool`（计划 01 的 `app/semantic/model.py` 中添加）
+
+**对计划 02 的一处回填**：`CompiledQuery.sql_compact`（Task 2 Step 2）。实施时若计划 02 已完成，这两处作为独立小改动提交。
 
 ## 交付物
 

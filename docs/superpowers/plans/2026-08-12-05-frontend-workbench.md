@@ -4525,7 +4525,7 @@ EOF
 |---|---|
 | `POST /api/chat/ask`、会话与轮次列表、反馈 | 计划 04 Task 7 |
 | `GET /api/trace/turns/{id}`、`POST .../replay` | 计划 04 Task 7 |
-| `GET /api/datasets`、`GET /api/datasets/{name}`、`/lint`、`/publish` | 计划 01 Task 8 |
+| `GET /api/semantic/datasets`、`GET /api/semantic/datasets/{name}`、`/lint`、`/publish` | 计划 01 Task 6 |
 | `X-Username` 请求头认证 | 计划 04 Task 7（`get_current_username`） |
 
 **一处有意的简化**：历史会话回放只显示 `headline` 与 `conclusion`，不显示引证块——后端 `turns.answer` 只存这两项。若为了界面把完整答案也存进去，引证就有两份真相（`turns.answer` 与 Trace），口径不一致时无从判断哪份为准。代价是看旧轮次的完整引证要点进 Trace 页。
