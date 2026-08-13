@@ -73,10 +73,16 @@ def _widest(values: list[Sensitivity]) -> Sensitivity:
     return max(values, key=lambda item: _SENSITIVITY_ORDER[item], default=Sensitivity.PUBLIC)
 
 
-def load_principal(session: Session, username: str) -> Principal:
+def load_principal(session: Session, user_id: int) -> Principal:
+    """Resolve the permission view for a user by `user_id`.
+
+    `user_id` is the only authorization key; callers obtain it from a
+    `PrincipalContext` (after OIDC verification) or from a database
+    identifier. Username is a display field only.
+    """
     statement = (
         select(UserRow)
-        .where(UserRow.username == username, UserRow.is_active.is_(True))
+        .where(UserRow.id == user_id, UserRow.is_active.is_(True))
         .options(
             selectinload(UserRow.roles).selectinload(RoleRow.row_policies),
             selectinload(UserRow.roles).selectinload(RoleRow.column_policies),

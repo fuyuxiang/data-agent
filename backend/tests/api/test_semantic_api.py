@@ -10,7 +10,11 @@ from tests.semantic.factories import build_orders_dataset
 @pytest.fixture
 def client(meta_session):
     app.dependency_overrides[get_meta_session] = lambda: meta_session
-    yield TestClient(app)
+    # Default to `admin` so the dev-mode X-Username fallback yields a real
+    # PrincipalContext. Tests that exercise role gates build their own user.
+    client_ = TestClient(app)
+    client_.headers["X-Username"] = "admin"
+    yield client_
     app.dependency_overrides.clear()
 
 

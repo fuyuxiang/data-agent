@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_principal
+from app.auth.principal import PrincipalContext
 from app.core.config import Settings, get_settings
 from app.core.db import get_meta_session, get_sample_connection
-from app.core.security import get_current_username
 from app.intent.recognizer import LlmClient, OpenAiCompatClient
 from app.observability.schemas import (
     AnswerOut,
@@ -37,7 +38,7 @@ def get_llm_client(settings: Settings = Depends(get_settings)) -> LlmClient:
 @router.post("/ask", response_model=AskOut)
 def post_ask(
     payload: AskIn,
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
     connection: Connection = Depends(get_sample_connection),
     client: LlmClient = Depends(get_llm_client),
@@ -51,7 +52,7 @@ def post_ask(
     )
     try:
         outcome = orchestrator.ask(
-            username=username,
+            user_id=principal.user_id,
             question=payload.question,
             dataset_name=payload.dataset_name,
             conversation_id=payload.conversation_id,
@@ -90,20 +91,20 @@ def _plain(value):
 
 @router.get("/conversations", response_model=list[ConversationOut])
 def get_conversations(
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
 ):
-    return list_conversations(session, username)
+    return list_conversations(session, principal)
 
 
 @router.get("/conversations/{conversation_id}/turns", response_model=list[TurnOut])
 def get_conversation_turns(
     conversation_id: int,
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
 ):
     try:
-        return list_turns(session, username, conversation_id)
+        return list_turns(session, principal, conversation_id)
     except NotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
 
@@ -112,11 +113,11 @@ def get_conversation_turns(
 def post_feedback(
     turn_id: int,
     payload: FeedbackIn,
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
 ):
     try:
-        save_feedback(session, username, turn_id, payload)
+        save_feedback(session, principal, turn_id, payload)
     except NotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="记录不存在")
     return {"ok": True}

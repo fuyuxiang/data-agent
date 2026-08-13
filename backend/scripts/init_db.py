@@ -6,14 +6,17 @@ Run: python -m scripts.init_db
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-from app.core.db import meta_engine, sample_engine
+from app.core.db import MetaSession, meta_engine, sample_engine
 from app.semantic.orm import META_SCHEMA, Base
 
 # Imported for the side effect of registering tables on MetaBase.metadata.
 from app.security import orm as security_orm  # noqa: F401
 from app.semantic import orm as semantic_orm  # noqa: F401
 from app.observability import orm as observability_orm  # noqa: F401
+
+from scripts.seed_roles import seed_roles
 
 SAMPLE_SCHEMA = "sample"
 SQL_FILE = Path(__file__).parent / "sample_data.sql"
@@ -30,6 +33,12 @@ def create_meta_tables() -> None:
     Base.metadata.create_all(meta_engine)
 
 
+def seed_platform_roles() -> None:
+    """Seed the six platform roles into the freshly built metadata schema."""
+    with MetaSession() as session:
+        seed_roles(session)
+
+
 def load_sample_data() -> None:
     statements = SQL_FILE.read_text(encoding="utf-8")
     with sample_engine.begin() as conn:
@@ -43,6 +52,7 @@ def load_sample_data() -> None:
 def main() -> None:
     create_schemas()
     create_meta_tables()
+    seed_platform_roles()
     load_sample_data()
     print("database initialised")
 

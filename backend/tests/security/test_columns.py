@@ -31,7 +31,7 @@ from app.security.columns import (
 )
 from app.security.principal import load_principal
 from app.semantic.loader import load_dataset
-from tests.security.factories import build_principals
+from tests.security.factories import build_principals, user_id_for
 from tests.semantic.factories import build_orders_dataset
 
 
@@ -62,7 +62,7 @@ def _intent(**overrides) -> QueryIntent:
 
 def test_denied_field_is_absent_from_visible_dataset(env):
     dataset = load_dataset(env, "orders")
-    visible = visible_dataset(dataset, load_principal(env, "east_manager"))
+    visible = visible_dataset(dataset, load_principal(env, user_id_for(env, "east_manager")))
 
     assert not visible.has_field("cost")
     assert visible.has_field("amount")
@@ -70,7 +70,7 @@ def test_denied_field_is_absent_from_visible_dataset(env):
 
 def test_metrics_depending_on_denied_fields_are_removed(env):
     dataset = load_dataset(env, "orders")
-    visible = visible_dataset(dataset, load_principal(env, "east_manager"))
+    visible = visible_dataset(dataset, load_principal(env, user_id_for(env, "east_manager")))
     names = {metric.name for metric in visible.metrics}
 
     # total_cost reads cost directly; gross_margin_rate is computed from it.
@@ -81,7 +81,7 @@ def test_metrics_depending_on_denied_fields_are_removed(env):
 
 def test_admin_sees_everything(env):
     dataset = load_dataset(env, "orders")
-    visible = visible_dataset(dataset, load_principal(env, "admin"))
+    visible = visible_dataset(dataset, load_principal(env, user_id_for(env, "admin")))
 
     assert len(visible.fields) == len(dataset.fields)
     assert len(visible.metrics) == len(dataset.metrics)
@@ -90,13 +90,13 @@ def test_admin_sees_everything(env):
 def test_masked_field_stays_visible_in_the_model(env):
     dataset = load_dataset(env, "orders")
     # analyst is masked on customer_name, not denied: it is still queryable.
-    visible = visible_dataset(dataset, load_principal(env, "analyst"))
+    visible = visible_dataset(dataset, load_principal(env, user_id_for(env, "analyst")))
     assert visible.has_field("customer_name")
 
 
 def test_querying_a_denied_metric_is_refused(env):
     dataset = load_dataset(env, "orders")
-    principal = load_principal(env, "east_manager")
+    principal = load_principal(env, user_id_for(env, "east_manager"))
 
     with pytest.raises(PermissionDeniedError):
         assert_intent_permitted(dataset, _intent(metrics=["total_cost"]), principal)
@@ -104,7 +104,7 @@ def test_querying_a_denied_metric_is_refused(env):
 
 def test_grouping_by_a_denied_field_is_refused(env):
     dataset = load_dataset(env, "orders")
-    principal = load_principal(env, "east_manager")
+    principal = load_principal(env, user_id_for(env, "east_manager"))
 
     with pytest.raises(PermissionDeniedError):
         assert_intent_permitted(dataset, _intent(dimensions=["cost"]), principal)
@@ -112,7 +112,7 @@ def test_grouping_by_a_denied_field_is_refused(env):
 
 def test_filtering_on_a_denied_field_is_refused(env):
     dataset = load_dataset(env, "orders")
-    principal = load_principal(env, "east_manager")
+    principal = load_principal(env, user_id_for(env, "east_manager"))
     intent = _intent(
         filters=[
             FilterCondition(
@@ -127,7 +127,7 @@ def test_filtering_on_a_denied_field_is_refused(env):
 
 def test_permission_error_leaks_no_metadata(env):
     dataset = load_dataset(env, "orders")
-    principal = load_principal(env, "east_manager")
+    principal = load_principal(env, user_id_for(env, "east_manager"))
 
     with pytest.raises(PermissionDeniedError) as excinfo:
         assert_intent_permitted(dataset, _intent(metrics=["total_cost"]), principal)
@@ -140,7 +140,7 @@ def test_permission_error_leaks_no_metadata(env):
 def test_filtering_on_a_masked_field_is_refused(env):
     """Masking hides the value; filtering on it would reveal it by inference."""
     dataset = load_dataset(env, "orders")
-    principal = load_principal(env, "analyst")
+    principal = load_principal(env, user_id_for(env, "analyst"))
     intent = _intent(
         filters=[
             FilterCondition(
@@ -158,7 +158,7 @@ def test_filtering_on_a_masked_field_is_refused(env):
 
 def test_permitted_intent_passes_silently(env):
     dataset = load_dataset(env, "orders")
-    assert assert_intent_permitted(dataset, _intent(), load_principal(env, "admin")) is None
+    assert assert_intent_permitted(dataset, _intent(), load_principal(env, user_id_for(env, "admin"))) is None
 
 
 def test_masking_rewrites_the_projection(env):
@@ -168,7 +168,7 @@ def test_masking_rewrites_the_projection(env):
     intent = _intent(kind=IntentKind.DETAIL, dimensions=["customer_name", "province"])
     compiled = compile_intent(dataset, intent)
 
-    ast, masked = apply_masking(compiled.ast, dataset, load_principal(env, "analyst"))
+    ast, masked = apply_masking(compiled.ast, dataset, load_principal(env, user_id_for(env, "analyst")))
     sql = ast.sql(dialect="postgres")
 
     assert "***" in sql
@@ -183,6 +183,6 @@ def test_masking_is_a_noop_for_permitted_columns(env):
     dataset = load_dataset(env, "orders")
     compiled = compile_intent(dataset, _intent(dimensions=["province"]))
 
-    ast, masked = apply_masking(compiled.ast, dataset, load_principal(env, "analyst"))
+    ast, masked = apply_masking(compiled.ast, dataset, load_principal(env, user_id_for(env, "analyst")))
     assert masked == ()
     assert ast.sql(dialect="postgres") == compiled.sql_compact

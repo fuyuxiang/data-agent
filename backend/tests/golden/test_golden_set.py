@@ -153,7 +153,7 @@ def _orchestrator(meta_session: Any, sample_conn: Any, client: Any):
 
     def run(**kwargs: Any) -> dict[str, Any]:
         raw = engine.ask(
-            username=kwargs["username"],
+            user_id=kwargs["user_id"],
             question=kwargs["question"],
             dataset_name="orders",
             conversation_id=kwargs.get("conversation_id"),
@@ -167,9 +167,13 @@ def _orchestrator(meta_session: Any, sample_conn: Any, client: Any):
 
 def _user_id_resolver(meta_session: Any):
     def resolve(username: str) -> int:
-        from app.security.principal import load_principal
+        from sqlalchemy import select
 
-        return load_principal(meta_session, username).user_id
+        from app.security.orm import UserRow
+
+        return meta_session.execute(
+            select(UserRow.id).where(UserRow.username == username)
+        ).scalar_one()
 
     return resolve
 
@@ -197,7 +201,6 @@ def test_golden_case(
         mode=_mode(),
         orchestrator=lambda **kwargs: _orchestrator(golden_env, sample_conn, client)(
             **kwargs,
-            username=case.as_user,
         ),
         user_id_resolver=_user_id_resolver(golden_env),
         ephemeral_policy=ephemeral_policy,
@@ -218,7 +221,6 @@ def test_golden_clarify_followup(
     def orchestrator(**kwargs: Any) -> dict[str, Any]:
         outcome = _orchestrator(golden_env, sample_conn, client)(
             **kwargs,
-            username=kwargs.get("username", case.as_user),
             conversation_id=conversation_id["value"],
         )
         conversation_id["value"] = outcome["conversation_id"]

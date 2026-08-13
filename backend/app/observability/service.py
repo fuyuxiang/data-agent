@@ -3,12 +3,19 @@
 Ownership checks live here rather than in the routers: every lookup goes
 through a caller-scoped query, so an unowned id is indistinguishable from a
 missing one.
+
+Callers pass a verified `PrincipalContext`. We never reach for username —
+the only authorization key is `user_id`. When a function actually needs the
+permission view (row policies, column policies, sensitivity ceiling), it
+loads the `Principal` by `user_id` locally; that is a single, deterministic
+fetch keyed on identity, not a username lookup that an attacker can spoof.
 """
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.auth.principal import PrincipalContext
 from app.compiler.errors import CompileError
 from app.compiler.query import compile_intent
 from app.core.config import Settings
@@ -38,8 +45,9 @@ class NotReplayableError(Exception):
     """No intent snapshot: clarifying, refused and failed turns cannot replay."""
 
 
-def list_conversations(session: Session, username: str) -> list[ConversationOut]:
-    principal = load_principal(session, username)
+def list_conversations(
+    session: Session, principal: PrincipalContext
+) -> list[ConversationOut]:
     statement = (
         select(ConversationRow)
         .where(ConversationRow.user_id == principal.user_id)
@@ -51,8 +59,10 @@ def list_conversations(session: Session, username: str) -> list[ConversationOut]
     ]
 
 
-def list_turns(session: Session, username: str, conversation_id: int) -> list[TurnOut]:
-    _owned_conversation(session, username, conversation_id)
+def list_turns(
+    session: Session, principal: PrincipalContext, conversation_id: int
+) -> list[TurnOut]:
+    _owned_conversation(session, principal, conversation_id)
     statement = (
         select(TurnRow)
         .where(TurnRow.conversation_id == conversation_id)
@@ -61,8 +71,13 @@ def list_turns(session: Session, username: str, conversation_id: int) -> list[Tu
     return [TurnOut.model_validate(row) for row in session.execute(statement).scalars()]
 
 
-def save_feedback(session: Session, username: str, turn_id: int, payload: FeedbackIn) -> None:
-    _owned_turn(session, username, turn_id)
+def save_feedback(
+    session: Session,
+    principal: PrincipalContext,
+    turn_id: int,
+    payload: FeedbackIn,
+) -> None:
+    _owned_turn(session, principal, turn_id)
     session.add(
         FeedbackRow(
             turn_id=turn_id,
@@ -74,8 +89,10 @@ def save_feedback(session: Session, username: str, turn_id: int, payload: Feedba
     session.flush()
 
 
-def get_trace(session: Session, username: str, turn_id: int) -> TraceOut:
-    turn = _owned_turn(session, username, turn_id)
+def get_trace(
+    session: Session, principal: PrincipalContext, turn_id: int
+) -> TraceOut:
+    turn = _owned_turn(session, principal, turn_id)
     return TraceOut(
         turn_id=turn.id,
         question=turn.question,
@@ -87,7 +104,7 @@ def get_trace(session: Session, username: str, turn_id: int) -> TraceOut:
 
 def replay_turn(
     session: Session,
-    username: str,
+    principal: PrincipalContext,
     turn_id: int,
     *,
     connection: Connection,
@@ -95,7 +112,7 @@ def replay_turn(
 ) -> ReplayOut:
     """Recompile from the stored intent, no model call. Security rewriting runs
     again against current permissions, so replay can never widen access."""
-    turn = _owned_turn(session, username, turn_id)
+    turn = _owned_turn(session, principal, turn_id)
     if not turn.intent_snapshot:
         raise NotReplayableError
 
@@ -104,12 +121,14 @@ def replay_turn(
         raise NotReplayableError
 
     conversation = session.get(ConversationRow, turn.conversation_id)
-    principal = load_principal(session, username)
-    dataset = visible_dataset(load_dataset(session, conversation.dataset_name), principal)
+    # The permission view is needed for visible_dataset / secure_compiled; load
+    # it by `user_id` once per call rather than every nested step.
+    principal_obj = load_principal(session, principal.user_id)
+    dataset = visible_dataset(load_dataset(session, conversation.dataset_name), principal_obj)
 
     try:
         compiled = compile_intent(dataset, intent)
-        secured = secure_compiled(compiled, dataset, principal, connection, settings)
+        secured = secure_compiled(compiled, dataset, principal_obj, connection, settings)
     except (CompileError, SemanticError):
         # The snapshot is not a queryable intent (refused, failed or stale
         # schema): treat replay as not available, not as a crash.
@@ -134,18 +153,19 @@ def _original_sql(session: Session, turn_id: int) -> str:
 
 
 def _owned_conversation(
-    session: Session, username: str, conversation_id: int
+    session: Session, principal: PrincipalContext, conversation_id: int
 ) -> ConversationRow:
-    principal = load_principal(session, username)
     row = session.get(ConversationRow, conversation_id)
     if row is None or row.user_id != principal.user_id:
         raise NotFoundError
     return row
 
 
-def _owned_turn(session: Session, username: str, turn_id: int) -> TurnRow:
+def _owned_turn(
+    session: Session, principal: PrincipalContext, turn_id: int
+) -> TurnRow:
     turn = session.get(TurnRow, turn_id)
     if turn is None:
         raise NotFoundError
-    _owned_conversation(session, username, turn.conversation_id)
+    _owned_conversation(session, principal, turn.conversation_id)
     return turn

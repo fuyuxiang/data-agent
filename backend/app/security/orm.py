@@ -45,6 +45,11 @@ class UserRow(MetaBase):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     display_name: Mapped[str] = mapped_column(String(128), default="")
+    # OIDC `sub` claim — the stable key under which a returning user is
+    # re-bound to the same row. Nullable so legacy rows from before S1
+    # (provisioned by username only) keep loading without constraint errors.
+    oidc_subject: Mapped[str | None] = mapped_column(String(256), unique=True, nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     roles: Mapped[list[RoleRow]] = relationship(secondary=user_roles)
