@@ -71,6 +71,11 @@ def assert_within_dataset(ast: exp.Expression, allowed_tables: set[str]) -> None
 
 def enforce_limit(ast: exp.Expression, max_rows: int) -> exp.Expression:
     """Guarantee an upper bound on returned rows, clamping anything larger."""
+    # Only Select / Union support LIMIT. Non-query trees fall through unchanged;
+    # assert_select_only will reject them on its own pass.
+    if not isinstance(ast, (exp.Select, exp.Union)):
+        return ast
+
     limited = ast.copy()
     existing = limited.args.get("limit")
 

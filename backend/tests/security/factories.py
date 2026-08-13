@@ -7,6 +7,7 @@
 - retired_user: inactive
 """
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.security.orm import ColumnPolicyRow, RoleRow, RowPolicyRow, UserRow
@@ -14,6 +15,7 @@ from app.semantic.enums import Sensitivity
 
 
 def build_principals(session: Session) -> dict[str, UserRow]:
+    """Idempotent: reuses pre-existing users (e.g. left over from a debug run)."""
     admin_role = RoleRow(
         name="admin",
         business_name="管理员",
@@ -42,6 +44,16 @@ def build_principals(session: Session) -> dict[str, UserRow]:
             )
         ],
     )
+
+    usernames = ["admin", "east_manager", "analyst", "multi_role", "retired_user"]
+    existing = {
+        row.username: row
+        for row in session.execute(
+            select(UserRow).where(UserRow.username.in_(usernames))
+        ).scalars()
+    }
+    if len(existing) == len(usernames):
+        return existing
 
     users = {
         "admin": UserRow(username="admin", display_name="管理员", roles=[admin_role]),
