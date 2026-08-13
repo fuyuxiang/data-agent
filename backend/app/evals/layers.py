@@ -28,6 +28,17 @@ class LayerOutcome(str, Enum):
     SKIPPED = "skipped"
 
 
+class Tolerance(str, Enum):
+    """Field-level tolerance for differences.
+
+    STRICT:  any difference → FAIL the case
+    LENIENT: differences recorded but do not fail the case
+    """
+
+    STRICT = "strict"
+    LENIENT = "lenient"
+
+
 # Field categories that must FAIL on any real-model difference, per S5 spec.
 STRICT_FIELDS = frozenset({"metrics", "time", "permissions", "status"})
 
@@ -77,16 +88,29 @@ class LayerReport:
 def evaluate_intent_layer(
     expected_intent: dict | None,
     actual_intent: dict | None,
+    tolerance: Tolerance = Tolerance.STRICT,
 ) -> LayerReport:
     """Layer 1: Intent slot comparison.
 
     Compares intent slot-by-slot. Strict fields (metrics, time) FAIL on
     any difference. Lenient fields (dimensions, filters) are compared
     by semantic equivalence.
+
+    Args:
+        expected_intent: expected intent dict
+        actual_intent: actual intent dict
+        tolerance: STRICT (any diff → FAIL) or LENIENT (diffs recorded but OK)
     """
     if expected_intent is None and actual_intent is None:
         return LayerReport(layer="intent", outcome=LayerOutcome.SKIPPED)
     if expected_intent is None or actual_intent is None:
+        # One side missing intent
+        if tolerance == Tolerance.LENIENT:
+            return LayerReport(
+                layer="intent",
+                outcome=LayerOutcome.PASS,
+                message="One side has intent, the other does not (lenient mode)",
+            )
         return LayerReport(
             layer="intent",
             outcome=LayerOutcome.FAIL,
@@ -114,6 +138,14 @@ def evaluate_intent_layer(
             )
 
     if diffs:
+        if tolerance == Tolerance.LENIENT:
+            # Record diffs but don't fail
+            return LayerReport(
+                layer="intent",
+                outcome=LayerOutcome.PASS,
+                diffs=tuple(diffs),
+                message=f"{len(diffs)} intent field(s) differ (lenient mode: recorded but OK)",
+            )
         return LayerReport(
             layer="intent",
             outcome=LayerOutcome.FAIL,
@@ -203,8 +235,22 @@ def evaluate_trace_layer(
 def evaluate_permissions_layer(
     expected_policies: list[str] | None,
     actual_policies: list[str] | None,
+    ephemeral_policy: dict[str, Any] | None = None,
 ) -> LayerReport:
-    """Layer 6: Permissions / row-policy decisions."""
+    """Layer 6: Permissions / row-policy decisions.
+
+    Args:
+        expected_policies: List of expected row policy IDs (from golden case).
+        actual_policies: List of actual row policy IDs (from system under test).
+        ephemeral_policy: Field-level policy overrides for this case.
+            If provided, expected_policies is replaced by deriving policies
+            from ephemeral_policy structure. Format:
+            {resource_name: {"fields": [...], "row_filter": "...", ...}}
+    """
+    if ephemeral_policy:
+        # Ephemeral policy overrides: derive expected policies from structure
+        expected_policies = _derive_policies_from_ephemeral(ephemeral_policy)
+
     if expected_policies is None or actual_policies is None:
         return LayerReport(layer="permissions", outcome=LayerOutcome.SKIPPED)
     if set(expected_policies) == set(actual_policies):
@@ -212,7 +258,7 @@ def evaluate_permissions_layer(
     return LayerReport(
         layer="permissions",
         outcome=LayerOutcome.FAIL,
-        message="Row policy decisions differ",
+        message=f"Row policy decisions differ: expected {expected_policies} vs actual {actual_policies}",
     )
 
 
@@ -234,6 +280,40 @@ def evaluate_nonfunctional_layer(
 
 
 # --- Helpers ---------------------------------------------------------------
+
+
+def _derive_policies_from_ephemeral(
+    ephemeral_policy: dict[str, Any],
+) -> list[str]:
+    """Derive expected policy IDs from ephemeral_policy structure.
+
+    Ephemeral policies are field-level overrides that replace global policies
+    for a specific case. This helper converts the structure into a list of
+    policy identifiers for comparison against actual policies.
+
+    Args:
+        ephemeral_policy: Dict mapping resource names to policy specs.
+                         Each spec may contain fields, row_filter, etc.
+
+    Returns:
+        List of derived policy identifiers (e.g., ["field_policy_1", ...]).
+    """
+    policies = []
+    for resource_name, spec in ephemeral_policy.items():
+        if not isinstance(spec, dict):
+            continue
+        # Generate a deterministic policy ID from resource + fields
+        if "fields" in spec and isinstance(spec["fields"], (list, tuple)):
+            fields_str = "_".join(sorted(spec["fields"]))
+            policy_id = f"ephemeral_{resource_name}_{fields_str}"
+            policies.append(policy_id)
+        # If row_filter is present, add it to the policy ID
+        if "row_filter" in spec:
+            filter_str = spec["row_filter"]
+            if isinstance(filter_str, str) and filter_str:
+                policy_id = f"ephemeral_{resource_name}_filter_{filter_str[:16]}"
+                policies.append(policy_id)
+    return sorted(policies)
 
 
 def _semantic_equivalent(a: Any, b: Any) -> bool:
