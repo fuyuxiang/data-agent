@@ -122,6 +122,22 @@ class QueryIntent(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     raw_question: str = ""
 
+    @model_validator(mode="after")
+    def aggregate_requires_metrics_when_complete(self) -> Self:
+        """P0-08: Aggregate kind must have metrics unless it's a followup fragment.
+
+        Heuristic: if this intent has time set, it's a "complete" intent.
+        Followup fragments (created for merge_followup) have time=None
+        because they're just partial updates.
+        """
+        if (
+            self.kind == IntentKind.AGGREGATE
+            and len(self.metrics) == 0
+            and self.time is not None
+        ):
+            raise ValueError("aggregate kind requires at least one metric")
+        return self
+
     def slot_signature(self) -> str:
         """Stable identity of the query slots.
 
@@ -253,7 +269,7 @@ class QueryIntent(BaseModel):
         for item in other.filters:
             merged_filters[item.field] = item
 
-        return QueryIntent(
+        merged = QueryIntent(
             kind=other.kind if other.kind != IntentKind.UNSUPPORTED else self.kind,
             dataset=other.dataset or self.dataset,
             metrics=other.metrics or self.metrics,
@@ -268,3 +284,9 @@ class QueryIntent(BaseModel):
             assumptions=other.assumptions,
             raw_question=other.raw_question,
         )
+
+        # Validate the merged result
+        if merged.kind == IntentKind.AGGREGATE and len(merged.metrics) == 0:
+            raise ValueError("aggregate kind requires at least one metric")
+
+        return merged
