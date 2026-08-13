@@ -63,14 +63,20 @@ defineExpose({ tableColumns, tableRows, toCsv })
           导出 CSV
         </el-button>
       </div>
-      <el-table :data="tableRows" stripe size="small" border>
-        <el-table-column
-          v-for="column in tableColumns"
-          :key="column.prop"
-          :label="column.label"
-          :prop="column.prop"
-        />
-      </el-table>
+      <table class="result__table" data-test="result-table">
+        <thead>
+          <tr>
+            <th v-for="column in columns" :key="column" data-test="result-column">
+              {{ column }}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(row, rowIndex) in tableRows" :key="rowIndex" data-test="result-row">
+            <td v-for="column in columns" :key="column">{{ row[column] }}</td>
+          </tr>
+        </tbody>
+      </table>
     </template>
   </div>
 </template>
@@ -86,5 +92,22 @@ defineExpose({ tableColumns, tableRows, toCsv })
   display: flex;
   justify-content: flex-end;
   margin-bottom: 4px;
+}
+
+.result__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.result__table th,
+.result__table td {
+  padding: 6px 8px;
+  border: 1px solid var(--el-border-color-light);
+  text-align: left;
+}
+
+.result__table thead {
+  background: var(--el-fill-color-light);
 }
 </style>
