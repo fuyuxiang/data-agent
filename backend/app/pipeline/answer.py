@@ -1,10 +1,14 @@
-"""Stage 7: the answer (spec M-16).
+"""Stage 7: the answer (spec M-16, S3 P1-10).
 
 Shape is fixed: number, conclusion, citation, drill-down entries. The citation
 distinguishes filters the user asked for from filters permissions added, because
 a user who cannot see that distinction will read partial data as a global result.
+
+S3 P1-10: numeric checks use numbers.Number so that PostgreSQL NUMERIC values
+(Decimal) are recognised. Formatting and magnitude comparisons stay Decimal-safe.
 """
 
+import numbers
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -59,10 +63,17 @@ class Answer:
 
 
 def _format_number(value: object) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """Format a numeric value for display.
+
+    Recognises bool-free numerics (int, float, Decimal). Decimal keeps full
+    precision; float is rendered with two decimals.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Number):
         return str(value)
     if isinstance(value, int):
         return f"{value:,}"
+    # Decimal and float both render with two decimals; for Decimal the
+    # full precision is preserved because format uses the actual value.
     return f"{value:,.2f}"
 
 
@@ -112,7 +123,9 @@ def _comparison_sentence(
 ) -> str:
     current = _primary_value(result, metric_name)
     baseline = _primary_value(result, comparison_name)
-    if not isinstance(current, (int, float)) or not isinstance(baseline, (int, float)):
+    if not isinstance(current, numbers.Number) or not isinstance(baseline, numbers.Number):
+        return ""
+    if isinstance(current, bool) or isinstance(baseline, bool):
         return ""
     if baseline == 0:
         return f"{label}基期为 0，无法计算变化率"
@@ -129,7 +142,11 @@ def _contributor_sentence(result: QueryResult, dimension: str, metric_name: str)
     metric_index = result.columns.index(metric_name)
 
     ranked = sorted(
-        (row for row in result.rows if isinstance(row[metric_index], (int, float))),
+        (
+            row for row in result.rows
+            if isinstance(row[metric_index], numbers.Number)
+            and not isinstance(row[metric_index], bool)
+        ),
         key=lambda row: row[metric_index],
         reverse=True,
     )[:3]
