@@ -67,11 +67,14 @@ def validate_result(
     ]
     if all_null_indexes:
         names = "、".join(result.columns[index] for index in all_null_indexes)
+        # Spec 5.5: an aggregate over no rows still returns one row with NULL —
+        # report this as "no data" rather than "metric broken" so the user is
+        # not sent chasing a phantom bug.
         issues.append(
             ValidationIssue(
                 ValidationCode.ALL_NULL,
                 "block",
-                f"字段 {names} 的取值全部为空，结果不可用于结论",
+                f"该查询没有数据，字段 {names} 的取值全部为空",
             )
         )
 

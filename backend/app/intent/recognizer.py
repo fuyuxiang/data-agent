@@ -193,7 +193,17 @@ def recognize(
     dataset: DatasetDef,
     question: str,
     slot_state: dict | None = None,
+    *,
+    full_dataset: DatasetDef | None = None,
 ) -> tuple[QueryIntent, LlmCompletion]:
+    """Call the LLM and validate its output.
+
+    The prompt is always built from ``dataset`` (the permission view). Reference
+    validation uses ``full_dataset`` when supplied, so a hallucinated metric
+    name that exists in the full catalogue but is hidden from the user is
+    distinguished from one that was invented wholesale — the orchestrator
+    handles the former as a permission refusal.
+    """
     system, user = build_intent_prompt(dataset, question, slot_state)
     completion = client.complete(system, user)
 
@@ -204,7 +214,7 @@ def recognize(
     except ValidationError as error:
         raise IntentRecognitionError(f"模型输出结构不符合意图 Schema：{error}") from error
 
-    _assert_known_references(dataset, payload)
+    _assert_known_references(full_dataset or dataset, payload)
     return _to_intent(dataset, payload, question), completion
 
 
