@@ -1,0 +1,20 @@
+id: G-010
+as_user: admin
+question: 本月销售额环比
+expect:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+    comparison: mom
+  rows: 1
+  first_row:
+    sales_revenue: 572000
+  citation_has:
+    - {kind: metric, text: sales_revenue}
+notes: |
+  当前期 572000，上期 418000；本用例锁当前期结果和环比结构。

@@ -133,11 +133,12 @@ def _load_policy(payload: dict) -> PolicySpec:
     )
 
 
-def _load_followup(payload: dict) -> FollowupSpec:
+def _load_followup(payload: dict, root: dict | None = None) -> FollowupSpec:
+    root = root or {}
     return FollowupSpec(
-        as_user=payload["as_user"],
+        as_user=payload.get("as_user", root.get("as_user", "admin")),
         select_option_index=payload["select_option_index"],
-        expect=_load_expect(payload["expect"]),
+        expect=_load_expect(payload.get("expect") or root["expect_second"]),
     )
 
 
@@ -160,16 +161,15 @@ def _load_yaml(path: Path) -> GoldenCase:
         question=raw["question"],
         as_user=raw.get("as_user", "admin"),
         as_of=_coerce_date(raw["as_of"]) if "as_of" in raw else _DEFAULT_AS_OF,
-        # Followup cases describe the first turn with ``expect_first``; reuse
-        # ``expect`` field of ``followup`` as the source of truth for the
-        # second-turn assertion.
+        mode_required=raw.get("mode_required", "any"),
         expect=(
             _load_expect(raw["expect"])
             if "expect" in raw
-            else Expectation(status="CLARIFYING")
+            else _load_expect(raw["expect_first"])
         ),
         policies=tuple(_load_policy(item) for item in raw.get("policies", ())),
-        followup=_load_followup(raw["followup"]) if has_followup else None,
+        followup=_load_followup(raw["followup"], raw) if has_followup else None,
+        notes=raw.get("notes", ""),
     )
 
 

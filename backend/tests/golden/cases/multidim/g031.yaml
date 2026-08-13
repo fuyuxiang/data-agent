@@ -1,0 +1,16 @@
+id: G-031
+as_user: admin
+question: 上月各省份销售额
+expect:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-07-01
+      end: 2026-07-31
+      grain: MONTH
+      expression: 上月
+    dimension: [province]
+  rows: 5
+notes: |
+  7 月 completed 分省共 5 行。

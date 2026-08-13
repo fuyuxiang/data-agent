@@ -1,0 +1,19 @@
+id: G-003
+as_user: admin
+question: 本月有多少订单
+expect:
+  status: ANSWERED
+  intent:
+    metric: order_count
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+  rows: 1
+  first_row:
+    order_count: 7
+  citation_has:
+    - {kind: metric, text: order_count}
+notes: |
+  8 月 completed 订单 7 笔，pending 订单不计入 order_count。

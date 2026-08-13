@@ -1,0 +1,21 @@
+id: G-001
+as_user: admin
+question: 本月销售额
+expect:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+  rows: 1
+  first_row:
+    sales_revenue: 572000
+  citation_has:
+    - {kind: metric, text: sales_revenue}
+    - {kind: time, text: "2026-08-01 ~ 2026-08-31"}
+notes: |
+  sales_revenue 固定口径为 status='completed' 且按 completed_date 过滤。
+  8 月 completed 金额：142000+110000+47000+66000+97000+52000+58000 = 572000。

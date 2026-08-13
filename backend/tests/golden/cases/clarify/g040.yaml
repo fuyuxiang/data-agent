@@ -1,0 +1,15 @@
+id: G-040
+as_user: admin
+question: 本月用户复购率
+expect:
+  status: CLARIFYING
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+  clarify_kind: METRIC
+notes: |
+  stub 模式通过低置信度指标槽触发 METRIC 澄清。
