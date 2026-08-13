@@ -100,3 +100,28 @@ class FeedbackRow(MetaBase):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class VerifiedQueryRow(MetaBase):
+    """A reviewed question-to-SQL pairing (spec M-20).
+
+    A cache in front of the pipeline, not a separate architecture: hits still
+    go through security rewriting before execution.
+    """
+
+    __tablename__ = "verified_queries"
+    __table_args__ = {"schema": META_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dataset_name: Mapped[str] = mapped_column(String(64), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    normalized_question: Mapped[str] = mapped_column(Text, index=True)
+    slot_signature: Mapped[str] = mapped_column(Text, index=True)
+    fixed_sql: Mapped[str] = mapped_column(Text)
+    intent_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

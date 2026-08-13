@@ -158,6 +158,46 @@ class QueryIntent(BaseModel):
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+    def to_payload(self) -> dict:
+        """Full JSON-serialisable view, used for Trace snapshots and replay."""
+        return {
+            "kind": self.kind.value,
+            "dataset": self.dataset,
+            "metrics": list(self.metrics),
+            "dimensions": list(self.dimensions),
+            "filters": [
+                {
+                    "field": item.field,
+                    "operator": item.operator.value,
+                    "values": list(item.values),
+                    "spoken_values": list(item.spoken_values),
+                }
+                for item in self.filters
+            ],
+            "time": (
+                {
+                    "start": self.time.start.isoformat(),
+                    "end": self.time.end.isoformat(),
+                    "grain": self.time.grain.value,
+                    "expression": self.time.expression,
+                }
+                if self.time
+                else None
+            ),
+            "comparison": self.comparison.value,
+            "sort": (
+                {
+                    "by": self.sort.by,
+                    "descending": self.sort.descending,
+                    "limit": self.sort.limit,
+                }
+                if self.sort
+                else None
+            ),
+            "assumptions": list(self.assumptions),
+            "raw_question": self.raw_question,
+        }
+
     def merge_followup(self, other: "QueryIntent") -> "QueryIntent":
         """Overlay a follow-up turn's populated slots onto this intent.
 
