@@ -20,9 +20,25 @@ sample_engine = create_engine(
 
 
 def get_meta_session() -> Iterator[Session]:
+    """Per-request metadata session with explicit commit/rollback boundary.
+
+    The previous implementation only closed the session, never committed —
+    a request that wrote a Turn row would lose it the moment the session
+    was closed, because every subsequent request would get a new session
+    that sees the rolled-back transaction. The fix has two halves:
+
+    - On a clean exit, `commit()` so the writes survive the request.
+    - On an exception, `rollback()` and re-raise so partial writes do not
+      leak into the metadata DB (which would let a 404 leave a Turn row
+      pointing at a Conversation that does not exist).
+    """
     session = MetaSession()
     try:
         yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 
