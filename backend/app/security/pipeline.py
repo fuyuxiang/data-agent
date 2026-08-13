@@ -26,6 +26,7 @@ from app.security.principal import Principal
 from app.security.rewrite import AppliedRowFilter, inject_row_policies
 from app.security.whitelist import (
     AstRejectedError,
+    assert_allowed_functions,
     assert_select_only,
     assert_within_dataset,
     enforce_limit,
@@ -57,6 +58,7 @@ def _run(
 
     assert_select_only(ast)
     assert_within_dataset(ast, {dataset.physical_table})
+    assert_allowed_functions(ast)
 
     sql = ast.sql(dialect="postgres")
     cost = assert_affordable(connection, sql, settings)

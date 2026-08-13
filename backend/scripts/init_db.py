@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.db import MetaSession, meta_engine, sample_engine
+from app.core.db import MetaSession, meta_engine, sample_engine_writable as sample_engine
 from app.semantic.orm import META_SCHEMA, Base
 
 # Imported for the side effect of registering tables on MetaBase.metadata.
