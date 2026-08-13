@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: int = 30
 
     # Clarification thresholds are global for this iteration (spec 5.2).
     clarify_confidence_threshold: float = 0.7

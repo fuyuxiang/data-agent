@@ -78,11 +78,12 @@ class FilterCondition(BaseModel):
     spoken_values: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def check_values(self) -> Self:
-        if self.operator == FilterOperator.BETWEEN and len(self.values) != 2:
-            raise ValueError("between filter requires exactly two values")
-        if not self.values:
-            raise ValueError("filter requires at least one value")
+    def check_between(self) -> Self:
+        # Values are populated by the resolver stage (plan 04 task 3). Until
+        # then, a filter may carry only spoken_values, so an empty ``values``
+        # list is expected, not an error.
+        if self.operator == FilterOperator.BETWEEN and len(self.values) not in (0, 2):
+            raise ValueError("between filter requires zero or two values")
         return self
 
 
