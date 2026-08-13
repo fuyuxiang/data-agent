@@ -1,0 +1,16 @@
+id: G-041
+as_user: admin
+question: 按地区统计本月销售额
+expect:
+  status: CLARIFYING
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+    dimension: [province]
+  clarify_kind: DIMENSION
+notes: |
+  deterministic resolver 只有在已有维度但 dimension 置信度低时触发 DIMENSION 澄清；本用例用 province 覆盖该分支。

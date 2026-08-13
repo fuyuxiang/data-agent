@@ -1,0 +1,17 @@
+id: G-012
+as_of: 2027-01-15
+as_user: admin
+question: 上月销售额环比
+mode_required: real_only
+expect:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-12-01
+      end: 2026-12-31
+      grain: MONTH
+      expression: 上月
+    comparison: mom
+notes: |
+  as_of 覆写跨年边界。样本没有 2026-12 数据，stub 默认跳过，real 模式用于意图漂移观察。

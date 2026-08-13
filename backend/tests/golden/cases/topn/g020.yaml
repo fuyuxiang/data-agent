@@ -1,0 +1,20 @@
+id: G-020
+as_user: admin
+question: 上月销售额最高的 5 个省份
+expect:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-07-01
+      end: 2026-07-31
+      grain: MONTH
+      expression: 上月
+    dimension: [province]
+    top_n: 5
+  rows: 5
+  first_row:
+    province: 江苏
+    sales_revenue: 120000
+notes: |
+  7 月分省完成订单：江苏 120000、浙江 95000、广东 88000、上海 61000、北京 54000。

@@ -1,0 +1,32 @@
+id: G-043
+as_user: admin
+question: 财务确认收入是多少
+expect_first:
+  status: CLARIFYING
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+  clarify_kind: METRIC
+followup:
+  as_user: admin
+  select_option_index: 0
+expect_second:
+  status: ANSWERED
+  intent:
+    metric: sales_revenue
+    time:
+      start: 2026-08-01
+      end: 2026-08-31
+      grain: MONTH
+      expression: 本月
+  rows: 1
+  first_row:
+    sales_revenue: 572000
+  citation_has:
+    - {kind: metric, text: sales_revenue}
+notes: |
+  第一轮通过低置信度 metric 触发澄清；第二轮复用会话槽位并补足高置信度意图，返回本月 sales_revenue。
