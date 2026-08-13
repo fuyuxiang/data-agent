@@ -17,6 +17,7 @@ from app.intent.schema import ComparisonKind, FilterOperator, TimeGrain
 _VALID_STATUSES = ("ANSWERED", "CLARIFYING", "REFUSED", "FAILED")
 _VALID_POLICY_KINDS = ("row_policy", "column_deny")
 _VALID_TOP_N = 5
+_DEFAULT_AS_OF = date(2026, 8, 12)
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class IntentExpectation:
 
 
 @dataclass(frozen=True)
-class CitationHas:
+class CitationExpectation:
     kind: str
     text: str = ""
 
@@ -48,8 +49,10 @@ class Expectation:
     intent: IntentExpectation | None = None
     rows: int | None = None
     first_row: dict | None = None
-    citation_has: tuple[CitationHas, ...] = ()
+    citation_has: tuple[CitationExpectation, ...] = ()
     refused_leaks: tuple[str, ...] = ()
+    intent_diff: str = "xfail"
+    clarify_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,12 +68,11 @@ class GoldenCase:
     question: str
     as_user: str
     expect: Expectation
-    as_of: date
+    as_of: date = _DEFAULT_AS_OF
+    mode_required: str = "any"
     policies: tuple[PolicySpec, ...] = ()
     followup: FollowupSpec | None = None
-
-
-_DEFAULT_AS_OF = date(2026, 8, 12)
+    notes: str = ""
 
 
 def _load_time(payload: dict) -> Any:
@@ -105,7 +107,7 @@ def _load_expect(payload: dict) -> Expectation:
         raise ValueError(f"unknown status: {status}")
 
     citation_has = tuple(
-        CitationHas(kind=item["kind"], text=item.get("text", ""))
+        CitationExpectation(kind=item["kind"], text=item.get("text", ""))
         for item in payload.get("citation_has", ())
     )
     return Expectation(
@@ -115,6 +117,8 @@ def _load_expect(payload: dict) -> Expectation:
         first_row=payload.get("first_row"),
         citation_has=citation_has,
         refused_leaks=tuple(payload.get("refused_leaks", ())),
+        intent_diff=payload.get("intent_diff", "xfail"),
+        clarify_kind=payload.get("clarify_kind"),
     )
 
 
