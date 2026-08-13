@@ -8,6 +8,7 @@ fill in slots.
 
 import json
 
+from app.intent.security import escape_metadata_list, sanitize_question
 from app.semantic.model import DatasetDef
 
 _SYSTEM = """你是一个企业数据问答系统的意图识别模块。
@@ -49,27 +50,38 @@ _SYSTEM = """你是一个企业数据问答系统的意图识别模块。
 
 
 def _metric_lines(dataset: DatasetDef) -> str:
+    """Format metrics for prompt, with names escaped for injection safety."""
     lines = []
-    for metric in dataset.metrics:
-        parts = [f"- {metric.name}（{metric.business_name}）"]
+    # Use escaped names to prevent prompt injection
+    metric_names = escape_metadata_list([m.name for m in dataset.metrics])
+    for i, metric in enumerate(dataset.metrics):
+        name = metric_names[i]
+        parts = [f"- {name}（{metric.business_name}）"]
         if metric.synonyms:
-            parts.append(f"同义词：{'、'.join(metric.synonyms)}")
+            escaped_synonyms = escape_metadata_list(metric.synonyms)
+            parts.append(f"同义词：{'、'.join(escaped_synonyms)}")
         if metric.description:
-            parts.append(f"口径：{metric.description}")
+            # Description is user content, should also be escaped
+            parts.append(f"口径：{metric.description[:200]}")  # Limit length
         lines.append("；".join(parts))
     return "\n".join(lines)
 
 
 def _field_lines(dataset: DatasetDef, *, groupable: bool) -> str:
+    """Format fields for prompt, with names escaped for injection safety."""
     lines = []
-    for field in dataset.fields:
+    # Use escaped names
+    field_names = escape_metadata_list([f.name for f in dataset.fields])
+    for i, field in enumerate(dataset.fields):
         if groupable and not field.is_groupable:
             continue
         if not groupable and not field.is_filterable:
             continue
-        label = f"- {field.name}（{field.business_name or field.name}）"
+        name = field_names[i]
+        label = f"- {name}（{field.business_name or name}）"
         if field.synonyms:
-            label += f"；同义词：{'、'.join(field.synonyms)}"
+            escaped_synonyms = escape_metadata_list(field.synonyms)
+            label += f"；同义词：{'、'.join(escaped_synonyms)}"
         lines.append(label)
     return "\n".join(lines)
 
@@ -77,6 +89,13 @@ def _field_lines(dataset: DatasetDef, *, groupable: bool) -> str:
 def build_intent_prompt(
     dataset: DatasetDef, question: str, slot_state: dict | None = None
 ) -> tuple[str, str]:
+    """Build system and user prompts for intent recognition.
+
+    Applies input sanitization to prevent prompt injection.
+    """
+    # Sanitize user input
+    question = sanitize_question(question)
+
     blocks = [
         f"数据集：{dataset.name}（{dataset.business_name}）",
         f"数据粒度：{dataset.grain}",
