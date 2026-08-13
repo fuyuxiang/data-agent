@@ -203,7 +203,12 @@ def test_row_policy_appears_in_the_citation(env, sample_conn):
     assert permission_lines and "华东" in permission_lines[0].value
 
 
-def test_verified_query_hit_skips_intent_recognition(env, sample_conn):
+def test_verified_query_hit_degrades_to_full_pipeline(env, sample_conn):
+    """VQ hits used to short-circuit straight to the cached SQL — that
+    path skipped masking (P0-04: `SUM(masked_col)` would not be rewritten
+    because `apply_masking` only touches exp.Alias). The fix is to fall
+    through to the normal compile-and-secure path; cost is one model call
+    per hit, which is the right trade against an exploitable bypass."""
     from datetime import date
 
     from app.intent.schema import (
@@ -245,7 +250,8 @@ def test_verified_query_hit_skips_intent_recognition(env, sample_conn):
     )
 
     assert outcome.status == TurnStatus.ANSWERED
-    assert client.calls == 0
+    # Now uses the normal pipeline: one recognition call.
+    assert client.calls == 1
 
 
 def test_verified_query_hit_still_gets_row_policy(env, sample_conn):
