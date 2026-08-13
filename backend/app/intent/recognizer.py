@@ -224,6 +224,7 @@ def recognize(
     slot_state: dict | None = None,
     *,
     full_dataset: DatasetDef | None = None,
+    recorder=None,  # Optional TraceRecorder for Trace recording
 ) -> tuple[QueryIntent, LlmCompletion]:
     """Call the LLM and validate its output.
 
@@ -232,9 +233,30 @@ def recognize(
     name that exists in the full catalogue but is hidden from the user is
     distinguished from one that was invented wholesale — the orchestrator
     handles the former as a permission refusal.
+
+    If ``recorder`` is provided, LLM call is wrapped in stage_timer to record
+    model snapshot and latency.
     """
-    system, user = build_intent_prompt(dataset, question, slot_state)
-    completion = client.complete(system, user)
+    # If recorder provided, wrap LLM call in stage_timer
+    if recorder is not None:
+        from app.observability.trace import Stage
+
+        with recorder.stage_timer(
+            Stage.INTENT,
+            input_payload={"question": question, "slot_state": slot_state}
+        ) as span:
+            system, user = build_intent_prompt(dataset, question, slot_state)
+            completion = client.complete(system, user)
+
+            # Record LLM snapshot
+            span.model = completion.model
+            span.prompt_tokens = completion.prompt_tokens
+            span.completion_tokens = completion.completion_tokens
+            span.output = {"model": completion.model}
+    else:
+        # No recording, just call directly
+        system, user = build_intent_prompt(dataset, question, slot_state)
+        completion = client.complete(system, user)
 
     _assert_no_sql(completion.content)
     raw = _extract_json(completion.content)
