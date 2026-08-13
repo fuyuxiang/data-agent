@@ -1,10 +1,15 @@
-"""Result validation (spec M-15).
+"""Result validation (spec M-15, S3 P1-10).
 
 Blocking issues stop the answer: reporting a number that came from an empty or
 all-NULL result is exactly the silent-error failure mode the product exists to
 prevent. Warnings still answer, but say what looks off.
+
+S3 P1-10: numeric checks use numbers.Number so that PostgreSQL NUMERIC values
+(Decimal) are recognised. The previous (int, float) check silently dropped
+financial data on magnitude comparisons.
 """
 
+import numbers
 from dataclasses import dataclass
 from enum import Enum
 
@@ -30,7 +35,8 @@ class ValidationIssue:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """True if value is a bool-free numeric type (int, float, Decimal, etc.)."""
+    return isinstance(value, numbers.Number) and not isinstance(value, bool)
 
 
 def validate_result(
