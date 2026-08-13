@@ -158,6 +158,50 @@ class QueryIntent(BaseModel):
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+    @classmethod
+    def from_payload(cls, payload: dict) -> "QueryIntent":
+        """Inverse of to_payload. Unknown keys (such as clarify_rounds) are ignored."""
+        time_payload = payload.get("time")
+        sort_payload = payload.get("sort")
+        return cls(
+            kind=IntentKind(payload.get("kind", IntentKind.AGGREGATE.value)),
+            dataset=payload.get("dataset", ""),
+            metrics=list(payload.get("metrics", [])),
+            dimensions=list(payload.get("dimensions", [])),
+            filters=[
+                FilterCondition(
+                    field=item["field"],
+                    operator=FilterOperator(item["operator"]),
+                    values=list(item.get("values", [])),
+                    spoken_values=list(item.get("spoken_values", [])),
+                )
+                for item in payload.get("filters", [])
+            ],
+            time=(
+                TimeRange(
+                    start=date.fromisoformat(time_payload["start"]),
+                    end=date.fromisoformat(time_payload["end"]),
+                    grain=TimeGrain(time_payload["grain"]),
+                    expression=time_payload.get("expression", ""),
+                )
+                if time_payload
+                else None
+            ),
+            comparison=ComparisonKind(payload.get("comparison", ComparisonKind.NONE.value)),
+            sort=(
+                SortSpec(
+                    by=sort_payload["by"],
+                    descending=sort_payload.get("descending", True),
+                    limit=sort_payload.get("limit"),
+                )
+                if sort_payload
+                else None
+            ),
+            confidence=FieldConfidence(overall=1.0),
+            assumptions=list(payload.get("assumptions", [])),
+            raw_question=payload.get("raw_question", ""),
+        )
+
     def to_payload(self) -> dict:
         """Full JSON-serialisable view, used for Trace snapshots and replay."""
         return {
