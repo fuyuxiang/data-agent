@@ -152,11 +152,48 @@ def _build_comparison(
     )
 
     comparison_names = tuple(f"{item.name}{_COMPARISON_SUFFIX}" for item in metrics)
-    projections: list[exp.Expression] = [
-        exp.column(name, table=_CURRENT_CTE) for name in intent.dimensions
-    ]
+
+    # FIX (S3 P1-04): dimensions must use COALESCE so that dimensions appearing
+    # only in the baseline period are not dropped as NULL. Each dimension
+    # captures which period(s) the value belongs to.
+    projections: list[exp.Expression] = []
+    for name in intent.dimensions:
+        # COALESCE(current, baseline) so neither side drops a value
+        coalesced = exp.func(
+            "COALESCE",
+            exp.column(name, table=_CURRENT_CTE),
+            exp.column(name, table=_BASELINE_CTE),
+        )
+        projections.append(coalesced)
+
+    # Measure columns: current (alias stays) and baseline (with comparison suffix)
     projections.extend(exp.column(item.name, table=_CURRENT_CTE) for item in metrics)
     projections.extend(exp.column(name, table=_BASELINE_CTE) for name in comparison_names)
+
+    # Period status column: only_current | only_baseline | both
+    if intent.dimensions:
+        # Build a CASE expression: for each dimension, if either current or
+        # baseline is NULL the value is in only one period; otherwise "both".
+        case_ifs = []
+        for name in intent.dimensions:
+            current_col = exp.column(name, table=_CURRENT_CTE)
+            baseline_col = exp.column(name, table=_BASELINE_CTE)
+            # CURRENT is null: only_baseline
+            case_ifs.append(exp.If(
+                this=exp.Is(this=current_col, expression=exp.Null()),
+                true=exp.Literal.string("only_baseline"),
+            ))
+            # BASELINE is null: only_current
+            case_ifs.append(exp.If(
+                this=exp.Is(this=baseline_col, expression=exp.Null()),
+                true=exp.Literal.string("only_current"),
+            ))
+
+        period_status = exp.Case(
+            ifs=case_ifs,
+            default=exp.Literal.string("both"),
+        )
+        projections.append(period_status)
 
     outer = exp.select(*projections).from_(_CURRENT_CTE)
     if intent.dimensions:
