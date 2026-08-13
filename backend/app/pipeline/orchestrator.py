@@ -13,6 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.auth.ownership import ConversationNotVisibleError, owned_conversation
+from app.auth.principal import PrincipalContext
 from app.compiler.errors import CompileError
 from app.compiler.query import Citation, compile_intent
 from app.core.config import Settings
@@ -351,9 +353,21 @@ class QueryOrchestrator:
         self, user_id: int, question: str, dataset_name: str, conversation_id: int | None
     ) -> ConversationRow:
         if conversation_id is not None:
-            existing = self._session.get(ConversationRow, conversation_id)
-            if existing is not None:
-                return existing
+            # Object-level ownership: same user + same dataset, or we 404
+            # without ever creating a Turn row for the request.
+            try:
+                principal_ctx = self._principal_context_for(user_id)
+                return owned_conversation(
+                    self._session,
+                    principal_ctx,
+                    conversation_id,
+                    dataset_name=dataset_name,
+                )
+            except ConversationNotVisibleError:
+                # Bubble up to chat.py which already maps 404 for the
+                # SemanticError path; using the same exception keeps the
+                # contract uniform.
+                raise SemanticError(f"会话不存在或不属于当前数据集")
 
         try:
             principal = load_principal(self._session, user_id)
@@ -368,6 +382,28 @@ class QueryOrchestrator:
         self._session.add(row)
         self._session.flush()
         return row
+
+    def _principal_context_for(self, user_id: int) -> PrincipalContext:
+        """Lift the stored identity into a ``PrincipalContext`` for ownership checks.
+
+        Avoids rebuilding roles/groups here; ``owned_conversation`` only needs
+        ``user_id``, but ``PrincipalContext`` is the canonical type and may be
+        reused by later checks.
+        """
+        from app.auth.principal import PrincipalContext
+
+        principal = load_principal(self._session, user_id)
+        return PrincipalContext(
+            user_id=principal.user_id,
+            tenant_id="default",
+            subject="",
+            username="",
+            display_name="",
+            roles=frozenset(principal.role_names),
+            groups=frozenset(),
+            attributes={},
+            auth_time=0,
+        )
 
     def _verified_citation(self, dataset) -> Citation:
         """Verified entries carry their own intent snapshot; fall back to the

@@ -1,6 +1,9 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.auth.principal import PrincipalContext
+from app.security.columns import ColumnAccess, visible_dataset
+from app.security.principal import load_principal
 from app.semantic.model import DatasetDef, EnumValueDef, FieldDef, MetricDef, SemanticError
 from app.semantic.orm import DatasetRow, FieldRow, MetricRow
 
@@ -89,3 +92,25 @@ def load_dataset(session: Session, name: str) -> DatasetDef:
 def list_datasets(session: Session) -> list[DatasetDef]:
     rows = session.execute(_base_query().order_by(DatasetRow.name)).scalars().all()
     return [_to_dataset(row) for row in rows]
+
+
+def list_datasets_for_principal(
+    session: Session, principal: PrincipalContext
+) -> list[DatasetDef]:
+    """List datasets the principal has at least one non-DENY column on.
+
+    Each dataset is returned in its visible (post-DENY-stripping) form, so
+    downstream code does not need to remember to filter again. Hidden
+    datasets are not returned at all — no 404 leak, just absence.
+    """
+    principal_obj = load_principal(session, principal.user_id)
+    rows = session.execute(_base_query().order_by(DatasetRow.name)).scalars().all()
+    visible: list[DatasetDef] = []
+    for row in rows:
+        dataset = _to_dataset(row)
+        if any(
+            principal_obj.column_access(field, dataset.name) != ColumnAccess.DENY
+            for field in dataset.fields
+        ):
+            visible.append(visible_dataset(dataset, principal_obj))
+    return visible

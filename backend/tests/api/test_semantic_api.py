@@ -1,17 +1,34 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.core.db import get_meta_session
 from app.main import app
+from app.security.orm import RoleRow, UserRow
 from app.semantic.orm import DatasetRow
+from scripts.seed_roles import seed_roles
+from tests.security.factories import build_principals
 from tests.semantic.factories import build_orders_dataset
 
 
 @pytest.fixture
 def client(meta_session):
     app.dependency_overrides[get_meta_session] = lambda: meta_session
-    # Default to `admin` so the dev-mode X-Username fallback yields a real
-    # PrincipalContext. Tests that exercise role gates build their own user.
+    seed_roles(meta_session)
+    build_principals(meta_session)
+    # Default admin to semantic_approver so the existing admin-perspective
+    # tests keep working; role-gated tests assert the gates from a
+    # role-less admin via _ROLE_LESS_HEADERS.
+    admin = meta_session.execute(
+        select(UserRow).where(UserRow.username == "admin")
+    ).scalar_one()
+    approver = meta_session.execute(
+        select(RoleRow).where(RoleRow.name == "semantic_approver")
+    ).scalar_one()
+    if approver not in admin.roles:
+        admin.roles.append(approver)
+        meta_session.flush()
+
     client_ = TestClient(app)
     client_.headers["X-Username"] = "admin"
     yield client_

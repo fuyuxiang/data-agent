@@ -13,6 +13,11 @@ class EnumValueOut(BaseModel):
 
 
 class FieldOut(BaseModel):
+    """Admin view of a field — includes physical column, sensitivity, and
+    aggregation controls. Use `FieldOutPublic` for callers that should not
+    see physical implementation details.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     name: str
@@ -28,6 +33,20 @@ class FieldOut(BaseModel):
     is_groupable: bool
     is_queryable: bool
     sensitivity: str
+    enum_values: list[EnumValueOut]
+
+
+class FieldOutPublic(BaseModel):
+    """Business view of a field — what end-users see in the workbench."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    business_name: str
+    synonyms: list[str]
+    semantic_type: str
+    unit: str
+    display_format: str
     enum_values: list[EnumValueOut]
 
 
@@ -51,6 +70,8 @@ class MetricOut(BaseModel):
 
 
 class DatasetSummaryOut(BaseModel):
+    """Admin summary — includes physical_table for ownership / debugging."""
+
     model_config = ConfigDict(from_attributes=True)
 
     name: str
@@ -61,12 +82,41 @@ class DatasetSummaryOut(BaseModel):
     updated_at: datetime | None
 
 
+class DatasetSummaryOutPublic(BaseModel):
+    """Business summary — no physical implementation details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    business_name: str
+    is_published: bool
+    updated_at: datetime | None
+
+
 class DatasetDetailOut(DatasetSummaryOut):
     aliases: list[str]
     description: str
     applicable_scenario: str
     forbidden_scenario: str
     fields: list[FieldOut]
+    metrics: list[MetricOut]
+
+
+class DatasetDetailOutPublic(BaseModel):
+    """Business detail — what end-users see. Excludes physical_table, grain,
+    and physical_column/sensitivity on fields."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    business_name: str
+    aliases: list[str]
+    description: str
+    applicable_scenario: str
+    forbidden_scenario: str
+    is_published: bool
+    updated_at: datetime | None
+    fields: list[FieldOutPublic]
     metrics: list[MetricOut]
 
 
