@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.orm import Session
 
-from app.core.db import meta_engine, sample_engine
+from app.core.db import meta_engine, sample_engine_writable as sample_engine
 from app.semantic.orm import Base
 from scripts.init_db import create_schemas, load_sample_data
 from scripts.seed_roles import seed_roles
