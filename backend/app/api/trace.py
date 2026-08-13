@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_principal
+from app.auth.principal import PrincipalContext
 from app.core.config import Settings, get_settings
 from app.core.db import get_meta_session, get_sample_connection
-from app.core.security import get_current_username
 from app.observability.schemas import ReplayOut, TraceOut
 from app.observability.service import (
     NotFoundError,
@@ -19,11 +20,11 @@ router = APIRouter(prefix="/api/trace", tags=["trace"])
 @router.get("/turns/{turn_id}", response_model=TraceOut)
 def get_turn_trace(
     turn_id: int,
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
 ):
     try:
-        return get_trace(session, username, turn_id)
+        return get_trace(session, principal, turn_id)
     except NotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="记录不存在")
 
@@ -31,14 +32,14 @@ def get_turn_trace(
 @router.post("/turns/{turn_id}/replay", response_model=ReplayOut)
 def post_turn_replay(
     turn_id: int,
-    username: str = Depends(get_current_username),
+    principal: PrincipalContext = Depends(get_principal),
     session: Session = Depends(get_meta_session),
     connection: Connection = Depends(get_sample_connection),
     settings: Settings = Depends(get_settings),
 ):
     try:
         return replay_turn(
-            session, username, turn_id, connection=connection, settings=settings
+            session, principal, turn_id, connection=connection, settings=settings
         )
     except NotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="记录不存在")

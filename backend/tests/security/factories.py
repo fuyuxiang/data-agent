@@ -72,3 +72,15 @@ def build_principals(session: Session) -> dict[str, UserRow]:
     session.add_all(users.values())
     session.flush()
     return users
+
+
+def user_id_for(session: Session, username: str) -> int:
+    """Resolve the numeric `user_id` for a username.
+
+    The principal API keys off `user_id`; tests still write usernames
+    because they read more naturally, so this helper bridges the two.
+    """
+    user = session.execute(
+        select(UserRow).where(UserRow.username == username)
+    ).scalar_one()
+    return user.id

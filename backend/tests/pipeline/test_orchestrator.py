@@ -8,7 +8,7 @@ from app.core.config import Settings
 from app.intent.recognizer import LlmCompletion
 from app.observability.trace import Stage, load_trace
 from app.pipeline.orchestrator import QueryOrchestrator, TurnStatus
-from tests.security.factories import build_principals
+from tests.security.factories import build_principals, user_id_for
 from tests.semantic.factories import build_orders_dataset
 
 
@@ -81,7 +81,7 @@ def _orchestrator(env, sample_conn, client, settings=None):
 
 def test_happy_path_answers_with_citation(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.ANSWERED
@@ -91,7 +91,7 @@ def test_happy_path_answers_with_citation(env, sample_conn):
 
 def test_all_seven_stages_are_traced(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     stages = [item.stage for item in load_trace(env, outcome.turn_id)]
@@ -108,7 +108,7 @@ def test_all_seven_stages_are_traced(env, sample_conn):
 
 def test_intent_stage_records_model_and_tokens(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     stage = next(
@@ -120,7 +120,7 @@ def test_intent_stage_records_model_and_tokens(env, sample_conn):
 
 def test_compiled_sql_is_in_the_trace(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     stage = next(
@@ -133,7 +133,7 @@ def test_intent_snapshot_is_stored_for_replay(env, sample_conn):
     from app.observability.orm import TurnRow
 
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     turn = env.get(TurnRow, outcome.turn_id)
@@ -143,7 +143,7 @@ def test_intent_snapshot_is_stored_for_replay(env, sample_conn):
 def test_low_confidence_returns_clarification_not_a_number(env, sample_conn):
     payload = _payload(confidence={"overall": 0.4, "metric": 0.3, "time": 0.9})
     outcome = _orchestrator(env, sample_conn, StubClient(payload)).ask(
-        username="admin", question="业绩怎么样", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="业绩怎么样", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.CLARIFYING
@@ -154,7 +154,7 @@ def test_low_confidence_returns_clarification_not_a_number(env, sample_conn):
 def test_clarifying_turn_stops_before_compilation(env, sample_conn):
     payload = _payload(confidence={"overall": 0.4, "metric": 0.3, "time": 0.9})
     outcome = _orchestrator(env, sample_conn, StubClient(payload)).ask(
-        username="admin", question="业绩怎么样", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="业绩怎么样", dataset_name="orders"
     )
 
     stages = {item.stage for item in load_trace(env, outcome.turn_id)}
@@ -164,7 +164,7 @@ def test_clarifying_turn_stops_before_compilation(env, sample_conn):
 def test_unsupported_question_is_refused(env, sample_conn):
     payload = _payload(kind="unsupported", metrics=[], confidence={"overall": 0.1})
     outcome = _orchestrator(env, sample_conn, StubClient(payload)).ask(
-        username="admin", question="帮我把这单改成已完成", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="帮我把这单改成已完成", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.REFUSED
@@ -174,7 +174,7 @@ def test_unsupported_question_is_refused(env, sample_conn):
 def test_permission_refusal_leaks_no_metadata(env, sample_conn):
     payload = _payload(metrics=["total_cost"])
     outcome = _orchestrator(env, sample_conn, StubClient(payload)).ask(
-        username="east_manager", question="本月总成本", dataset_name="orders"
+        user_id=user_id_for(env, "east_manager"), question="本月总成本", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.REFUSED
@@ -186,7 +186,7 @@ def test_denied_columns_are_absent_from_the_prompt(env, sample_conn):
     """Recall-time invisibility: the model is never told the field exists."""
     client = StubClient(_payload())
     _orchestrator(env, sample_conn, client).ask(
-        username="east_manager", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "east_manager"), question="本月销售额", dataset_name="orders"
     )
 
     assert "cost" not in client.last_user_prompt
@@ -194,7 +194,7 @@ def test_denied_columns_are_absent_from_the_prompt(env, sample_conn):
 
 def test_row_policy_appears_in_the_citation(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="east_manager", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "east_manager"), question="本月销售额", dataset_name="orders"
     )
 
     permission_lines = [
@@ -241,7 +241,7 @@ def test_verified_query_hit_skips_intent_recognition(env, sample_conn):
 
     client = StubClient(_payload())
     outcome = _orchestrator(env, sample_conn, client).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.ANSWERED
@@ -286,7 +286,7 @@ def test_verified_query_hit_still_gets_row_policy(env, sample_conn):
     env.flush()
 
     outcome = _orchestrator(env, sample_conn, StubClient()).ask(
-        username="east_manager", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "east_manager"), question="本月销售额", dataset_name="orders"
     )
 
     stage = next(
@@ -305,7 +305,7 @@ def test_empty_result_does_not_produce_a_number(env, sample_conn):
         }
     )
     outcome = _orchestrator(env, sample_conn, StubClient(payload)).ask(
-        username="admin", question="2020年1月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="2020年1月销售额", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.FAILED
@@ -315,12 +315,12 @@ def test_empty_result_does_not_produce_a_number(env, sample_conn):
 
 def test_slot_state_is_persisted_for_the_next_turn(env, sample_conn):
     orchestrator = _orchestrator(env, sample_conn, StubClient(_payload(), _payload()))
-    first = orchestrator.ask(username="admin", question="本月销售额", dataset_name="orders")
+    first = orchestrator.ask(user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders")
 
     assert first.slot_state["metrics"] == ["sales_revenue"]
 
     second = orchestrator.ask(
-        username="admin",
+        user_id=user_id_for(env, "admin"),
         question="那按省份看",
         conversation_id=first.conversation_id,
         dataset_name="orders",
@@ -331,9 +331,9 @@ def test_slot_state_is_persisted_for_the_next_turn(env, sample_conn):
 def test_followup_receives_previous_slots_in_the_prompt(env, sample_conn):
     client = StubClient(_payload(), _payload())
     orchestrator = _orchestrator(env, sample_conn, client)
-    first = orchestrator.ask(username="admin", question="本月销售额", dataset_name="orders")
+    first = orchestrator.ask(user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders")
     orchestrator.ask(
-        username="admin",
+        user_id=user_id_for(env, "admin"),
         question="那华南呢",
         conversation_id=first.conversation_id,
         dataset_name="orders",
@@ -349,11 +349,11 @@ def test_clarify_round_counting_falls_back_to_defaults(env, sample_conn):
         env, sample_conn, client, _settings(clarify_max_rounds=1)
     )
 
-    first = orchestrator.ask(username="admin", question="业绩怎么样", dataset_name="orders")
+    first = orchestrator.ask(user_id=user_id_for(env, "admin"), question="业绩怎么样", dataset_name="orders")
     assert first.status == TurnStatus.CLARIFYING
 
     second = orchestrator.ask(
-        username="admin",
+        user_id=user_id_for(env, "admin"),
         question="业绩怎么样",
         conversation_id=first.conversation_id,
         dataset_name="orders",
@@ -369,14 +369,14 @@ def test_unpublished_dataset_is_refused(meta_session, sample_conn):
     build_principals(meta_session)
 
     outcome = _orchestrator(meta_session, sample_conn, StubClient(_payload())).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(meta_session, "admin"), question="本月销售额", dataset_name="orders"
     )
     assert outcome.status == TurnStatus.REFUSED
 
 
 def test_recognition_failure_is_reported_as_failed(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient("这不是 JSON")).ask(
-        username="admin", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "admin"), question="本月销售额", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.FAILED
@@ -388,7 +388,7 @@ def test_recognition_failure_is_reported_as_failed(env, sample_conn):
 
 def test_inactive_user_is_refused_without_detail(env, sample_conn):
     outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
-        username="retired_user", question="本月销售额", dataset_name="orders"
+        user_id=user_id_for(env, "retired_user"), question="本月销售额", dataset_name="orders"
     )
 
     assert outcome.status == TurnStatus.REFUSED

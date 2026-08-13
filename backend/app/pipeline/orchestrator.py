@@ -73,13 +73,13 @@ class QueryOrchestrator:
     def ask(
         self,
         *,
-        username: str,
+        user_id: int,
         question: str,
         dataset_name: str,
         conversation_id: int | None = None,
     ) -> TurnOutcome:
         try:
-            conversation = self._conversation(conversation_id, username, question, dataset_name)
+            conversation = self._conversation(user_id, question, dataset_name, conversation_id)
             turn = TurnRow(conversation_id=conversation.id, question=question)
             self._session.add(turn)
             self._session.flush()
@@ -97,7 +97,7 @@ class QueryOrchestrator:
         recorder = TraceRecorder(self._session, turn.id)
 
         try:
-            return self._run(recorder, conversation, turn, username, question, dataset_name)
+            return self._run(recorder, conversation, turn, user_id, question, dataset_name)
         except (PermissionDeniedError, PrincipalNotFoundError):
             return self._refuse(turn, _GENERIC_REFUSAL)
         except AstRejectedError:
@@ -122,11 +122,11 @@ class QueryOrchestrator:
         recorder: TraceRecorder,
         conversation: ConversationRow,
         turn: TurnRow,
-        username: str,
+        user_id: int,
         question: str,
         dataset_name: str,
     ) -> TurnOutcome:
-        principal = load_principal(self._session, username)
+        principal = load_principal(self._session, user_id)
         full_dataset = load_dataset(self._session, dataset_name)
         if not full_dataset.is_published:
             return self._refuse(turn, _OUT_OF_SCOPE)
@@ -348,7 +348,7 @@ class QueryOrchestrator:
     # --- helpers ----------------------------------------------------------
 
     def _conversation(
-        self, conversation_id: int | None, username: str, question: str, dataset_name: str
+        self, user_id: int, question: str, dataset_name: str, conversation_id: int | None
     ) -> ConversationRow:
         if conversation_id is not None:
             existing = self._session.get(ConversationRow, conversation_id)
@@ -356,7 +356,7 @@ class QueryOrchestrator:
                 return existing
 
         try:
-            principal = load_principal(self._session, username)
+            principal = load_principal(self._session, user_id)
         except PrincipalNotFoundError:
             raise
         row = ConversationRow(

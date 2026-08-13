@@ -3,7 +3,7 @@ import pytest
 from app.security.principal import ColumnAccess, load_principal
 from app.semantic.enums import Sensitivity
 from app.semantic.loader import load_dataset
-from tests.security.factories import build_principals
+from tests.security.factories import build_principals, user_id_for
 from tests.semantic.factories import build_orders_dataset
 
 
@@ -15,12 +15,12 @@ def principals(meta_session):
 
 
 def test_load_principal_collects_roles(principals):
-    principal = load_principal(principals, "east_manager")
+    principal = load_principal(principals, user_id_for(principals, "east_manager"))
     assert "east_sales" in principal.role_names
 
 
 def test_row_rules_are_scoped_to_dataset(principals):
-    principal = load_principal(principals, "east_manager")
+    principal = load_principal(principals, user_id_for(principals, "east_manager"))
     rules = principal.row_rules_for("orders")
 
     assert len(rules) == 1
@@ -30,13 +30,13 @@ def test_row_rules_are_scoped_to_dataset(principals):
 
 
 def test_admin_has_no_row_rules(principals):
-    principal = load_principal(principals, "admin")
+    principal = load_principal(principals, user_id_for(principals, "admin"))
     assert principal.row_rules_for("orders") == ()
 
 
 def test_sensitivity_ceiling_masks_higher_levels(principals):
     dataset = load_dataset(principals, "orders")
-    analyst = load_principal(principals, "analyst")
+    analyst = load_principal(principals, user_id_for(principals, "analyst"))
 
     # analyst tops out at PUBLIC, so a SENSITIVE column is not readable as-is.
     assert analyst.max_sensitivity == Sensitivity.PUBLIC
@@ -46,14 +46,14 @@ def test_sensitivity_ceiling_masks_higher_levels(principals):
 
 def test_admin_reads_sensitive_columns(principals):
     dataset = load_dataset(principals, "orders")
-    admin = load_principal(principals, "admin")
+    admin = load_principal(principals, user_id_for(principals, "admin"))
     assert admin.column_access(dataset.field("customer_name"), "orders") == ColumnAccess.ALLOW
 
 
 def test_explicit_column_policy_overrides_sensitivity(principals):
     dataset = load_dataset(principals, "orders")
     # east_manager clears the sensitivity bar but cost is explicitly denied.
-    principal = load_principal(principals, "east_manager")
+    principal = load_principal(principals, user_id_for(principals, "east_manager"))
 
     assert principal.column_access(dataset.field("customer_name"), "orders") == ColumnAccess.ALLOW
     assert principal.column_access(dataset.field("cost"), "orders") == ColumnAccess.DENY
@@ -61,12 +61,12 @@ def test_explicit_column_policy_overrides_sensitivity(principals):
 
 def test_most_permissive_role_wins_on_sensitivity(principals):
     # multi_role belongs to both analyst (PUBLIC) and east_sales (SENSITIVE).
-    principal = load_principal(principals, "multi_role")
+    principal = load_principal(principals, user_id_for(principals, "multi_role"))
     assert principal.max_sensitivity == Sensitivity.SENSITIVE
 
 
 def test_row_rules_from_multiple_roles_are_all_collected(principals):
-    principal = load_principal(principals, "multi_role")
+    principal = load_principal(principals, user_id_for(principals, "multi_role"))
     fields = {rule.field_name for rule in principal.row_rules_for("orders")}
     assert fields == {"region_code", "channel"}
 
@@ -74,15 +74,19 @@ def test_row_rules_from_multiple_roles_are_all_collected(principals):
 def test_inactive_user_cannot_be_loaded(principals):
     from app.security.principal import PrincipalNotFoundError
 
+    retired_id = user_id_for(principals, "retired_user")
     with pytest.raises(PrincipalNotFoundError):
-        load_principal(principals, "retired_user")
+        load_principal(principals, retired_id)
 
 
 def test_unknown_user_raises(principals):
     from app.security.principal import PrincipalNotFoundError
 
+    # An id that no row holds is the post-migration equivalent of "username
+    # we have never seen": the call must surface as PrincipalNotFoundError,
+    # not leak the SQLAlchemy NoResultFound detail.
     with pytest.raises(PrincipalNotFoundError):
-        load_principal(principals, "nobody")
+        load_principal(principals, 999_999)
 
 
 def test_column_access_does_not_cross_datasets(principals):
@@ -124,7 +128,7 @@ def test_column_access_does_not_cross_datasets(principals):
     principals.add_all([refund_user, refunds])
     principals.flush()
 
-    principal = load_principal(principals, "refund_user")
+    principal = load_principal(principals, user_id_for(principals, "refund_user"))
     refunds_def = load_dataset(principals, "refunds")
     # Strict reader has cost = DENY on orders, but refunds.cost falls back to
     # sensitivity judgment. SENSITIVE > PUBLIC → MASK (not the cross-dataset DENY).
@@ -158,5 +162,5 @@ def test_multi_role_deny_wins_on_overlapping_policies(principals):
     principals.flush()
 
     dataset = load_dataset(principals, "orders")
-    principal = load_principal(principals, "conflicted")
+    principal = load_principal(principals, user_id_for(principals, "conflicted"))
     assert principal.column_access(dataset.field("cost"), "orders") == ColumnAccess.DENY

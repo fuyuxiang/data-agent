@@ -24,7 +24,7 @@ from app.intent.schema import (
 from app.security.principal import load_principal
 from app.security.rewrite import inject_row_policies
 from app.semantic.loader import load_dataset
-from tests.security.factories import build_principals
+from tests.security.factories import build_principals, user_id_for
 from tests.semantic.factories import build_orders_dataset
 
 
@@ -53,16 +53,16 @@ def _intent(**overrides) -> QueryIntent:
     return QueryIntent(**payload)
 
 
-def _rewrite(session, username, **intent_overrides):
+def _rewrite(session, user_id, **intent_overrides):
     dataset = load_dataset(session, "orders")
     compiled = compile_intent(dataset, _intent(**intent_overrides))
-    principal = load_principal(session, username)
+    principal = load_principal(session, user_id)
     ast, applied = inject_row_policies(compiled.ast, dataset, principal)
     return ast.sql(dialect="postgres"), applied
 
 
 def test_row_policy_is_injected_into_where(env):
-    sql, applied = _rewrite(env, "east_manager")
+    sql, applied = _rewrite(env, user_id_for(env, "east_manager"))
 
     assert "region_code" in sql
     assert "'EC'" in sql
@@ -74,7 +74,7 @@ def test_row_policy_is_injected_into_where(env):
 def test_admin_query_is_untouched(env):
     dataset = load_dataset(env, "orders")
     compiled = compile_intent(dataset, _intent())
-    principal = load_principal(env, "admin")
+    principal = load_principal(env, user_id_for(env, "admin"))
 
     ast, applied = inject_row_policies(compiled.ast, dataset, principal)
     assert ast.sql(dialect="postgres") == compiled.sql_compact
@@ -86,7 +86,7 @@ def test_policy_is_anded_not_ored_with_user_filters(env):
 
     sql, _ = _rewrite(
         env,
-        "east_manager",
+        user_id_for(env, "east_manager"),
         filters=[
             FilterCondition(
                 field="channel",
@@ -108,7 +108,7 @@ def test_user_cannot_widen_scope_by_filtering_another_region(env):
 
     sql, _ = _rewrite(
         env,
-        "east_manager",
+        user_id_for(env, "east_manager"),
         filters=[
             FilterCondition(
                 field="region_code",
@@ -124,7 +124,7 @@ def test_user_cannot_widen_scope_by_filtering_another_region(env):
 
 
 def test_multiple_roles_apply_all_policies(env):
-    sql, applied = _rewrite(env, "multi_role")
+    sql, applied = _rewrite(env, user_id_for(env, "multi_role"))
 
     assert "region_code" in sql
     assert "channel" in sql
@@ -132,7 +132,7 @@ def test_multiple_roles_apply_all_policies(env):
 
 
 def test_policy_reaches_every_cte_of_a_comparison_query(env):
-    sql, _ = _rewrite(env, "east_manager", comparison=ComparisonKind.MOM)
+    sql, _ = _rewrite(env, user_id_for(env, "east_manager"), comparison=ComparisonKind.MOM)
 
     # Both the current and the baseline CTE must carry the restriction;
     # patching only the outer query would leak the baseline period.
@@ -140,7 +140,7 @@ def test_policy_reaches_every_cte_of_a_comparison_query(env):
 
 
 def test_policy_values_are_physical_in_sql_and_business_in_citation(env):
-    sql, applied = _rewrite(env, "east_manager")
+    sql, applied = _rewrite(env, user_id_for(env, "east_manager"))
     assert "华东" not in sql
     assert applied[0].values == ("华东",)
 
@@ -162,13 +162,13 @@ def test_unmapped_policy_value_stays_physical_in_citation(meta_session):
     meta_session.add(UserRow(username="odd_user", roles=[role]))
     meta_session.flush()
 
-    sql, applied = _rewrite(meta_session, "odd_user")
+    sql, applied = _rewrite(meta_session, user_id_for(meta_session, "odd_user"))
     assert "'ZZ'" in sql
     assert applied[0].values == ("ZZ",)
 
 
 def test_injected_sql_still_parses(env):
-    sql, _ = _rewrite(env, "multi_role", comparison=ComparisonKind.YOY)
+    sql, _ = _rewrite(env, user_id_for(env, "multi_role"), comparison=ComparisonKind.YOY)
     assert sqlglot.parse_one(sql, dialect="postgres") is not None
 
 
@@ -191,4 +191,4 @@ def test_policy_on_field_absent_from_dataset_is_rejected(meta_session):
 
     # Fail closed: a stale policy must never silently widen access.
     with pytest.raises(RowPolicyConfigError):
-        _rewrite(meta_session, "stale_user")
+        _rewrite(meta_session, user_id_for(meta_session, "stale_user"))

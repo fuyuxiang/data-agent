@@ -1,6 +1,13 @@
+"""Semantic management API. Role gates are added in S1 Task 3 — wiring up
+`Depends(get_principal)` here so the call site is ready when those tasks
+land.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_principal
+from app.auth.principal import PrincipalContext
 from app.core.db import get_meta_session
 from app.semantic.loader import list_datasets, load_dataset
 from app.semantic.model import SemanticError
@@ -16,12 +23,19 @@ router = APIRouter(prefix="/api/semantic", tags=["semantic"])
 
 
 @router.get("/datasets", response_model=list[DatasetSummaryOut])
-def get_datasets(session: Session = Depends(get_meta_session)):
+def get_datasets(
+    principal: PrincipalContext = Depends(get_principal),
+    session: Session = Depends(get_meta_session),
+):
     return [DatasetSummaryOut.model_validate(item) for item in list_datasets(session)]
 
 
 @router.get("/datasets/{name}", response_model=DatasetDetailOut)
-def get_dataset(name: str, session: Session = Depends(get_meta_session)):
+def get_dataset(
+    name: str,
+    principal: PrincipalContext = Depends(get_principal),
+    session: Session = Depends(get_meta_session),
+):
     try:
         dataset = load_dataset(session, name)
     except SemanticError:
@@ -30,7 +44,11 @@ def get_dataset(name: str, session: Session = Depends(get_meta_session)):
 
 
 @router.get("/datasets/{name}/lint", response_model=LintReportOut)
-def get_dataset_lint(name: str, session: Session = Depends(get_meta_session)):
+def get_dataset_lint(
+    name: str,
+    principal: PrincipalContext = Depends(get_principal),
+    session: Session = Depends(get_meta_session),
+):
     try:
         return get_lint_report(session, name)
     except SemanticError:
@@ -38,7 +56,11 @@ def get_dataset_lint(name: str, session: Session = Depends(get_meta_session)):
 
 
 @router.post("/datasets/{name}/publish", response_model=PublishResultOut)
-def post_dataset_publish(name: str, session: Session = Depends(get_meta_session)):
+def post_dataset_publish(
+    name: str,
+    principal: PrincipalContext = Depends(get_principal),
+    session: Session = Depends(get_meta_session),
+):
     try:
         result = publish_dataset(session, name)
     except SemanticError:
