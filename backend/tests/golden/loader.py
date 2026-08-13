@@ -1,0 +1,227 @@
+"""Golden Set YAML loader and diff_in helper.
+
+A single YAML file is one question. The loader returns a list of GoldenCase
+objects. Strong schema validation happens at collection time so a malformed
+case stops the run immediately rather than producing a cryptic failure mid-suite.
+"""
+
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from app.intent.schema import ComparisonKind, FilterOperator, TimeGrain
+
+_VALID_STATUSES = ("ANSWERED", "CLARIFYING", "REFUSED", "FAILED")
+_VALID_POLICY_KINDS = ("row_policy", "column_deny")
+_VALID_TOP_N = 5
+
+
+@dataclass(frozen=True)
+class PolicySpec:
+    kind: str
+    field: str = ""
+    allowed_values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class IntentExpectation:
+    metric: str = ""
+    time: Any = None  # TimeRange
+    dimension: tuple[str, ...] = ()
+    filters: tuple[dict, ...] = ()
+    comparison: ComparisonKind | None = None
+    top_n: int | None = None
+
+
+@dataclass(frozen=True)
+class CitationHas:
+    kind: str
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class Expectation:
+    status: str
+    intent: IntentExpectation | None = None
+    rows: int | None = None
+    first_row: dict | None = None
+    citation_has: tuple[CitationHas, ...] = ()
+    refused_leaks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FollowupSpec:
+    as_user: str
+    select_option_index: int
+    expect: Expectation
+
+
+@dataclass(frozen=True)
+class GoldenCase:
+    id: str
+    question: str
+    as_user: str
+    expect: Expectation
+    as_of: date
+    policies: tuple[PolicySpec, ...] = ()
+    followup: FollowupSpec | None = None
+
+
+_DEFAULT_AS_OF = date(2026, 8, 12)
+
+
+def _load_time(payload: dict) -> Any:
+    from app.intent.schema import TimeRange
+
+    grain_raw = payload.get("grain", "month")
+    grain = TimeGrain(grain_raw.lower() if isinstance(grain_raw, str) else grain_raw)
+    return TimeRange(
+        start=_coerce_date(payload["start"]),
+        end=_coerce_date(payload["end"]),
+        grain=grain,
+        expression=payload.get("expression", ""),
+    )
+
+
+def _load_intent(payload: dict | None) -> IntentExpectation | None:
+    if payload is None:
+        return None
+    return IntentExpectation(
+        metric=payload.get("metric", ""),
+        time=_load_time(payload["time"]) if "time" in payload else None,
+        dimension=tuple(payload.get("dimension", ())),
+        filters=tuple(payload.get("filters", ())),
+        comparison=ComparisonKind(payload["comparison"]) if "comparison" in payload else None,
+        top_n=payload.get("top_n"),
+    )
+
+
+def _load_expect(payload: dict) -> Expectation:
+    status = payload["status"]
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"unknown status: {status}")
+
+    citation_has = tuple(
+        CitationHas(kind=item["kind"], text=item.get("text", ""))
+        for item in payload.get("citation_has", ())
+    )
+    return Expectation(
+        status=status,
+        intent=_load_intent(payload.get("intent")),
+        rows=payload.get("rows"),
+        first_row=payload.get("first_row"),
+        citation_has=citation_has,
+        refused_leaks=tuple(payload.get("refused_leaks", ())),
+    )
+
+
+def _load_policy(payload: dict) -> PolicySpec:
+    kind = payload["kind"]
+    if kind not in _VALID_POLICY_KINDS:
+        raise ValueError(f"unknown policy kind: {kind}")
+    return PolicySpec(
+        kind=kind,
+        field=payload.get("field", ""),
+        allowed_values=tuple(payload.get("allowed_values", ())),
+    )
+
+
+def _load_followup(payload: dict) -> FollowupSpec:
+    return FollowupSpec(
+        as_user=payload["as_user"],
+        select_option_index=payload["select_option_index"],
+        expect=_load_expect(payload["expect"]),
+    )
+
+
+def _coerce_date(value: Any) -> date:
+    """YAML auto-parses ISO dates; accept either a date or an ISO string."""
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _load_yaml(path: Path) -> GoldenCase:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: top-level must be a mapping")
+    if "id" not in raw:
+        raise ValueError(f"{path}: missing id")
+    has_followup = "followup" in raw
+    return GoldenCase(
+        id=raw["id"],
+        question=raw["question"],
+        as_user=raw.get("as_user", "admin"),
+        as_of=_coerce_date(raw["as_of"]) if "as_of" in raw else _DEFAULT_AS_OF,
+        # Followup cases describe the first turn with ``expect_first``; reuse
+        # ``expect`` field of ``followup`` as the source of truth for the
+        # second-turn assertion.
+        expect=(
+            _load_expect(raw["expect"])
+            if "expect" in raw
+            else Expectation(status="CLARIFYING")
+        ),
+        policies=tuple(_load_policy(item) for item in raw.get("policies", ())),
+        followup=_load_followup(raw["followup"]) if has_followup else None,
+    )
+
+
+def load_cases(cases_dir: Path) -> list[GoldenCase]:
+    """Recursively load every YAML case under ``cases_dir``.
+
+    Raises on schema errors or duplicate ids so a bad case is caught at
+    collection rather than mid-suite.
+    """
+    seen: set[str] = set()
+    cases: list[GoldenCase] = []
+    for path in sorted(cases_dir.rglob("*.yaml")):
+        case = _load_yaml(path)
+        if case.id in seen:
+            raise ValueError(f"duplicate case id: {case.id}")
+        seen.add(case.id)
+        cases.append(case)
+    return cases
+
+
+def diff_in(actual: Any, expected: IntentExpectation) -> dict[str, tuple[Any, Any]]:
+    """Return non-empty mapping iff at least one slot differs.
+
+    Keys are the slot names from ``IntentExpectation``; values are
+    ``(expected, actual)``. Empty dict means full match. Time is compared on
+    the structural fields that matter for a query (start/end/grain) — the
+    ``expression`` field is the user-facing paraphrase and is intentionally
+    ignored so test fixtures don't have to track it.
+    """
+    diff: dict[str, tuple[Any, Any]] = {}
+
+    if expected.metric and getattr(actual, "metric", None) != expected.metric:
+        diff["metric"] = (expected.metric, getattr(actual, "metric", None))
+
+    if expected.time is not None:
+        actual_time = getattr(actual, "time", None)
+        if actual_time is None or actual_time.start != expected.time.start or actual_time.end != expected.time.end or actual_time.grain != expected.time.grain:
+            diff["time"] = (expected.time, actual_time)
+
+    expected_dimension = tuple(expected.dimension or ())
+    actual_dimension = tuple(getattr(actual, "dimension", ()) or ())
+    if expected_dimension and actual_dimension != expected_dimension:
+        diff["dimension"] = (expected_dimension, actual_dimension)
+
+    expected_filters = tuple(expected.filters or ())
+    actual_filters = tuple(getattr(actual, "filters", ()) or ())
+    if expected_filters and actual_filters != expected_filters:
+        diff["filters"] = (expected_filters, actual_filters)
+
+    if (
+        expected.comparison is not None
+        and getattr(actual, "comparison", None) != expected.comparison
+    ):
+        diff["comparison"] = (expected.comparison, getattr(actual, "comparison", None))
+
+    if expected.top_n is not None and getattr(actual, "top_n", None) != expected.top_n:
+        diff["top_n"] = (expected.top_n, getattr(actual, "top_n", None))
+
+    return diff
