@@ -69,8 +69,27 @@ class TraceStageRow(MetaBase):
     )
     stage: Mapped[str] = mapped_column(String(32))
     sequence: Mapped[int] = mapped_column(Integer)
+
+    # Visibility classification for the *output* payload. The reader's role
+    # decides which payload column they see; nothing in the API surface
+    # should ever strip fields from a single shared dict.
+    #
+    # public  — stage name, timing, status (every authenticated owner)
+    # user    — logical plan, assumptions, clarifications, row counts
+    # sensitive — physical SQL, EXPLAIN, row filters, masked fields, prompts
+    # admin   — exception traces, provider raw responses, internal detail
+    visibility: Mapped[str] = mapped_column(String(16), default="user")
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     input_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     output_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Sensitive payload is split out so that ordinary readers never see the
+    # row at all — the API literally doesn't return it.
+    sensitive_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    admin_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
