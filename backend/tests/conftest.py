@@ -13,13 +13,27 @@ from app.semantic import orm as semantic_orm  # noqa: F401
 from app.observability import orm as observability_orm  # noqa: F401
 
 
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers", "no_db: mark test as not requiring database"
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
-def prepared_database():
+def prepared_database(request):
     """Create schemas, tables and sample rows once per test session.
 
     Drop-then-create keeps ORM-defined columns in sync with what tests
     expect — `create_all` only adds missing tables, never columns.
+
+    Skipped if all tests are marked with 'no_db'.
     """
+    # Check if all tests are marked no_db
+    if request.config.option.markexpr and "no_db" in str(request.config.option.markexpr):
+        yield  # Skip DB setup
+        return
+
     create_schemas()
     Base.metadata.drop_all(meta_engine)
     Base.metadata.create_all(meta_engine)
