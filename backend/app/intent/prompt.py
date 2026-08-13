@@ -22,6 +22,14 @@ _SYSTEM = """你是一个企业数据问答系统的意图识别模块。
 5. 如果问题不是数据查询（例如要求下单、修改数据、闲聊），kind 填 unsupported。
 6. 如果做了任何默认假设（例如「最近」按本月理解），写入 assumptions 数组。
 
+【时间表达：用相对时间表达式，不要绝对日期】
+不要填写 YYYY-MM-DD 格式的绝对日期。用相对时间表达式：
+- "本期"（本月、本季、本年等）: kind=relative, unit=month|quarter|year, offset=0
+- "上个月/季/年": kind=relative, unit=month|quarter|year, offset=-1
+- "过去7天": kind=relative, unit=day, offset=-7
+- "这个月到现在": kind=relative, unit=month, offset=0, to_date=true
+- 如用户说绝对日期（2026-01-15），用 kind=absolute, start_date=2026-01-15, end_date=2026-01-15
+
 只输出 JSON，不要输出解释文字。JSON 结构：
 {
   "kind": "aggregate | trend | ranking | detail | unsupported",
@@ -29,8 +37,9 @@ _SYSTEM = """你是一个企业数据问答系统的意图识别模块。
   "dimensions": ["维度名"],
   "filters": [{"field": "字段名", "operator": "eq|ne|in|not_in|gt|gte|lt|lte|between",
                "spoken_values": ["用户原话"]}],
-  "time": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
-           "grain": "day|week|month|quarter|year", "expression": "用户原话"},
+  "time_expression": {"kind": "relative|absolute|range|none", "unit": "day|week|month|quarter|year|null",
+                      "offset": 0, "to_date": false, "start_date": "YYYY-MM-DD|null", "end_date": "YYYY-MM-DD|null",
+                      "expression": "用户原话"},
   "comparison": "none|mom|yoy|wow|qoq|ytd|mtd|qtd|previous_period",
   "sort": {"by": "指标名", "descending": true, "limit": 10},
   "confidence": {"overall": 0.0, "metric": 0.0, "time": 0.0,

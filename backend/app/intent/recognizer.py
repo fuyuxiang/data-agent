@@ -61,13 +61,22 @@ class _FilterPayload(BaseModel):
     spoken_values: list[str] = Field(default_factory=list)
 
 
-class _TimePayload(BaseModel):
+class _TimeExpressionPayload(BaseModel):
+    """Relative time expression from the model.
+
+    The model outputs relative time (offset, unit) rather than absolute dates.
+    TimeResolver in orchestrator will convert this to concrete dates later.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    start: str
-    end: str
-    grain: TimeGrain = TimeGrain.MONTH
-    expression: str = ""
+    kind: str  # "relative" | "absolute" | "range" | "none"
+    unit: str | None = None  # "day" | "week" | "month" | "quarter" | "year"
+    offset: int = 0
+    to_date: bool = False
+    start_date: str | None = None  # ISO format, for kind=absolute/range
+    end_date: str | None = None
+    expression: str = ""  # user's original phrasing
 
 
 class _SortPayload(BaseModel):
@@ -97,7 +106,7 @@ class IntentPayload(BaseModel):
     metrics: list[str] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
     filters: list[_FilterPayload] = Field(default_factory=list)
-    time: _TimePayload | None = None
+    time_expression: _TimeExpressionPayload | None = None  # relative time from model
     comparison: ComparisonKind = ComparisonKind.NONE
     sort: _SortPayload | None = None
     confidence: _ConfidencePayload
@@ -140,17 +149,36 @@ def _assert_known_references(dataset: DatasetDef, payload: IntentPayload) -> Non
 
 
 def _to_intent(dataset: DatasetDef, payload: IntentPayload, question: str) -> QueryIntent:
+    """Convert IntentPayload to QueryIntent.
+
+    Time expressions are stored but not converted yet; TimeResolver in the
+    orchestrator will convert relative expressions to concrete dates later.
+    """
     time_range = None
-    if payload.time is not None:
-        try:
+    # TODO (S3): TimeResolver will convert time_expression to concrete dates
+    # For now, relative time expressions are accepted but not converted
+    if payload.time_expression is not None and payload.time_expression.kind != "none":
+        # If model provided absolute dates, we can use them now
+        if payload.time_expression.kind == "absolute":
+            try:
+                time_range = TimeRange(
+                    start=date.fromisoformat(payload.time_expression.start_date),
+                    end=date.fromisoformat(payload.time_expression.end_date or payload.time_expression.start_date),
+                    grain=TimeGrain.DAY,
+                    expression=payload.time_expression.expression,
+                )
+            except (ValueError, TypeError) as error:
+                raise IntentRecognitionError(f"模型返回的绝对日期无法解析：{error}") from error
+        else:
+            # For relative expressions (kind=relative), create a placeholder
+            # that will be resolved later by TimeResolver
+            # Use expression as a marker for now
             time_range = TimeRange(
-                start=date.fromisoformat(payload.time.start),
-                end=date.fromisoformat(payload.time.end),
-                grain=payload.time.grain,
-                expression=payload.time.expression,
+                start=date(2026, 1, 1),  # placeholder
+                end=date(2026, 1, 1),
+                grain=TimeGrain.DAY,
+                expression=f"{payload.time_expression.kind}:{payload.time_expression.unit}:{payload.time_expression.offset}:{payload.time_expression.expression}",
             )
-        except ValueError as error:
-            raise IntentRecognitionError(f"模型返回的日期无法解析：{error}") from error
 
     confidence_kwargs: dict[str, float] = {"overall": payload.confidence.overall}
     for slot in ("metric", "time", "dimension", "filter"):
