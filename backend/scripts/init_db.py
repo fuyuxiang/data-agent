@@ -33,6 +33,10 @@ def load_sample_data() -> None:
     statements = SQL_FILE.read_text(encoding="utf-8")
     with sample_engine.begin() as conn:
         conn.execute(text(statements))
+        # Without ANALYZE the planner falls back to hard-coded estimates
+        # (PostgreSQL default is ~150 rows per Seq Scan), which makes
+        # EXPLAIN-based cost guardrails misleading on freshly loaded data.
+        conn.execute(text("ANALYZE sample.orders"))
 
 
 def main() -> None:
