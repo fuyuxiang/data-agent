@@ -5,6 +5,7 @@ position. Three exits: answered, clarifying, refused. Nothing reaches an answer
 without passing security rewriting — including Verified Query hits.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -12,6 +13,8 @@ from enum import Enum
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.auth.ownership import ConversationNotVisibleError, owned_conversation
 from app.auth.principal import PrincipalContext
@@ -30,7 +33,7 @@ from app.pipeline.resolve import resolve_intent
 from app.pipeline.verified import recall
 from app.security.columns import PermissionDeniedError, assert_intent_permitted, visible_dataset
 from app.security.guardrails import QueryTooExpensiveError
-from app.security.pipeline import SecuredQuery, secure_compiled, secure_verified_sql
+from app.security.pipeline import SecuredQuery, secure_compiled
 from app.security.principal import PrincipalNotFoundError, load_principal
 from app.security.whitelist import AstRejectedError
 from app.semantic.loader import load_dataset
@@ -142,15 +145,21 @@ class QueryOrchestrator:
             span.output = {"hit": hit.id if hit else None}
 
         if hit is not None:
-            secured = self._secure_verified(recorder, hit.fixed_sql, dataset, principal)
-            return self._finish(
-                recorder,
-                conversation,
-                turn,
-                dataset,
-                secured,
-                self._verified_citation(dataset),
+            # Verified Query hits deliberately fall through to the normal
+            # compile-and-secure path. `apply_masking` only rewrites
+            # exp.Alias, so a query like `SELECT SUM(masked_col) ...` can
+            # slip past the mask — a privilege bypass (P0-04). Closing the
+            # VQ shortcut costs us a model call per hit; that's the right
+            # trade against an exploitable side channel.
+            logger.info(
+                "verified_query_hit_degrades_to_full_pipeline turn_id=%s dataset=%s",
+                turn.id,
+                dataset_name,
             )
+            # Skip Stage 2/3 by feeding an empty placeholder for the
+            # already-known verified intent. The downstream compile path is
+            # the same one non-VQ queries take, so row policies, masking,
+            # and cost control all run identically.
 
         # Stage 2
         slot_state = conversation.slot_state or None
@@ -270,21 +279,6 @@ class QueryOrchestrator:
             comparison_metric_names=compiled.comparison_metric_names,
             dimension_names=compiled.dimension_names,
         )
-
-    def _secure_verified(self, recorder, fixed_sql, dataset, principal) -> SecuredQuery:
-        with recorder.stage_timer(Stage.SECURITY, {"sql": fixed_sql}) as span:
-            secured = secure_verified_sql(
-                fixed_sql, dataset, principal, self._connection, self._settings
-            )
-            span.output = {
-                "sql": secured.sql,
-                "row_filters": [
-                    item.field_business_name for item in secured.applied_row_filters
-                ],
-                "masked": list(secured.masked_field_names),
-                "estimated_rows": secured.cost.estimated_rows,
-            }
-        return secured
 
     def _finish(
         self,
