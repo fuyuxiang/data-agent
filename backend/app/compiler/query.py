@@ -67,6 +67,7 @@ class CompiledQuery:
     dimension_names: tuple[str, ...]
     citation: Citation
     comparison_metric_names: tuple[str, ...] = ()
+    sql_compact: str = ""
 
 
 def _table(dataset: DatasetDef) -> exp.Table:
@@ -225,6 +226,7 @@ def compile_intent(dataset: DatasetDef, intent: QueryIntent) -> CompiledQuery:
     return CompiledQuery(
         ast=tree,
         sql=tree.sql(dialect="postgres", pretty=True),
+        sql_compact=tree.sql(dialect="postgres"),
         dataset_name=dataset.name,
         physical_table=dataset.physical_table,
         metric_names=tuple(item.name for item in metrics),
