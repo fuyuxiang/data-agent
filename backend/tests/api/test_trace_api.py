@@ -171,3 +171,33 @@ def test_replay_of_a_turn_without_snapshot_is_409(client, stub):
         f"/api/trace/turns/{turn_id}/replay", headers={"X-Username": "admin"}
     )
     assert response.status_code == 409
+
+
+# --- Authentication Tests (S8 Phase 0) ---
+
+
+def test_get_trace_without_identity_is_401(client):
+    """GET /api/trace/turns/{id} requires X-Username header."""
+    turn_id = _ask(client)["turn_id"]
+
+    response = client.get(f"/api/trace/turns/{turn_id}")
+    assert response.status_code == 401
+
+
+def test_replay_without_identity_is_401(client):
+    """POST /api/trace/turns/{id}/replay requires X-Username header."""
+    turn_id = _ask(client)["turn_id"]
+
+    response = client.post(f"/api/trace/turns/{turn_id}/replay")
+    assert response.status_code == 401
+
+
+def test_replay_of_other_users_turn_is_404(client):
+    """A user cannot replay another user's turn."""
+    turn_id = _ask(client, username="admin")["turn_id"]
+
+    response = client.post(
+        f"/api/trace/turns/{turn_id}/replay",
+        headers={"X-Username": "analyst"},
+    )
+    assert response.status_code == 404

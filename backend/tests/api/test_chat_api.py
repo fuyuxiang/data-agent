@@ -230,3 +230,46 @@ def test_unknown_feedback_category_is_rejected(client):
         headers={"X-Username": "admin"},
     )
     assert response.status_code == 422
+
+
+# --- Authentication Tests (S8 Phase 0) ---
+
+
+def test_list_conversations_without_identity_is_401(client):
+    """GET /api/chat/conversations requires X-Username header."""
+    response = client.get("/api/chat/conversations")
+    assert response.status_code == 401
+
+
+def test_list_turns_without_identity_is_401(client):
+    """GET /api/chat/conversations/{id}/turns requires X-Username header."""
+    # Create a conversation first to get a valid ID
+    conv_id = _ask(client).json()["conversation_id"]
+
+    response = client.get(f"/api/chat/conversations/{conv_id}/turns")
+    assert response.status_code == 401
+
+
+def test_feedback_without_identity_is_401(client):
+    """POST /api/chat/turns/{id}/feedback requires X-Username header."""
+    turn_id = _ask(client).json()["turn_id"]
+
+    response = client.post(
+        f"/api/chat/turns/{turn_id}/feedback",
+        json={"is_positive": True},
+    )
+    assert response.status_code == 401
+
+
+def test_feedback_for_other_users_turn_is_404(client):
+    """A user cannot give feedback on another user's turn."""
+    # Admin creates a turn
+    turn_id = _ask(client, username="admin").json()["turn_id"]
+
+    # Analyst tries to give feedback on admin's turn
+    response = client.post(
+        f"/api/chat/turns/{turn_id}/feedback",
+        json={"is_positive": True},
+        headers={"X-Username": "analyst"},
+    )
+    assert response.status_code == 404
