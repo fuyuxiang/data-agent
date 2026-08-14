@@ -70,17 +70,20 @@ class TestIntentPayloadValidation:
             IntentPayload(**payload_dict)
 
     def test_nested_model_validation(self):
-        """Nested models (_FilterPayload, _TimePayload) validate correctly."""
+        """Nested models (_FilterPayload, _TimeExpressionPayload) validate correctly."""
         payload_dict = {
             "kind": "aggregate",
             "metrics": ["销售额"],
             "filters": [
                 {"field": "region", "operator": "in", "spoken_values": ["华东", "华南"]}
             ],
-            "time": {
-                "start": "2026-01-01",
-                "end": "2026-01-31",
-                "grain": "month",
+            "time_expression": {
+                "kind": "relative",
+                "unit": "month",
+                "offset": 0,
+                "to_date": False,
+                "start_date": None,
+                "end_date": None,
                 "expression": "本月",
             },
             "confidence": {"overall": 0.9},
@@ -88,7 +91,7 @@ class TestIntentPayloadValidation:
         payload = IntentPayload(**payload_dict)
         assert len(payload.filters) == 1
         assert payload.filters[0].field_name == "region"
-        assert payload.time.expression == "本月"
+        assert payload.time_expression.expression == "本月"
 
 
 class TestOpenAiStructuredOutputsClient:
