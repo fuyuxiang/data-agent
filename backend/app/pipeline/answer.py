@@ -11,6 +11,7 @@ S3 P1-10: numeric checks use numbers.Number so that PostgreSQL NUMERIC values
 import numbers
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from app.compiler.query import Citation
 from app.execution.runner import QueryResult
@@ -130,7 +131,11 @@ def _comparison_sentence(
     if baseline == 0:
         return f"{label}基期为 0，无法计算变化率"
 
-    change = (current - baseline) / abs(baseline) * 100
+    # Convert to Decimal for safe arithmetic with mixed types (Decimal + float/int)
+    current_d = Decimal(str(current)) if not isinstance(current, Decimal) else current
+    baseline_d = Decimal(str(baseline)) if not isinstance(baseline, Decimal) else baseline
+
+    change = (current_d - baseline_d) / abs(baseline_d) * Decimal(100)
     direction = "+" if change >= 0 else ""
     return f"{label} {direction}{change:.1f}%"
 

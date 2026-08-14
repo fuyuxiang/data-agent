@@ -61,23 +61,32 @@ def _intent_payload(expected: IntentExpectation | None, status: str = "ANSWERED"
             "metrics": [],
             "dimensions": [],
             "filters": [],
-            "time": None,
+            "time_expression": None,
             "comparison": "none",
             "confidence": {"overall": 0.1},
             "assumptions": [],
         }
     else:
+        # Determine time_expression based on expected.time
+        if expected.time is None:
+            time_expression = None
+        else:
+            # Convert absolute dates to absolute time_expression
+            time_expression = {
+                "kind": "absolute",
+                "unit": expected.time.grain.value,
+                "offset": 0,
+                "to_date": False,
+                "start_date": expected.time.start.isoformat(),
+                "end_date": expected.time.end.isoformat(),
+                "expression": expected.time.expression,
+            }
         payload = {
             "kind": "ranking" if expected.top_n is not None else "aggregate",
             "metrics": [expected.metric] if expected.metric else [],
             "dimensions": list(expected.dimension),
             "filters": list(expected.filters),
-            "time": None if expected.time is None else {
-                "start": expected.time.start.isoformat(),
-                "end": expected.time.end.isoformat(),
-                "grain": expected.time.grain.value,
-                "expression": expected.time.expression,
-            },
+            "time_expression": time_expression,
             "comparison": expected.comparison.value if expected.comparison else "none",
             "confidence": _confidence_payload(status, clarify_kind),
             "assumptions": [],
