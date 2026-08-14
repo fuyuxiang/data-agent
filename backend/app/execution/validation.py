@@ -11,12 +11,13 @@ financial data on magnitude comparisons.
 
 import numbers
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 
 from app.execution.runner import QueryResult
 
 # A change beyond this multiple against the baseline is treated as suspicious.
-_MAGNITUDE_FACTOR = 10.0
+_MAGNITUDE_FACTOR = Decimal("10")
 
 
 class ValidationCode(str, Enum):
