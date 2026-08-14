@@ -36,10 +36,13 @@ def _payload(**overrides) -> str:
         "metrics": ["sales_revenue"],
         "dimensions": [],
         "filters": [],
-        "time": {
-            "start": "2026-08-01",
-            "end": "2026-08-31",
-            "grain": "month",
+        "time_expression": {
+            "kind": "relative",
+            "unit": "month",
+            "offset": 0,
+            "to_date": False,
+            "start_date": None,
+            "end_date": None,
             "expression": "本月",
         },
         "comparison": "none",
@@ -55,7 +58,7 @@ def test_recognize_returns_a_query_intent(orders):
 
     assert intent.kind == IntentKind.AGGREGATE
     assert intent.metrics == ["sales_revenue"]
-    assert intent.time.expression == "本月"
+    assert "本月" in intent.time.expression
     assert intent.raw_question == "本月销售额"
     assert completion.prompt_tokens == 100
 
@@ -131,7 +134,7 @@ def test_filters_keep_spoken_values_unresolved(orders):
 
 def test_time_absent_is_allowed(orders):
     payload = json.loads(_payload())
-    payload["time"] = None
+    payload["time_expression"] = None
     intent, _ = recognize(StubClient(json.dumps(payload)), orders, "销售额")
 
     # Missing time triggers clarification later, not a recognition failure.
