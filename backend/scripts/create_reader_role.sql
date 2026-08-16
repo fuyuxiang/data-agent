@@ -4,11 +4,14 @@
 -- layer one; this role is layer two. Even if the AST is bypassed, the
 -- warehouse role physically cannot INSERT, UPDATE, DELETE, or DDL.
 --
--- Apply once per environment:
+-- Apply once per environment (requires admin credentials with CREATEROLE):
 --   psql "$SAMPLE_DATABASE_URL_ADMIN" -f scripts/create_reader_role.sql
 --
 -- Then point the runtime at the new role:
 --   SAMPLE_DATABASE_URL=postgresql+psycopg2://data_agent_reader:***@host/db
+--
+-- See docs/runbooks/db_minimal_permissions.md for the full deployment
+-- checklist and verification procedure.
 
 DO $$
 BEGIN

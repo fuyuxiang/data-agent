@@ -33,10 +33,12 @@ from app.core.db import sample_engine
 # 08xxx: connection-related
 # 53xxx: insufficient resources
 # 40001: serialization_failure
+# 25006: read_only_sql_transaction (connection-level transaction_read_only)
 _TIMEOUT_SQLSTATES = ("57014",)
 _CONNECTION_SQLSTATES_PREFIX = ("08",)
 _RESOURCE_SQLSTATES_PREFIX = ("53",)
 _SERIALIZATION_SQLSTATES = ("40001",)
+_READ_ONLY_SQLSTATE = "25006"
 
 
 def _pg_sqlstate(error: Exception) -> str | None:
@@ -75,6 +77,10 @@ def _classify(error: Exception) -> str:
         return "resource"
     if sqlstate in _SERIALIZATION_SQLSTATES:
         return "serialization"
+    if sqlstate == _READ_ONLY_SQLSTATE:
+        # P0-06 layer 2: connection-level transaction_read_only is on.
+        # Retry will not help — the pool sends another read-only connection.
+        return "read_only"
     # Other SQLSTATE codes (42P01 undefined_table, 42703 undefined_column,
     # etc.) are user/compiler errors — not retryable.
     return "sql"
@@ -82,6 +88,9 @@ def _classify(error: Exception) -> str:
 
 def _is_retryable(kind: str) -> bool:
     """True if the error kind is worth retrying."""
+    # `read_only` is not retryable: the pool's connection options
+    # force transaction_read_only on every new connection, so a retry
+    # would hit the same wall.
     return kind in ("timeout", "connection", "resource", "serialization")
 
 
