@@ -1,134 +1,126 @@
 <div align="center">
 
-# 企业级数据智能体
+# 企业级数据智能体 / Data Agent
 
-### Governed natural-language analytics with deterministic planning, secure execution, and verifiable answers
+### Governed natural-language analytics with deterministic planning, secure execution, and verifiable answers.
 
-面向企业结构化数据的数据智能体实现：将自然语言问题转换为受治理、可审计、可重放的数据查询与分析结果。
+**把"自然语言问数"从 Demo 变成生产系统。** 企业级数据智能体：在业务语义、指标口径、用户权限的强约束下，把业务人员的问题转成可审计、可重放、可评测的数据答案。
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![SQLGlot](https://img.shields.io/badge/SQL%20AST-SQLGlot-6366F1)](https://sqlglot.com/)
+[![License](https://img.shields.io/badge/License-MIT-22c55e)](./LICENSE)
+[![Tests](https://img.shields.io/badge/Backend_Tests-908%2b-22c55e?logo=pytest&logoColor=white)](#测试与评测)
+[![Frontend](https://img.shields.io/badge/Frontend-12%20specs-22c55e?logo=vitest&logoColor=white)](#测试与评测)
 
-[核心特性](#核心特性) · [架构](#系统架构) · [查询能力](#查询能力) · [安全](#安全模型) · [API](#api-v2) · [快速开始](#快速开始) · [测试](#测试)
+[核心特性](#核心特性) · [vs 同类方案](#vs-同类方案) · [架构](#系统架构) · [快速开始](#快速开始) · [API](#api-v2) · [测试](#测试与评测) · [License](#license)
 
 </div>
 
-## 项目简介
+---
 
-本项目实现了一套面向企业数据分析的数据智能体。业务用户使用自然语言提出问题，系统在业务语义、指标口径和用户权限的约束下完成意图识别、时间解析、查询规划、安全编译、只读执行、结果校验和答案生成。
+## 为什么选 Data Agent？
 
-与直接让大模型生成 SQL 的方案不同，本项目将 LLM 限制在语言理解和结构化意图提取阶段。指标计算、时间窗口、表间关系、访问控制和物理 SQL 均由确定性组件处理。相同语义版本和相同规范计划会产生稳定的查询结构，便于测试、缓存、审计和回放。
+当业务人员对数据库说"本月华东销售额环比如何"——
 
-一次查询不仅返回数字，还返回指标版本、时间口径、用户过滤、权限附加条件、数据更新时间、警告、下钻入口和完整阶段 Trace。
+- **LangChain SQL Agent / Vanna / Chat2DB** 路线：让 LLM 直接生成 SQL。Demo 上跑得通，上了规模就出 P0：幻觉 SQL 跑坏数据、列权限被绕过、口径每次都不一样、没有审计口径。
+- **WrenAI** 路线：MDL 语义层 + 多轮对话。偏 BI 自助分析，企业级行级权限与可重放能力偏弱。
+- **Data Agent（本项目）路线**：把 LLM 锁在语言理解层，**指标、维度、时间、表关联、权限、SQL 全部走代码**。同样的语义版本 + 同样的权限上下文，产出稳定、可比较、可重放、可追溯。
+
+### 三段式价值 · Generate · Govern · Verify
+
+| 阶段 | 含义 | 你拿到什么 |
+|---|---|---|
+| **Generate** | 自然语言 → 结构化意图 | `IntentV2` JSON，每个槽位带置信度；模型拿不到 SQL 权限 |
+| **Govern** | 意图 → 规范计划 → 鉴权计划 → 受限 SQL | Canonical Plan 携带 lineage；Secured Plan 绑定 Principal/Policy；AST Allowlist + EXPLAIN 预算 |
+| **Verify** | 执行 → 答案 + 引证 + Trace | 逐阶段 Trace 可重放；Golden Set 分层评测；答案自带版本、时间口径、警告、下钻入口 |
+
+---
+
+## vs 同类方案
+
+| 维度 | LangChain SQL Agent | Vanna | Chat2DB | WrenAI | **Data Agent** |
+|---|---|---|---|---|---|
+| 意图解析 | LLM 直出 | RAG + LLM | LLM 直出 | MDL + LLM | **Structured Outputs + IntentV2 + 置信度** |
+| SQL 生成 | LLM 自由生成 | LLM 自由生成 | LLM 自由生成 | 模板驱动 | **SQLGlot 确定性编译，禁止 LLM 生成物理 SQL** |
+| 安全模型 | 应用层基本校验 | 列级脱敏 | 应用层 | 行/列级 | **RBAC+ABAC+行级+列级+AST Allowlist+EXPLAIN 预算+Fail-closed** |
+| 语义层 | 无 | 表级 RAG | 弱 | MDL（强） | **Metric DAG + Join Graph + Revision + Trusted Asset** |
+| 时间口径 | 不处理 | 不处理 | 不处理 | 弱 | **本期/上期/同比/环比/财务年/月未/闰年/DST/IANA** |
+| 可观测 | 链路日志 | 无 | 无 | Stage Trace | **逐阶段 Trace + Plan/SQL Hash + Replay + 三层可见性分级** |
+| 评测体系 | 无 | 无 | 无 | 简单 | **Golden/Holdout/Security/Multiturn/Robustness/Temporal 六类分层评测** |
+| 部署形态 | 单体 | 单体 | 单体 | 云优先 | **模块化单体 + 异步评测 Worker，独立只读 DB 角色** |
+
+> **一句话区分**：同类项目把 LLM 当 SQL 工程师；本项目把 LLM 当业务翻译，SQL 工程师由确定性编译器担任。
+
+---
+
+## 适合谁用 / 不适合谁用
+
+**适合**
+
+- 企业内部数据团队，需要把"问数"从分析师 1v1 服务变成业务自助
+- 数据安全/合规要求严格（行级权限、列级脱敏、审计、只读副本、最小权限账号）
+- 已经或即将建立指标体系（需要版本管理、口径回放、上下游 lineage）
+- 期望把 LLM 限制在语言理解层，不让模型触碰生产数据库
+
+**不适合**
+
+- 只是想跑个 PoC 看 SQL 生成效果（Vanna、LangChain SQL Agent 更轻）
+- 没有 PostgreSQL 与 OIDC 基础设施
+- 数据源是非结构化（图片/文档/音视频），本项目只服务结构化数据
+
+---
 
 ## 核心特性
 
-### 受约束的自然语言理解
+### 1. 受治理的自然语言理解
 
-- 使用 Structured Outputs 将模型输出约束为严格的 `IntentV2`；
-- 分别识别指标、维度、过滤、时间、比较、排序、Top N 和查询类型；
-- 为整体意图及各个槽位记录独立置信度；
-- 模型返回值必须通过 Pydantic Schema、语义引用和类型校验；
-- Prompt 仅包含当前用户可见的数据域、指标、字段和枚举；
-- 拒绝模型输出中的 SQL 片段、未知字段和越权语义引用；
-- 支持多轮槽位继承、结构化 Plan Patch 和会话状态版本控制；
-- 对低置信度、实体歧义、口径冲突和时间缺失返回结构化澄清。
+- Structured Outputs 把模型输出强约束到 `IntentV2`，**模型拿不到 SQL 生成权**
+- 单独识别指标、维度、过滤、时间、比较、排序、Top N 与查询类型，每槽位独立置信度
+- Prompt 仅注入当前用户可见的数据域、指标、字段、枚举；拒绝 SQL 片段与越权引用
+- 多轮槽位继承 + 结构化 Plan Patch + 会话状态版本控制
 
-### 确定性时间语义
+### 2. 确定性时间语义
 
-- 解析本期、上期、近 N 天、月初至今、季度、年度等相对时间表达式；
-- 支持同比、环比、固定基期和自定义比较窗口；
-- 正确处理月末、闰年、跨年、夏令时和 IANA 时区；
-- 支持自然年、财务年和自定义财务日历；
-- 时间范围绑定指标自身的 time basis，不默认套用数据集中的任意日期字段；
-- 多指标时间口径不一致时分别规划或进入澄清流程；
-- 通过可注入 `Clock` 保证测试、回放和历史查询结果稳定。
+- 解析本期 / 上期 / 近 N 天 / 月初至今 / 季度 / 年度等相对表达式
+- 同比、环比、固定基期、自定义比较窗口
+- 正确处理闰年、月末、跨年、DST、IANA 时区
+- 支持自然年、财务年、自定义财务日历
+- 时间范围绑定指标自身 `time_basis`，不默认套用数据集任意日期字段
 
-### 企业语义层
+### 3. 企业语义层 + Trusted Asset 复用
 
-- 统一管理数据域、数据集、实体、字段、指标、枚举、词表和关系；
-- 支持原子指标、派生指标、比率指标和半可加指标；
-- 指标携带版本、负责人、描述、单位、精度、格式、可加性和时间口径；
-- Metric DAG 解析复合指标依赖、单位运算和字段 lineage；
-- Join Graph 管理关联键、基数、允许方向和 fanout 策略；
-- 枚举支持业务名称、物理值、别名、多语言表达和有效期；
-- Semantic Lint 检查字段引用、循环依赖、聚合合法性、时间字段、Join 基数和枚举冲突；
-- Semantic Revision 支持草稿、校验、审批、发布、Diff、回滚和历史版本复现。
+- 数据域、字段、指标（原子 / 派生 / 比率 / 半可加）、枚举、词表、关系统一管理
+- Metric DAG 解析复合指标依赖与单位运算；Join Graph 管理关联键、基数、fanout
+- Semantic Lint 检查字段引用、循环依赖、聚合合法性、Join 基数、枚举冲突
+- Semantic Revision 支持草稿 / 校验 / 审批 / 发布 / Diff / 回滚
+- Trusted Asset 版本化复用，命中后重新执行时间解析、权限编译、方言编译与安全检查；语义升级、策略变化、数据漂移、资产过期自动触发失效与重验
 
-### 规范查询计划
+### 4. 纵深安全防御
 
-- `Canonical Query Plan` 表达与用户权限无关的规范语义查询；
-- Plan 固定指标版本、维度、时间窗口、类型化过滤、排序、限制和关联路径；
-- 所有字段引用携带 lineage，供编译、权限、引证和评测共同使用；
-- Plan 采用稳定序列化和 Canonical Signature，可用于比较、缓存和去重；
-- `Secured Execution Plan` 在 Canonical Plan 上绑定用户、租户、策略版本和执行预算；
-- 语义计划与权限计划分离，防止跨用户复用已施加权限的结果；
-- 查询、Plan、SQL、结果和答案均支持结构化 Diff 与重放。
+- OIDC/OAuth 2.0、企业 SSO、JWKS 轮转、不可变 `PrincipalContext`
+- RBAC + ABAC + 租户隔离 + 对象 / 行 / 列级策略；列权限遵循 `DENY > MASK > ALLOW`
+- SQL AST 强制 SELECT-only、表 / 列 / 函数 Allowlist、强制 LIMIT、EXPLAIN 预算
+- 独立只读数据库账户 + 连接级 read-only + statement/lock timeout
+- 无法解析权限、计划超预算、结果异常、证据不完整时 **fail closed**
 
-### 确定性 SQL 编译
+### 5. 可验证答案 + 完整 Trace
 
-- 根据语义模型和 Canonical Plan 生成 SQL，不采用模型生成的物理查询；
-- 支持聚合、明细、趋势、排名、Top N、多指标和多维分组；
-- 支持同比、环比、复合指标、比率重算和 fixed predicate；
-- 根据 Join Graph 生成受治理的多表关联，检查一对多 fanout 风险；
-- 使用 SQLGlot 构造和检查 AST，业务计划与数据源方言相互分离；
-- 参数值与 SQL 结构分离，避免字符串拼接和注入；
-- 同一 Plan、语义版本和方言生成稳定、可比较的 SQL AST。
+- 返回自然语言结论、结果表、图表数据、下钻建议；每个答案关联 conversation / turn / run / trace
+- 引证指标名与版本、时间范围、`time_basis`、业务过滤；区分"用户过滤"与"权限附加"
+- Decimal 全链路保持精度，不使用浮点替代财务数值
+- Trace 包含阶段输入输出、模型、Token、耗时、Plan hash、SQL hash；支持原始意图 / 版本 / SQL 重放与结果 Diff
 
-### 安全执行
+### 6. 端到端可观测 + 分层评测
 
-- OIDC/OAuth 2.0、企业 SSO、JWKS 轮转和不可变 `PrincipalContext`；
-- RBAC + ABAC、租户隔离、对象级鉴权、行级策略和列级策略；
-- 列权限遵循 `DENY > MASK > ALLOW`，多角色组合不能绕过显式拒绝；
-- 基于字段 lineage 检查 measure、dimension、filter、sort 和 join key；
-- SQL AST 强制 SELECT-only、表/列/函数 Allowlist 和结果行数上限；
-- 执行前通过 EXPLAIN 估算扫描量并应用成本阈值；
-- 使用独立只读数据库账户、连接级 read-only、statement timeout 和 lock timeout；
-- 无法解析权限、计划超预算、结果异常或证据不完整时 fail closed。
+- 逐阶段记录 verified recall / intent / resolve / compile / security / execute / answer
+- 普通用户、数据所有者、Trace 审计员具有不同的 Trace 与物理 SQL 可见范围
+- 支持 Golden / Holdout / Security / Multiturn / Robustness / Temporal 六类数据集
+- 语义 / 策略 / 编译器变更自动触发回归评测；记录准确率、澄清率、拒答率、延迟、Token、扫描量、执行成本
 
-### 可验证答案
-
-- 返回自然语言结论、结构化结果表、图表数据和下钻建议；
-- 引证指标名称与版本、时间范围、time basis 和业务过滤条件；
-- 区分用户指定过滤与权限自动附加过滤；
-- 展示数据更新时间、结果截断、精度处理和异常警告；
-- Decimal 全链路保持精度，不使用浮点数替代财务数值；
-- 校验结果列、行数、排序、空值、当前期和比较期数据；
-- 每个答案关联 conversation、turn、run、request 和 trace 标识。
-
-### Trusted Assets
-
-- 将审核通过的高频查询保存为版本化 Trusted Asset；
-- 保存 Canonical Plan 或逻辑语义查询，不固化不可治理的永久物理 SQL；
-- 支持触发问题、参数 Schema、适用数据域、语义版本、审核人和有效期；
-- 通过精确问题、Canonical Signature 和语义检索进行多路召回；
-- 命中后重新执行时间解析、权限编译、方言编译和安全检查；
-- 语义升级、策略变化、数据漂移和资产过期自动触发失效与重验；
-- 运行时资产与 Holdout 评测集隔离，防止测试数据泄漏到上下文。
-
-### 可观测性与评测
-
-- 逐阶段记录 verified recall、intent、resolve、compile、security、execute 和 answer；
-- Trace 包含阶段输入输出、模型、Token、耗时、Plan hash、SQL hash 和错误分类；
-- 普通用户、数据所有者和 Trace 审计员具有不同的 Trace 与物理 SQL 可见范围；
-- 支持原始意图重放、版本重放、SQL 重编译和结果 Diff；
-- 分层评测 Intent、Resolve、Plan、SQL、Result 和 Answer；
-- 支持 Golden、Holdout、Security、Multiturn、Robustness 和 Temporal 数据集；
-- 模型、Prompt、语义、策略和编译器变更自动触发回归评测；
-- 记录准确率、澄清率、拒答率、延迟、Token、扫描量和执行成本。
-
-### Web 工作台与管理端
-
-- 对话式问数、连续追问、结构化澄清、条件编辑和重新运行；
-- 答案卡片、结果表、引证、假设、警告、反馈和下钻入口；
-- Query Run 实时进度、SSE 事件、取消、失败重试和状态恢复；
-- 会话列表、历史轮次、分享、导出和用户级数据隔离；
-- 语义数据集、字段、指标、关系、版本、Lint、审批和发布管理；
-- Trace 时间线、阶段详情、SQL、成本、重放和版本对比；
-- Eval Run、回归报告、失败样本和质量趋势管理。
+---
 
 ## 系统架构
 
@@ -136,21 +128,81 @@
 
 ### 查询执行流程
 
-1. 验证用户身份，构造包含 tenant、role、group 和 attribute 的 `PrincipalContext`。
-2. 根据用户权限筛选可见的数据域、指标、字段、枚举和 Trusted Asset。
-3. Domain Router 选择对应的专业数据域，LLM 输出受约束的 `IntentV2`。
-4. Time Resolver、实体解析器和语义解析器补全确定性值；存在歧义时返回澄清请求。
-5. 构建 Canonical Query Plan，固定语义版本、指标依赖、时间口径和 Join 路径。
-6. Policy Compiler 根据用户、租户和策略版本生成 Secured Execution Plan。
-7. 编译数据源方言 SQL，依次执行 AST、Allowlist、LIMIT、EXPLAIN 和预算检查。
-8. 通过只读连接执行查询，校验结果的结构、精度、完整性和比较周期。
-9. 生成答案、引证、警告和下钻建议，并持久化完整 Trace 与反馈上下文。
+1. 验证用户身份，构造包含 `tenant` / `role` / `group` / `attribute` 的 `PrincipalContext`
+2. 根据用户权限筛选可见的数据域、指标、字段、枚举与 Trusted Asset
+3. Domain Router 选择对应专业数据域，LLM 输出受约束的 `IntentV2`
+4. Time Resolver、实体解析器、语义解析器补全确定性值；歧义时返回澄清请求
+5. 构建 Canonical Query Plan，固定语义版本、指标依赖、时间口径、Join 路径
+6. Policy Compiler 根据用户、租户、策略版本生成 Secured Execution Plan
+7. 编译数据源方言 SQL，依次执行 AST / Allowlist / LIMIT / EXPLAIN / 预算检查
+8. 通过只读连接执行查询，校验结果结构、精度、完整性与比较周期
+9. 生成答案、引证、警告、下钻建议，并持久化完整 Trace 与反馈上下文
+
+---
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.12+
+- Node.js LTS + npm
+- PostgreSQL 14+
+- OpenAI 兼容模型服务（支持 Structured Outputs）
+
+### 30 秒跑通 Sample（推荐新用户体验）
+
+```bash
+# 1. 克隆并准备数据库
+git clone <repo-url> data-agent && cd data-agent
+createdb data_agent_demo
+python backend/scripts/init_db.py           # 创建元数据表 + 装载示例语义
+psql -d data_agent_demo -f backend/scripts/sample_data.sql   # 装载示例业务数据
+
+# 2. 启动后端（dev 模式）
+cd backend
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                        # 默认连接本地 postgres
+uvicorn app.main:app --reload --port 8000
+
+# 3. 启动前端
+cd ../frontend && npm ci && npm run dev
+```
+
+打开 <http://localhost:5173> 进入工作台，问一句"本月华东销售额按省份排名"即可看到端到端结果。
+
+### 完整生产部署
+
+```bash
+# 1. 创建两个数据库账号
+psql -U postgres -c "CREATE ROLE data_agent_writer LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB;"
+psql -U postgres -c "CREATE ROLE data_agent_reader LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB;"
+psql -d data_agent -f backend/scripts/create_reader_role.sql
+
+# 2. 后端（生产配置）
+cd backend
+pip install -r requirements.txt
+ENVIRONMENT=production AUTH_MODE=oidc \
+  META_DATABASE_URL=... SAMPLE_DATABASE_URL=... \
+  OIDC_ISSUER=... OIDC_AUDIENCE=... OIDC_JWKS_URL=... \
+  LLM_BASE_URL=... LLM_API_KEY=... LLM_MODEL=gpt-4o-mini \
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+访问地址：
+
+- Web 工作台：<http://localhost:5173>
+- OpenAPI 文档：<http://localhost:8000/docs>
+- Liveness：<http://localhost:8000/livez>
+- Readiness：<http://localhost:8000/readyz>
+
+> 生产环境必须使用 OIDC Bearer Token。`AUTH_MODE=dev` 仅供本地开发。
+
+---
 
 ## 核心数据契约
 
 ### IntentV2
-
-`IntentV2` 是语言理解层与确定性系统之间的边界。模型只能输出该结构，不能输出 SQL 或授权决策。
 
 ```json
 {
@@ -158,30 +210,16 @@
   "metrics": ["sales_revenue"],
   "dimensions": ["province"],
   "filters": [
-    {
-      "field": "region_code",
-      "operator": "in",
-      "spoken_values": ["华东"]
-    }
+    {"field": "region_code", "operator": "in", "spoken_values": ["华东"]}
   ],
   "time_expression": {
-    "kind": "relative",
-    "unit": "month",
-    "offset": 0,
-    "expression": "本月"
+    "kind": "relative", "unit": "month", "offset": 0, "expression": "本月"
   },
   "comparison": "mom",
-  "sort": {
-    "by": "sales_revenue",
-    "descending": true,
-    "limit": 10
-  },
+  "sort": {"by": "sales_revenue", "descending": true, "limit": 10},
   "confidence": {
-    "overall": 0.96,
-    "metric": 0.99,
-    "time": 0.94,
-    "dimension": 0.98,
-    "filter": 0.97
+    "overall": 0.96, "metric": 0.99, "time": 0.94,
+    "dimension": 0.98, "filter": 0.97
   }
 }
 ```
@@ -192,18 +230,14 @@
 {
   "dataset": "orders",
   "semantic_revision": "rev_20260813_01",
-  "metrics": [
-    {"name": "sales_revenue", "version": 3}
-  ],
+  "metrics": [{"name": "sales_revenue", "version": 3}],
   "dimensions": ["province"],
   "time_windows": {
     "current": ["2026-08-01", "2026-08-31"],
     "comparison": ["2026-07-01", "2026-07-31"],
     "time_field": "completed_date"
   },
-  "predicates": [
-    {"field": "region_code", "operator": "in", "values": ["EC"]}
-  ],
+  "predicates": [{"field": "region_code", "operator": "in", "values": ["EC"]}],
   "sort": {"by": "sales_revenue", "direction": "desc"},
   "limit": 10
 }
@@ -217,54 +251,63 @@
   "principal_id": "user_123",
   "tenant_id": "tenant_a",
   "policy_revision": "policy_42",
-  "row_filters": [
-    {"field": "region_code", "operator": "in", "values": ["EC"]}
-  ],
-  "column_decisions": {
-    "customer_name": "mask",
-    "cost": "deny"
-  },
+  "row_filters": [{"field": "region_code", "operator": "in", "values": ["EC"]}],
+  "column_decisions": {"customer_name": "mask", "cost": "deny"},
   "dialect": "postgres",
   "max_rows": 1000,
   "timeout_seconds": 30
 }
 ```
 
+---
+
 ## 查询能力
 
-| 查询类型 | 示例 | 计划与编译行为 |
+| 类型 | 示例 | 编译行为 |
 |---|---|---|
-| 单指标聚合 | 本月销售额 | 指标聚合 + 指标 time basis + 固定口径 |
-| 多指标 | 销售额、订单量和毛利率 | 统一依赖解析，比率指标重新计算 |
-| 多维分组 | 按大区和渠道看销售额 | 维度投影、分组和枚举业务值映射 |
-| 趋势 | 近 12 个月销售趋势 | 时间粒度展开、空周期处理和稳定排序 |
-| 排名 / Top N | 销售额最高的 10 个省份 | 指标排序、限制和并列处理 |
-| 同比 / 环比 | 本月销售额同比如何 | 当前期与基期独立窗口、结果对齐和变化率 |
-| 明细查询 | 华东未完成订单明细 | 可查询字段投影、强制 LIMIT 和列权限 |
-| 复合指标 | 毛利率按渠道对比 | Metric DAG 展开、单位检查和比率重算 |
-| 多表分析 | 客户分层与订单贡献 | Join Graph 选路、基数验证和 fanout 防护 |
-| 多轮追问 | 再按省份拆开，只看线上 | 继承上一轮 Plan，应用结构化 Patch |
+| 单指标聚合 | 本月销售额 | 指标聚合 + 指标 `time_basis` + 固定口径 |
+| 多指标 | 销售额、订单量、毛利率 | 统一依赖解析，比率指标重新计算 |
+| 多维分组 | 按大区、渠道看销售额 | 维度投影 + 分组 + 枚举业务值映射 |
+| 趋势 | 近 12 个月销售趋势 | 时间粒度展开 + 空周期处理 + 稳定排序 |
+| 排名 / Top N | 销售额最高的 10 个省份 | 指标排序 + 限制 + 并列处理 |
+| 同比 / 环比 | 本月销售额同比 | 当前期与基期独立窗口 + 结果对齐 + 变化率 |
+| 明细查询 | 华东未完成订单明细 | 可查询字段投影 + 强制 LIMIT + 列权限 |
+| 复合指标 | 毛利率按渠道对比 | Metric DAG 展开 + 单位检查 + 比率重算 |
+| 多表分析 | 客户分层与订单贡献 | Join Graph 选路 + 基数验证 + fanout 防护 |
+| 多轮追问 | 再按省份拆开，只看线上 | 继承上一轮 Plan + 应用结构化 Patch |
+
+---
 
 ## 安全模型
 
-安全检查不是 API 外层的单点校验，而是贯穿上下文构建、计划、SQL、执行和答案的纵深防御。
-
 | 层级 | 控制点 |
 |---|---|
-| Identity | OIDC Token、issuer/audience、JWKS、用户状态和 tenant |
-| Context | 不可见数据域、指标、字段和枚举不进入 Prompt 与检索候选 |
+| Identity | OIDC Token、issuer/audience、JWKS、用户状态、tenant |
+| Context | 不可见数据域、指标、字段、枚举不进入 Prompt 与检索候选 |
 | Semantic | 指标/维度/过滤/排序/Join 字段基于 lineage 授权 |
-| Plan | Principal、策略版本、行过滤、列决策和执行预算绑定 |
-| SQL AST | SELECT-only、表列函数 Allowlist、无副作用、强制 LIMIT |
-| Runtime | 独立只读账户、RLS、statement timeout、lock timeout 和资源配额 |
-| Result | 脱敏、截断、敏感字段检查和导出权限 |
-| Trace | public、user-private、sensitive、admin-only 分级可见与保留 |
+| Plan | Principal、策略版本、行过滤、列决策、执行预算绑定 |
+| SQL AST | SELECT-only、表/列/函数 Allowlist、无副作用、强制 LIMIT |
+| Runtime | 独立只读账户、RLS、statement/lock timeout、资源配额 |
+| Result | 脱敏、截断、敏感字段检查、导出权限 |
+| Trace | public / user-private / sensitive / admin-only 分级可见与保留 |
 
-生产环境启动时会校验弱 JWT 密钥、默认数据库凭证、开发认证模式、宽松 CORS、缺失 OIDC 配置和读写数据库角色未分离等问题。
+### 生产环境 Checklist
+
+启动时会校验下列项，任何一项未通过则拒绝启动：
+
+- [ ] JWT 密钥强度足够
+- [ ] 数据库凭证非默认值
+- [ ] `AUTH_MODE != dev`
+- [ ] CORS 白名单非通配
+- [ ] OIDC issuer/audience/JWKS 已配置
+- [ ] 元数据写入与业务查询使用独立 DB 账号
+- [ ] 业务数据库已启用只读视图或只读角色
+
+---
 
 ## API v2
 
-API v2 使用持久化 Query Run 表达一次完整数据任务，支持幂等创建、状态查询、SSE 进度、澄清、取消和结果恢复。
+API v2 用持久化 Query Run 表达一次完整数据任务，支持幂等创建、状态查询、SSE 进度、澄清、取消、结果恢复。
 
 ### 创建 Query Run
 
@@ -273,10 +316,7 @@ curl -X POST http://localhost:8000/api/v2/query-runs \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Idempotency-Key: demo-001" \
   -H "Content-Type: application/json" \
-  -d '{
-    "agent_id": "sales-intelligence",
-    "question": "本月华东销售额环比如何？"
-  }'
+  -d '{"agent_id": "sales-intelligence", "question": "本月华东销售额环比如何？"}'
 ```
 
 ```json
@@ -288,181 +328,113 @@ curl -X POST http://localhost:8000/api/v2/query-runs \
 }
 ```
 
-### 端点
+### 核心端点
 
 ```text
-POST /api/v2/query-runs
-GET  /api/v2/query-runs/{run_id}
-GET  /api/v2/query-runs/{run_id}/events
-POST /api/v2/query-runs/{run_id}/clarifications
-POST /api/v2/query-runs/{run_id}/cancel
-GET  /api/v2/conversations/{conversation_id}?include=turns,answers
+POST /api/v2/query-runs                          创建 Query Run
+GET  /api/v2/query-runs/{run_id}                 状态查询
+GET  /api/v2/query-runs/{run_id}/events          SSE 进度
+POST /api/v2/query-runs/{run_id}/clarifications  提交澄清
+POST /api/v2/query-runs/{run_id}/cancel          取消
+GET  /api/v2/conversations/{id}                  会话与轮次
 
-GET  /api/semantic/datasets
-GET  /api/semantic/datasets/{name}
-GET  /api/semantic/datasets/{name}/lint
-POST /api/semantic/datasets/{name}/publish
+GET  /api/semantic/datasets                      数据集列表
+GET  /api/semantic/datasets/{name}               数据集详情
+GET  /api/semantic/datasets/{name}/lint          语义体检
+POST /api/semantic/datasets/{name}/publish       发布语义版本
 
-GET  /api/trace/turns/{turn_id}
-POST /api/trace/turns/{turn_id}/replay
+GET  /api/trace/turns/{turn_id}                  查看 Trace
+POST /api/trace/turns/{turn_id}/replay           重放
 ```
 
-所有写请求支持幂等键；会话和 Query Run 使用 `state_version` 乐观锁；错误响应提供稳定的 `error_code`、安全错误文案和 `trace_id`。
+所有写请求支持幂等键；会话与 Query Run 使用 `state_version` 乐观锁；错误响应提供稳定 `error_code`、安全文案与 `trace_id`。
 
-## 快速开始
-
-### 环境要求
-
-- Python 3.12 或更高版本
-- Node.js LTS 与 npm
-- PostgreSQL 14 或更高版本
-- 支持 Structured Outputs 的 OpenAI 兼容模型服务
-
-### 1. 配置并启动后端
-
-```bash
-cd backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-
-cp .env.example .env
-# 编辑 .env，配置数据库和模型服务
-
-python -m scripts.init_db
-uvicorn app.main:app --reload
-```
-
-### 2. 启动前端
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-访问：
-
-- Web 工作台：<http://localhost:5173>
-- OpenAPI：<http://localhost:8000/docs>
-- Liveness：<http://localhost:8000/livez>
-- Readiness：<http://localhost:8000/readyz>
-
-### 3. 提交一个问题
-
-```bash
-curl -X POST http://localhost:8000/api/chat/ask \
-  -H 'Content-Type: application/json' \
-  -H 'X-Username: admin' \
-  -d '{
-    "question": "2026 年 8 月华东销售额按省份排名",
-    "dataset_name": "orders"
-  }'
-```
-
-`X-Username` 仅用于本地开发。生产环境使用 `AUTH_MODE=oidc` 和 Bearer Token。
+---
 
 ## 配置
 
-主要环境变量：
-
-| 变量 | 说明 | 默认值 |
+| 变量 | 说明 | 默认 |
 |---|---|---|
-| `ENVIRONMENT` | `development`、`test` 或 `production` | `development` |
-| `AUTH_MODE` | `dev` 或 `oidc` | `dev` |
-| `META_DATABASE_URL` | 元数据、语义、会话和 Trace 数据库 | 本地 PostgreSQL |
+| `ENVIRONMENT` | `development` / `test` / `production` | `development` |
+| `AUTH_MODE` | `dev` / `oidc` | `dev` |
+| `META_DATABASE_URL` | 元数据、语义、会话、Trace DB | 本地 PostgreSQL |
 | `SAMPLE_DATABASE_URL` | 业务数据只读连接 | 本地 PostgreSQL |
-| `OIDC_ISSUER` | OIDC issuer | — |
-| `OIDC_AUDIENCE` | Token audience | — |
-| `OIDC_JWKS_URL` | JWKS 地址 | — |
-| `LLM_BASE_URL` | OpenAI 兼容 API 地址 | OpenAI API |
-| `LLM_API_KEY` | 模型服务密钥 | — |
-| `LLM_MODEL` | Structured Outputs 模型 | `gpt-4o-mini` |
+| `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_JWKS_URL` | OIDC 配置 | — |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 模型服务 | OpenAI / `gpt-4o-mini` |
 | `LLM_TIMEOUT_SECONDS` | 模型请求超时 | `30` |
 | `CLARIFY_CONFIDENCE_THRESHOLD` | 触发澄清的置信度阈值 | `0.7` |
 | `CLARIFY_MAX_ROUNDS` | 最大澄清轮数 | `2` |
 | `MAX_RESULT_ROWS` | 最大结果行数 | `1000` |
 | `QUERY_TIMEOUT_SECONDS` | 数据查询超时 | `30` |
-| `COST_WARN_ROWS` | 扫描行数警告阈值 | `1000000` |
-| `COST_REJECT_ROWS` | 扫描行数拒绝阈值 | `50000000` |
-| `EXECUTION_RETRY_ATTEMPTS` | 瞬时执行错误重试次数 | `2` |
+| `COST_WARN_ROWS` / `COST_REJECT_ROWS` | 扫描量告警/拒绝阈值 | `1M` / `50M` |
+| `EXECUTION_RETRY_ATTEMPTS` | 瞬时执行错误重试 | `2` |
 
-生产部署应为元数据写入和业务数据查询配置不同的数据库角色，并在业务数据库侧启用最小权限、RLS 或安全视图。
+---
 
-## 测试
+## 测试与评测
 
-### 后端
-
-```bash
-cd backend
-python -m pytest -q
-```
-
-测试覆盖：
-
-- Intent Schema、Structured Outputs 和 Prompt Injection；
-- 时区、DST、闰年、月末、财务日历和相对时间；
-- Metric DAG、Join Graph、Semantic Lint 和 Revision；
-- Canonical Plan、字段 lineage、稳定序列化和 SQL 编译；
-- 行列权限、AST Allowlist、成本控制和只读执行；
-- 结果校验、答案引证、Trace、Replay 和事务边界；
-- Golden Set、分层 Eval、回归判定和安全拒答。
-
-### 前端
+后端 **908+ 测试** 覆盖意图解析、时间语义、语义层、规划、编译、安全、执行、Trace、Golden Set 全链路；前端 12 个 Vitest spec 覆盖工作台、澄清、答案卡片、语义管理、Trace 视图。
 
 ```bash
-cd frontend
-npm test
-npm run build
+cd backend && python -m pytest -q            # 后端
+cd frontend && npm test && npm run build     # 前端
 ```
 
-前端测试覆盖工作台、澄清、条件编辑、答案卡片、结果表、语义管理和 Trace 页面。
+分层评测（`backend/app/evals/`）：
+
+- **Intent**：意图字段、置信度、Schema 合法性
+- **Resolve**：时间、实体、语义槽位解析
+- **Plan**：Canonical Plan 稳定性、签名去重
+- **SQL**：AST 合法性、Allowlist、方言稳定性
+- **Result**：行数、精度、排序、当前期/比较期对齐
+- **Answer**：引证完整性、警告合理性、Decimal 一致性
+
+数据集类型：**Golden** / Security / Multiturn / Robustness / Temporal / Holdout。语义、策略、编译器变更自动触发回归。
+
+---
 
 ## 技术栈
 
-| 层 | 技术 |
+| 职责 | 技术 |
 |---|---|
-| Web | Vue 3、TypeScript、Pinia、Element Plus、Vite |
-| API | FastAPI、Pydantic、SSE、OpenAPI |
-| Metadata | SQLAlchemy、PostgreSQL |
-| Intent | OpenAI Compatible API、Structured Outputs、IntentV2 |
-| Semantic | Semantic Registry、Metric DAG、Join Graph、Revision |
-| Planning | Canonical Query Plan、Secured Execution Plan |
-| SQL | SQLGlot AST、Deterministic Compiler、Dialect Adapter |
-| Security | OIDC/OAuth2、RBAC/ABAC、Policy Compiler、RLS |
-| Runtime | Read-only Connection、Cost Control、Result Validation |
-| Quality | Pytest、Vitest、Golden Set、Layered Evaluation |
-| Observability | Stage Trace、Replay、Audit、OpenTelemetry |
-| Extension | OpenAPI、MCP、Webhook、Worker、Custom Skill |
+| 前后端 | Vue 3 + TypeScript + Pinia + Element Plus + Vite；FastAPI + Pydantic + SSE + OpenAPI |
+| LLM 与编译 | OpenAI Compatible + Structured Outputs + SQLGlot AST + 确定性 SQL 编译器 |
+| 存储与语义 | PostgreSQL + SQLAlchemy + Metric DAG + Join Graph + Semantic Revision + Trusted Asset |
+| 安全 | OIDC/OAuth2 + RBAC/ABAC + AST Allowlist + 行级 / 列级 + RLS + Fail-closed |
+| 质量与可观测 | Pytest + Vitest + Golden Set + 分层评测；Stage Trace + Replay + OpenTelemetry |
+
+---
 
 ## 项目结构
 
 ```text
 backend/app/
-├── api/             # Chat、Query Run、Semantic、Eval 与 Trace API
-├── auth/            # OIDC/JWT、PrincipalContext 与对象级鉴权
-├── core/            # 配置、数据库连接、时钟和错误基类
-├── intent/          # IntentV2、Prompt、Structured Outputs 与注入防护
-├── temporal/        # 时区、财务日历与确定性时间解析
-├── semantic/        # Registry、Metric DAG、Join Graph、Revision 与 Trusted Asset
-├── planning/        # Canonical Query Plan、字段 lineage 与稳定序列化
-├── compiler/        # 指标、谓词、时间窗口和 SQL 编译
-├── security/        # Policy Compiler、AST Guardrails、行列权限与成本控制
-├── execution/       # 只读执行、重试与结果校验
-├── pipeline/        # 查询编排、解析、澄清和答案生成
-├── observability/   # Query Run、Trace、Replay、Cache 与 Audit
-└── evals/           # 分层评测、回归运行和质量报告
+├── api/             # Chat、Query Run、Semantic、Eval、Trace API
+├── auth/            # OIDC/JWT、PrincipalContext、对象级鉴权
+├── core/            # 配置、数据库连接、Clock、错误基类
+├── intent/          # IntentV2、Prompt、Structured Outputs、注入防护
+├── temporal/        # 时区、财务日历、确定性时间解析
+├── semantic/        # Registry、Metric DAG、Join Graph、Revision、Trusted Asset
+├── planning/        # Canonical Query Plan、字段 lineage、稳定序列化
+├── compiler/        # 指标、谓词、时间窗口、SQL 编译
+├── security/        # Policy Compiler、AST Guardrails、行列权限、成本控制
+├── execution/       # 只读执行、重试、结果校验
+├── pipeline/        # 查询编排、解析、澄清、答案生成
+├── observability/   # Query Run、Trace、Replay、Cache、Audit
+└── evals/           # 分层评测、回归运行、质量报告
 
 frontend/src/
 ├── api/             # API Client 与类型契约
-├── components/      # 问数、澄清、结果、引证和 Trace 组件
-├── stores/          # 会话和 Query Run 状态
-└── views/           # 工作台、语义管理、评测与 Trace 页面
+├── components/      # 问数、澄清、结果、引证、Trace 组件
+├── stores/          # 会话与 Query Run 状态
+└── views/           # 工作台、语义管理、评测、Trace 页面
 ```
+
+---
 
 ## 部署
 
-在线查询链路采用模块化单体，减少关键路径中的网络跳转；异步评测、批量分析和定时任务由独立 Worker 执行。控制面元数据与业务数据连接相互分离，业务数据库只暴露只读视图或只读角色。
+在线查询链路采用模块化单体，减少关键路径的网络跳转；异步评测、批量分析、定时任务由独立 Worker 执行。控制面元数据与业务数据连接相互分离，业务数据库只暴露只读视图或只读角色。
 
 ```text
 Load Balancer / API Gateway
@@ -478,16 +450,76 @@ Redis / Job Queue
 Eval / Async / Scheduled Workers
 ```
 
-服务提供 `/livez` 和 `/readyz` 探针，并可通过 OpenTelemetry 接入现有日志、指标、Trace 和告警平台。
+服务提供 `/livez` 与 `/readyz` 探针，可通过 OpenTelemetry 接入现有日志、指标、Trace、告警平台。
+
+---
 
 ## 扩展
 
-- 新增数据源时实现方言编译器、连接适配器和函数 Allowlist；
-- 新增业务域时注册数据集、指标、枚举、Join Graph 和领域词表；
-- 新增分析能力时以类型化 Skill 声明输入、输出、权限和副作用；
-- 新增模型服务时实现统一 LLM Provider 接口和失败分类；
-- 外部 Agent 可通过 Governed Semantic MCP 或 OpenAPI 复用相同的语义与权限边界。
+- 新增数据源：实现方言编译器、连接适配器、函数 Allowlist
+- 新增业务域：注册数据集、指标、枚举、Join Graph、领域词表
+- 新增分析能力：以类型化 Skill 声明输入、输出、权限、副作用
+- 新增模型服务：实现统一 LLM Provider 接口与失败分类
+- 外部 Agent：通过 Governed Semantic MCP 或 OpenAPI 复用相同语义与权限边界
 
-## 参与贡献
+---
 
-提交改动时，请说明影响的语义契约、失败边界、权限路径和 Trace，并为确定性逻辑、安全边界和最终结果补充测试或 Golden Case。
+## Roadmap
+
+**已交付**
+
+- S1~S7 七层升级路线：身份基座、时间基座、确定性编译、语义层、可信答案、可观测、交付
+- IntentV2 + Structured Outputs + Prompt Injection 防护
+- Canonical Plan + Secured Plan + 稳定序列化 + 字段 lineage
+- Metric DAG / Join Graph / Semantic Revision / Lint
+- Trusted Asset 版本化复用与失效重验
+- 分层评测（Intent / Resolve / Plan / SQL / Result / Answer）+ Golden / Holdout 数据集
+- OIDC、行列权限、AST Allowlist、EXPLAIN 预算、Fail-closed
+- 完整 Trace 与 Replay，三层可见性分级
+- Vue 3 工作台 + 语义管理 + Trace 与 Eval 视图
+
+**计划中**
+
+- ClickHouse / Doris 方言适配器
+- 多租户资源配额与速率限制
+- Governed Semantic MCP Server 公开版
+- SQL 编辑器内联 Plan 预览
+- 实时协作追问（多人同会话）
+
+---
+
+## FAQ
+
+**和 LangChain SQL Agent 区别？**
+LangChain 让 LLM 自由生成 SQL，灵活但不可控。本项目把 LLM 锁在语言理解层，SQL 由确定性编译器产出，可测试、可缓存、可审计。
+
+**和 Vanna 区别？**
+Vanna 是 RAG + LLM 生成 SQL，适合个人/小团队。本项目定位企业级：语义版本管理、行级权限、Trace 重放、Golden Set 评测。
+
+**和 WrenAI 区别？**
+WrenAI 强项是 MDL 语义层与 BI 自助分析；本项目强项是企业安全、可观测、可重放、可评测，适合合规要求严格的内部数据团队。
+
+**为什么不让 LLM 直接生成 SQL？**
+企业生产环境的 SQL 错误成本高（删库、越权、口径漂移）。LLM 适合语言模糊，SQL 适合确定编译。
+
+**必须用 PostgreSQL 吗？**
+核心运行时元数据依赖 PostgreSQL；业务数据方言支持 PostgreSQL，其他方言可通过扩展点接入。
+
+**支持私有部署吗？**
+支持。所有组件可内网部署，无外部依赖（除可选的 LLM API）。
+
+---
+
+## 贡献 / 社区 / License
+
+**贡献** — 提交改动时请说明：
+
+- 影响的语义契约（IntentV2 / Canonical Plan / Secured Plan）
+- 影响的失败边界（澄清、拒答、Fail-closed）
+- 影响的权限路径（行列 / 行级 / 租户）
+- 影响的 Trace 字段
+- 为确定性逻辑、安全边界、最终结果补充测试或 Golden Case
+
+**社区** — Issues 用于 Bug 报告与功能请求；Discussions 用于架构讨论与方案咨询。欢迎 Star ⭐ 与 Fork。
+
+**License** — 本项目基于 [MIT License](./LICENSE) 开源。Copyright © 2026 付玉祥。
