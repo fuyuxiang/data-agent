@@ -160,11 +160,21 @@ def _to_intent(dataset: DatasetDef, payload: IntentPayload, question: str) -> Qu
     if payload.time_expression is not None and payload.time_expression.kind != "none":
         # If model provided absolute dates, we can use them now
         if payload.time_expression.kind == "absolute":
+            # Use the model's unit as grain (day/week/month/...) so the
+            # downstream compiler and citation match the user's intent
+            # ("本月" → grain=month), not always day.
+            try:
+                grain = TimeGrain(payload.time_expression.unit or "day")
+            except ValueError:
+                grain = TimeGrain.DAY
             try:
                 time_range = TimeRange(
                     start=date.fromisoformat(payload.time_expression.start_date),
-                    end=date.fromisoformat(payload.time_expression.end_date or payload.time_expression.start_date),
-                    grain=TimeGrain.DAY,
+                    end=date.fromisoformat(
+                        payload.time_expression.end_date
+                        or payload.time_expression.start_date
+                    ),
+                    grain=grain,
                     expression=payload.time_expression.expression,
                 )
             except (ValueError, TypeError) as error:
