@@ -37,10 +37,13 @@ def _payload(**overrides) -> str:
         "metrics": ["sales_revenue"],
         "dimensions": [],
         "filters": [],
-        "time": {
-            "start": "2026-08-01",
-            "end": "2026-08-31",
-            "grain": "month",
+        "time_expression": {
+            "kind": "absolute",
+            "unit": "month",
+            "offset": 0,
+            "to_date": False,
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-31",
             "expression": "本月",
         },
         "comparison": "none",
@@ -291,22 +294,29 @@ def test_verified_query_hit_still_gets_row_policy(env, sample_conn):
     )
     env.flush()
 
-    outcome = _orchestrator(env, sample_conn, StubClient()).ask(
+    outcome = _orchestrator(env, sample_conn, StubClient(_payload())).ask(
         user_id=user_id_for(env, "east_manager"), question="本月销售额", dataset_name="orders"
     )
 
+    stages = list(load_trace(env, outcome.turn_id))
+    assert any(item.stage == Stage.SECURITY.value for item in stages), (
+        f"expected SECURITY stage in trace; saw {[s.stage for s in stages]}"
+    )
     stage = next(
-        item for item in load_trace(env, outcome.turn_id) if item.stage == Stage.SECURITY.value
+        item for item in stages if item.stage == Stage.SECURITY.value
     )
     assert "'EC'" in stage.output_payload["sql"]
 
 
 def test_empty_result_does_not_produce_a_number(env, sample_conn):
     payload = _payload(
-        time={
-            "start": "2020-01-01",
-            "end": "2020-01-31",
-            "grain": "month",
+        time_expression={
+            "kind": "absolute",
+            "unit": "month",
+            "offset": 0,
+            "to_date": False,
+            "start_date": "2020-01-01",
+            "end_date": "2020-01-31",
             "expression": "2020年1月",
         }
     )

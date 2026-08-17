@@ -18,10 +18,13 @@ def _payload(**overrides) -> str:
         "metrics": ["sales_revenue"],
         "dimensions": [],
         "filters": [],
-        "time": {
-            "start": "2026-08-01",
-            "end": "2026-08-31",
-            "grain": "month",
+        "time_expression": {
+            "kind": "absolute",
+            "unit": "month",
+            "offset": 0,
+            "to_date": False,
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-31",
             "expression": "本月",
         },
         "comparison": "none",

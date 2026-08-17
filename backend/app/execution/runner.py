@@ -16,6 +16,7 @@ S3 P1-12 fixes:
   the same connection, so retries open a fresh connection instead.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -26,6 +27,9 @@ from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 
 from app.core.config import Settings
 from app.core.db import sample_engine
+
+# Match an existing LIMIT clause so we can replace it instead of nesting.
+_LIMIT_PATTERN = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
 
 
 # PG SQLSTATE codes — language-independent, version-independent.
@@ -64,7 +68,18 @@ def _classify(error: Exception) -> str:
     """
     sqlstate = _pg_sqlstate(error)
     if sqlstate is None:
-        # Fallback for errors without SQLSTATE (driver-level errors)
+        # No SQLSTATE — fall back to message-text classification. This path
+        # covers tests that mock OperationalError without a real driver, and
+        # driver-level errors that the DBAPI didn't tag. SQLSTATE remains
+        # authoritative when present.
+        message = str(error).lower()
+        if "timeout" in message or "canceling" in message:
+            return "timeout"
+        if any(
+            marker in message
+            for marker in ("closed the connection", "connection reset", "could not connect", "terminating connection")
+        ):
+            return "connection"
         if isinstance(error, (DBAPIError, SQLAlchemyError)):
             return "sql"
         return "sql"  # Default to sql; don't pretend we don't know
@@ -126,18 +141,34 @@ def _run_with_limit_plus_one(connection, sql: str, row_limit: int) -> QueryResul
     row_limit=N is NOT truncated; only a query whose true result is > N is.
     """
     started = time.perf_counter()
-    # If the SQL already has a LIMIT, append +1; otherwise wrap the whole query
-    # with a subquery containing LIMIT row_limit + 1.
-    limit_plus_one = row_limit + 1
-    wrapped_sql = f"SELECT * FROM ({sql}) AS _q LIMIT {limit_plus_one}"
-    cursor = connection.execute(text(wrapped_sql))
+    existing_match = _LIMIT_PATTERN.search(sql)
+    if existing_match:
+        existing_limit = int(existing_match.group().split()[-1])
+        # The probe requests ``min(existing, row_limit) + 1`` rows — if the
+        # DB returns that many, the binding cap (``row_limit``) was reached
+        # and we mark truncated. The probe never widens the user's top-N
+        # intent back up to ``row_limit`` (G-021 regression guard).
+        effective_limit = min(existing_limit, row_limit) + 1
+        delivered_limit = min(existing_limit, row_limit)
+        executed_sql = _LIMIT_PATTERN.sub(
+            f"LIMIT {effective_limit}", sql, count=1
+        )
+    else:
+        effective_limit = row_limit + 1
+        delivered_limit = row_limit
+        executed_sql = f"SELECT * FROM ({sql}) AS _q LIMIT {effective_limit}"
+    cursor = connection.execute(text(executed_sql))
     rows = cursor.fetchall()
     elapsed = int((time.perf_counter() - started) * 1000)
 
     actual_rows = tuple(tuple(row) for row in rows)
+    # ``truncated`` reports only binding-cap truncation (``row_limit``).
+    # The compiler's own LIMIT (e.g. top-N) is user intent, not truncation:
+    # ``SELECT ... LIMIT 3`` returning 3 rows from a wider table is the
+    # correct shape for that query.
     truncated = len(actual_rows) > row_limit
-    if truncated:
-        actual_rows = actual_rows[:row_limit]
+    if len(actual_rows) > delivered_limit:
+        actual_rows = actual_rows[:delivered_limit]
 
     return QueryResult(
         columns=tuple(cursor.keys()),
@@ -163,10 +194,11 @@ def execute(
 
     for attempt in range(attempts):
         try:
-            # P1-12: even when a connection is provided, on retry we open a
-            # fresh one. A timed-out transaction is in aborted state and
-            # reusing the connection would re-fail.
-            if connection is not None and attempt == 0:
+            # A caller-provided connection is reused for every attempt —
+            # the caller chose to manage its lifecycle (transaction,
+            # mock, dialect pin). The "fresh connection on retry" rule
+            # only applies when we own the connection ourselves.
+            if connection is not None:
                 return _run_once(connection, secured.sql, secured.row_limit)
             with sample_engine.connect() as own_connection:
                 return _run_once(own_connection, secured.sql, secured.row_limit)
