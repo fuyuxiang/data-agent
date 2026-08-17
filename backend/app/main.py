@@ -122,7 +122,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(title="Data Agent", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Data Agent", version="1.0.0", lifespan=lifespan)
 
 settings = get_settings()
 app.add_middleware(
