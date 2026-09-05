@@ -62,7 +62,7 @@ def tool_result(session_id: str, artifact_id: str):
 @bp.get("/api/session/<session_id>/tool-results/<artifact_id>")
 @api_errors
 def legacy_tool_result(session_id: str, artifact_id: str):
-    """Serve the reference project's singular-session tool-result contract.
+    """Serve the legacy singular-session tool-result contract.
 
     The modern endpoint above remains paginated JSON.  The compatibility route
     intentionally returns the complete text by default because legacy clients

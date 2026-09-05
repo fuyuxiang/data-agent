@@ -75,7 +75,7 @@ def _db() -> Database:
 
 
 def normalize_definition(definition: dict) -> dict:
-    """Accept the simple step format and the reference project's graph contract."""
+    """Accept both the simple step format and the graph-based workflow contract."""
     if isinstance(definition.get("steps"), list):
         return deepcopy(definition)
     nodes = definition.get("nodes")

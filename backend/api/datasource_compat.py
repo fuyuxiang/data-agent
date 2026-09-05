@@ -187,7 +187,7 @@ def upload(sid: str):
     files = request.files.getlist("file") or request.files.getlist("files")
     if not files or all(not item.filename for item in files):
         raise ValueError("未选择文件")
-    threshold = int(os.getenv("BAA_EXCEL_JOB_THRESHOLD", "5000000"))
+    threshold = int(os.getenv("MERIDIAN_EXCEL_JOB_THRESHOLD", "5000000"))
     added, pending, errors = [], [], []
     for file in files:
         filename = file.filename or ""

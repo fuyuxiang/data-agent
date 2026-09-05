@@ -46,6 +46,4 @@ npm run build
 - 工作流审批不会自动放行。
 - 归档记录可恢复；永久删除要求显式确认。
 
-参考工程审阅见 [docs/REFERENCE_REVIEW.md](docs/REFERENCE_REVIEW.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，功能覆盖见 [docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md)。当前支持单节点生产运行，不代表已具备多副本高可用能力。
-
-> 商用前必读：当前仓库包含受 CC BY-NC 4.0 条款约束的上游同源组件。在获得著作权人书面授权，或完成独立替换前，不应将当前整仓库宣称为可无条件商用。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+当前支持单节点生产运行，不代表已具备多副本高可用能力。第三方组件的授权边界见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

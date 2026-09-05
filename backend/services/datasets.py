@@ -494,7 +494,7 @@ def register_google_sheet(config: dict, workspace_id: str) -> dict:
 def _google_frame(rows: list[list[Any]]) -> pd.DataFrame | None:
     if len(rows) < 2:
         return None
-    # Match the reference behavior: tolerate title/preamble rows and choose the
+    # Tolerate title or preamble rows and choose the
     # first dense row as the header from the initial sample.
     sample = rows[:20]
     width = max((sum(value not in (None, "") for value in row) for row in sample), default=0)

@@ -1,7 +1,7 @@
 """Restricted remote compute preflight used by trusted SSH connections.
 
 This module deliberately exposes no command execution or training payload
-surface.  Deploy it on a GPU host and run ``python3 -m baa_remote_runner
+surface. Deploy it on a GPU host and run ``python3 -m meridian_remote_runner
 --preflight --json`` to verify that PyTorch can see CUDA before registering
 that host in the workbench.
 """

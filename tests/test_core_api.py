@@ -242,15 +242,15 @@ def test_advanced_modeling_and_forecasting(client):
         assert response.get_json()["run"]["status"] == "completed"
 
 
-def test_reference_analysis_contracts_are_available_and_persist_tables(app, client, source):
-    reference_ids = {
+def test_registered_analysis_contracts_are_available_and_persist_tables(app, client, source):
+    registered_ids = {
         "AB_Test_Analysis", "Data_Decile_Analysis", "Decision_Tree", "K_Means",
         "Logistic_Regression", "Regression", "Sklearn_Model", "Torch_MLP",
         "Univariate_Screening", "Time_Series_ARIMA", "Time_Series_SARIMA",
         "Time_Series_VAR", "Time_Series_Prophet", "Time_Series_GRU",
     }
     methods = client.get("/api/analysis/methods").get_json()["items"]
-    assert {item["id"] for item in methods} >= reference_ids
+    assert {item["id"] for item in methods} >= registered_ids
     response = client.post(
         "/api/analysis/run",
         json={

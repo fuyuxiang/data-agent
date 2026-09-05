@@ -1,6 +1,5 @@
 # Copyright 2026 Zafer-Liu
-# 自然语言交互式经营数据分析软件 V1.0
-# Licensed under CC BY-NC 4.0 — see LICENSE.
+# Licensed under CC BY-NC 4.0 — see THIRD_PARTY_NOTICES.md.
 #
 """McKinsey Design System — Color palette, typography, and layout constants."""
 from pptx.util import Inches, Pt, Emu

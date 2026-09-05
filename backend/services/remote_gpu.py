@@ -26,7 +26,7 @@ from .security import SecretVault, safe_http_request, validate_outbound_url
 
 log = logging.getLogger(__name__)
 _HOST_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
-_PREFLIGHT_COMMAND = "python3 -m baa_remote_runner --preflight --json"
+_PREFLIGHT_COMMAND = "python3 -m meridian_remote_runner --preflight --json"
 
 
 class TunnelError(RuntimeError):
@@ -319,7 +319,7 @@ class ConnectionManager:
         except Exception as exc:
             raise TunnelError(f"远程训练器预检失败: {type(exc).__name__}") from exc
         if exit_code != 0:
-            raise TunnelError("远程训练器不可用；请在服务器部署 baa_remote_runner")
+            raise TunnelError("远程训练器不可用；请在服务器部署 meridian_remote_runner")
         try:
             payload = json.loads(output)
         except json.JSONDecodeError as exc:

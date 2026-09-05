@@ -4,14 +4,12 @@
 
 审计时仓库根目录没有项目级 `LICENSE`。在理清上游权利、代码贡献权和预期发布模式后，应由项目权利人选择并正式加入项目许可证；本次审查不代替权利人做该法律选择。
 
-## Data-Analysis-Agent
+## 第三方分析组件
 
-- 上游项目：[Zafer-Liu/Data-Analysis-Agent](https://github.com/Zafer-Liu/Data-Analysis-Agent)
-- 审计基线：`a5f7a4faceb0cd9d19215097e9db8d4877daf68b`
 - 著作权：Copyright © 2026 Zafer-Liu
-- 上游条款：[CC BY-NC 4.0 及商用授权说明](https://github.com/Zafer-Liu/Data-Analysis-Agent/blob/a5f7a4faceb0cd9d19215097e9db8d4877daf68b/LICENSE)
+- 许可条款：[Creative Commons Attribution-NonCommercial 4.0 International](https://creativecommons.org/licenses/by-nc/4.0/)
 
-本仓库的 `skills/*/SKILL.md`、`backend/reference_analysis/`、`backend/reference_clean/` 和 `backend/reference_output/` 包含来自该上游项目或与其同源的实现。上游条款允许署名后的学习、研究和非商业使用，但明确要求任何商业用途（包括企业内部用于产生商业利益）事先获得著作权人书面授权。
+本仓库的 `skills/*/SKILL.md`、`backend/analysis_modules/`、`backend/data_cleaning/` 和 `backend/document_output/` 包含第三方或同源实现。许可条款允许署名后的学习、研究和非商业使用，但任何商业用途（包括企业内部用于产生商业利益）均需事先获得著作权人书面授权。
 
 因此，在没有书面商业授权，或未用独立实现完整替换上述同源组件前，不应将当前整仓库宣称为可无条件商用。
 

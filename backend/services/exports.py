@@ -71,8 +71,8 @@ def _rgb(value: str) -> RGBColor:
 
 
 def _render_ppt_outline(payload: dict, path: Path) -> int:
-    from ..reference_output.PPT import constants
-    from ..reference_output.PPT import MckEngine
+    from ..document_output.PPT import constants
+    from ..document_output.PPT import MckEngine
 
     slides = payload.get("slides")
     if not isinstance(slides, list) or not slides:
@@ -115,7 +115,7 @@ def _render_ppt_outline(payload: dict, path: Path) -> int:
             return {key: resolve(item) for key, item in value.items()}
         return value
 
-    template_path = Path(__file__).resolve().parents[1] / "reference_output" / "PPT" / "PPT_template" / f"{scheme_name}.pptx"
+    template_path = Path(__file__).resolve().parents[1] / "document_output" / "PPT" / "PPT_template" / f"{scheme_name}.pptx"
     engine = MckEngine(total_slides=len(slides), template=str(template_path) if template_path.is_file() else None)
     for index, slide in enumerate(slides, 1):
         if not isinstance(slide, dict):

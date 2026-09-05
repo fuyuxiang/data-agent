@@ -24,6 +24,7 @@ def test_desktop_staging_is_allowlisted_and_excludes_runtime_data(tmp_path):
     manifest = build_staging(ROOT, destination)
     paths = {item["path"] for item in manifest["files"]}
     assert "app.py" in paths
+    assert "meridian_remote_runner.py" in paths
     assert "packaging/desktop_launcher.py" in paths
     assert "THIRD_PARTY_NOTICES.md" in paths
     assert "frontend/vendor/echarts-china.min.js" in paths

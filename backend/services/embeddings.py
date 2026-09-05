@@ -194,7 +194,7 @@ def embed_batch(texts: Sequence[str], workspace_id: str = "default") -> list[lis
         except Exception:
             _cloud_status[workspace_id] = False
             if config["mode"] == "cloud":
-                # Reference behavior remains usable by falling through to local/hash.
+                # Keep semantic search available by falling through to the local hash provider.
                 pass
     if config["mode"] in {"auto", "local", "cloud"} and local_installed():
         try:

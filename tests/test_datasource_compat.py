@@ -60,7 +60,7 @@ def test_session_sources_toggle_preview_and_warehouse(client):
 
 
 def test_large_excel_job_finalize_is_idempotent(client, monkeypatch):
-    monkeypatch.setenv("BAA_EXCEL_JOB_THRESHOLD", "1")
+    monkeypatch.setenv("MERIDIAN_EXCEL_JOB_THRESHOLD", "1")
     from openpyxl import Workbook
 
     stream = io.BytesIO()

@@ -69,7 +69,7 @@ def test_chart_semantics_are_not_generic_aliases():
     assert [item["name"] for item in error_bar["series"]] == ["下界", "上界", "value"]
 
 
-def test_reference_chart_options_preserve_bands_measures_order_and_midlines():
+def test_chart_options_preserve_bands_measures_order_and_midlines():
     frame = pd.DataFrame({
         "label": ["A", "B", "C", "D"],
         "actual": [35, 58, 71, 82],

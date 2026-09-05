@@ -9,7 +9,7 @@ import pytest
 
 from backend.services.agent_runtime import _recoverable_tool_text
 from backend.services.agent_tools import AgentToolContext, execute_tool, tool_schemas
-from backend.services.charts import REFERENCE_CHARTS
+from backend.services.charts import CHART_TYPE_CONTRACTS
 from backend.services.datasets import execute_query, register_derived_tables
 
 
@@ -20,7 +20,7 @@ def _context(app, session_id: str = "welcome", source_ids: list[str] | None = No
     )
 
 
-def test_reference_control_team_workflow_and_workspace_tools(app, client, source):
+def test_control_team_workflow_and_workspace_tools(app, client, source):
     session = client.post("/api/sessions", json={"name": "工具对齐", "source_ids": [source["id"]]}).get_json()["item"]
     with app.app_context():
         context = _context(app, session["id"], [source["id"]])
@@ -99,7 +99,7 @@ def test_reference_control_team_workflow_and_workspace_tools(app, client, source
         assert page["next_offset"] == 120
 
 
-def test_reference_ppt_outline_generates_real_slides(app):
+def test_ppt_outline_generates_real_slides(app):
     with app.app_context():
         context = _context(app)
         execute_tool("set_ppt_color_scheme", {"scheme": "bcg"}, context)
@@ -167,7 +167,7 @@ def test_custom_workflow_rejects_forward_or_unknown_dependencies(app):
             )
 
 
-def test_reference_tool_result_download_route_is_session_scoped(app, client):
+def test_tool_result_download_route_is_session_scoped(app, client):
     first = client.post("/api/sessions", json={"name": "result owner"}).get_json()["item"]
     second = client.post("/api/sessions", json={"name": "other session"}).get_json()["item"]
     content = '{"rows":[1,2,3]}'
@@ -194,7 +194,7 @@ def test_reference_tool_result_download_route_is_session_scoped(app, client):
     assert client.get(f"/api/session/{second['id']}/tool-results/{item['id']}").status_code == 404
 
 
-def test_reference_tool_parameter_contracts_are_exposed_and_executable(app, source):
+def test_tool_parameter_contracts_are_exposed_and_executable(app, source):
     expected = {
         "select_chart": {"user_intent", "available_columns"},
         "generate_chart": {"chart_type", "sql", "field_mapping"},
@@ -236,7 +236,7 @@ def test_reference_tool_parameter_contracts_are_exposed_and_executable(app, sour
             context,
         )
         assert chart["spec"]["type"] == "bar"
-        assert chart["spec"]["reference_chart_id"] == "Bar_Chart"
+        assert chart["spec"]["catalog_chart_id"] == "Bar_Chart"
         assert events[0][0] == "chart"
 
         detail, _ = execute_tool("get_table_detail", {"table_name": "data"}, context)
@@ -261,15 +261,15 @@ def test_reference_tool_parameter_contracts_are_exposed_and_executable(app, sour
                     "hooks": [{"event": "analysis.completed", "action": {"type": "notify"}}],
                 },
                 "merge": False,
-                "reason": "reference contract",
+                "reason": "catalog contract",
             },
             context,
         )
         assert configured["merge"] is False
-        assert configured["reason"] == "reference contract"
+        assert configured["reason"] == "catalog contract"
 
 
-def test_reference_delete_analysis_tables_removes_only_named_derived_tables(app):
+def test_delete_analysis_tables_removes_only_named_derived_tables(app):
     with app.app_context():
         context = _context(app)
         derived = register_derived_tables(
@@ -294,7 +294,7 @@ def test_reference_delete_analysis_tables_removes_only_named_derived_tables(app)
         assert result["rows"] == 2
 
 
-def test_every_reference_chart_contract_generates_a_portable_chart(app):
+def test_every_chart_contract_generates_a_portable_chart(app):
     frame = pd.DataFrame({
         "category": ["A", "A", "B", "B", "C", "C"],
         "group": ["G1", "G2", "G1", "G2", "G1", "G2"],
@@ -324,7 +324,7 @@ def test_every_reference_chart_contract_generates_a_portable_chart(app):
         derived = register_derived_tables({"chart_data": frame}, "default", name="chart contracts")
         query = execute_query([derived["id"]], "SELECT * FROM chart_data", "default", 100)
         context = _context(app, source_ids=[derived["id"]])
-        for chart_id, (native_type, required, optional) in REFERENCE_CHARTS.items():
+        for chart_id, (native_type, required, optional) in CHART_TYPE_CONTRACTS.items():
             mapping = {}
             for role in [*required, *optional]:
                 if role == "dimensions":
@@ -346,7 +346,7 @@ def test_every_reference_chart_contract_generates_a_portable_chart(app):
             )
             spec = chart["spec"]
             assert spec["type"] == native_type, chart_id
-            assert spec["reference_chart_id"] == chart_id
+            assert spec["catalog_chart_id"] == chart_id
             assert spec["option"].get("series"), chart_id
             assert events[0][0] == "chart"
             json.dumps(spec, allow_nan=False)

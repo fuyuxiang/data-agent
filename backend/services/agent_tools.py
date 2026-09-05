@@ -529,9 +529,9 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             if missing:
                 raise ValueError(f"分析字段不存在：{', '.join(missing)}")
             frame = frame[[str(value) for value in columns]]
-        from ..reference_clean import profile as reference_profile
+        from ..data_cleaning import profile as cleaning_profile
 
-        markdown, _plotly_charts = reference_profile(frame, None)
+        markdown, _plotly_charts = cleaning_profile(frame, None)
         structured = profile(frame)
         if len(frame) > 1 and len(structured["numeric_columns"]) > 0:
             chart = make_spec(
@@ -671,7 +671,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             x=x, y=explicit_y, group=args.get("group") or mapping.get("series") or mapping.get("group"),
             options=options,
         )
-        spec["reference_chart_id"] = requested_type or None
+        spec["catalog_chart_id"] = requested_type or None
         chart = context.database.put(
             "charts",
             {
@@ -788,7 +788,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
                 raise ValueError("operations 必须是数组")
             cleaned, operation_log = clean_frame(frame, operations)
         else:
-            from ..reference_clean import fill_missing, trim, winsorize
+            from ..data_cleaning import fill_missing, trim, winsorize
 
             operation = str(args.get("operation") or "")
             columns = [str(value) for value in args.get("columns") or []] or None

@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 
 
-ALLOWED_FILES = ("app.py", "baa_remote_runner.py", "README.md", "THIRD_PARTY_NOTICES.md")
+ALLOWED_FILES = ("app.py", "meridian_remote_runner.py", "README.md", "THIRD_PARTY_NOTICES.md")
 ALLOWED_TREES = ("backend", "frontend", "skills", "deploy", "packaging")
 IGNORED_PARTS = {
     "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", "dist", "build",

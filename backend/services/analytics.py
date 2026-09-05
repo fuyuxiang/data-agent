@@ -15,7 +15,7 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-from ..reference_analysis import registry as reference_registry
+from ..analysis_modules import registry as analysis_registry
 from .datasets import frame_records
 
 
@@ -41,7 +41,7 @@ ANALYSIS_METHODS = [
     {"id": "anomaly", "name": "孤立森林异常检测", "group": "quality"},
 ]
 
-_REFERENCE_GROUPS = {
+_MODULE_GROUPS = {
     "AB_Test_Analysis": "inference", "Data_Decile_Analysis": "segmentation",
     "Decision_Tree": "modeling", "K_Means": "segmentation",
     "Logistic_Regression": "modeling", "Regression": "modeling",
@@ -50,14 +50,14 @@ _REFERENCE_GROUPS = {
     "Time_Series_SARIMA": "forecasting", "Time_Series_VAR": "forecasting",
     "Time_Series_Prophet": "forecasting", "Time_Series_GRU": "forecasting",
 }
-for _reference in reference_registry.get_all().values():
+for _module in analysis_registry.get_all().values():
     ANALYSIS_METHODS.append({
-        "id": _reference["id"], "name": _reference["name"],
-        "description": _reference.get("desc", ""),
-        "required": _reference.get("required", []),
-        "optional": _reference.get("optional", []),
-        "output_tables": _reference.get("output_tables", []),
-        "group": _REFERENCE_GROUPS.get(_reference["id"], "modeling"),
+        "id": _module["id"], "name": _module["name"],
+        "description": _module.get("desc", ""),
+        "required": _module.get("required", []),
+        "optional": _module.get("optional", []),
+        "output_tables": _module.get("output_tables", []),
+        "group": _MODULE_GROUPS.get(_module["id"], "modeling"),
     })
 
 
@@ -197,7 +197,7 @@ def _numeric(frame: pd.DataFrame, requested: list[str] | None = None) -> pd.Data
     return result
 
 
-def _reference_params(method: str, params: dict) -> tuple[str, str | None, int, dict]:
+def _module_params(method: str, params: dict) -> tuple[str, str | None, int, dict]:
     target = str(
         params.get("target_column") or params.get("target") or params.get("value_column") or "",
     ).strip()
@@ -238,14 +238,14 @@ def _reference_params(method: str, params: dict) -> tuple[str, str | None, int, 
     return target, str(groupby) if groupby is not None else None, count, params.get("analysis_options") or {}
 
 
-def _run_reference(
+def _run_registered_analysis(
     frame: pd.DataFrame, method: str, params: dict, progress_callback=None,
 ) -> tuple[dict, dict[str, pd.DataFrame]]:
-    entry = reference_registry.get(method)
+    entry = analysis_registry.get(method)
     run = entry.get("run")
     if not run:
         raise ValueError(f"分析模块 {method} 加载失败")
-    target, groupby, count, analysis_options = _reference_params(method, params)
+    target, groupby, count, analysis_options = _module_params(method, params)
     kwargs = {
         "df": frame, "target_column": target, "groupby_column": groupby, "n_deciles": count,
     }
@@ -286,15 +286,15 @@ def _run_reference(
 def run_analysis_with_frames(
     frame: pd.DataFrame, method: str, params: dict | None = None, progress_callback=None,
 ) -> tuple[dict, dict[str, pd.DataFrame]]:
-    if method in _REFERENCE_GROUPS:
-        return _run_reference(frame, method, params or {}, progress_callback)
+    if method in _MODULE_GROUPS:
+        return _run_registered_analysis(frame, method, params or {}, progress_callback)
     return run_analysis(frame, method, params), {}
 
 
 def run_analysis(frame: pd.DataFrame, method: str, params: dict | None = None) -> dict:
     params = params or {}
-    if method in _REFERENCE_GROUPS:
-        return _run_reference(frame, method, params)[0]
+    if method in _MODULE_GROUPS:
+        return _run_registered_analysis(frame, method, params)[0]
     if method == "profile":
         return {"method": method, "result": profile(frame)}
     if method == "correlation":

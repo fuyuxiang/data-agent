@@ -255,7 +255,7 @@ def _validate_assignments(team: dict, assignments: list[dict]) -> list[dict]:
 
 
 def create_team_plan(team: dict, payload: dict) -> dict:
-    """Persist a validated plan separately from execution, matching the reference confirmation flow."""
+    """Persist a validated plan separately from execution for explicit confirmation."""
     assignments = payload.get("assignments")
     if not isinstance(assignments, list):
         raise ValueError("团队计划 assignments 必须是数组")

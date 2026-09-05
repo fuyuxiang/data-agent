@@ -36,10 +36,10 @@ CHART_CATALOG = [
     ("calendar", "日历热力图", "geography"),
 ]
 
-# Compatibility IDs and role contracts exposed by the reference project's
-# chart registry.  Rendering remains native ECharts JSON, so saved charts and
-# dashboards do not depend on generated Python/HTML files.
-REFERENCE_CHARTS: dict[str, tuple[str, list[str], list[str]]] = {
+# Stable chart IDs and field-role contracts accepted by the public API.
+# Rendering remains native ECharts JSON, so saved charts and dashboards do not
+# depend on generated Python/HTML files.
+CHART_TYPE_CONTRACTS: dict[str, tuple[str, list[str], list[str]]] = {
     "Marimekko_ABS": ("marimekko", ["x", "y", "group"], []),
     "Marimekko_PCT": ("marimekko", ["x", "y", "group"], []),
     "Bar_Chart": ("bar", ["x", "y"], ["series", "color"]),
@@ -129,11 +129,11 @@ _CHART_KEYWORDS = {
 
 
 def catalog() -> list[dict]:
-    reference_ids: dict[str, list[str]] = {}
-    for reference_id, (chart_id, _required, _optional) in REFERENCE_CHARTS.items():
-        reference_ids.setdefault(chart_id, []).append(reference_id)
+    catalog_ids: dict[str, list[str]] = {}
+    for catalog_id, (chart_id, _required, _optional) in CHART_TYPE_CONTRACTS.items():
+        catalog_ids.setdefault(chart_id, []).append(catalog_id)
     return [
-        {"id": chart_id, "name": name, "group": group, "reference_ids": reference_ids.get(chart_id, [])}
+        {"id": chart_id, "name": name, "group": group, "catalog_ids": catalog_ids.get(chart_id, [])}
         for chart_id, name, group in CHART_CATALOG
     ]
 
@@ -144,12 +144,12 @@ def normalize_chart_type(requested: str | None, field_mapping: dict | None = Non
         return None
     if value == "Histogram_Pareto_chart" and field_mapping:
         return "pareto" if field_mapping.get("x") is not None and field_mapping.get("y") is not None else "histogram"
-    if value in REFERENCE_CHARTS:
-        return REFERENCE_CHARTS[value][0]
+    if value in CHART_TYPE_CONTRACTS:
+        return CHART_TYPE_CONTRACTS[value][0]
     normalized = value.lower().replace("-", "_").replace(" ", "_")
     aliases = {
         key.lower().replace("-", "_").replace(" ", "_"): chart_type
-        for key, (chart_type, _required, _optional) in REFERENCE_CHARTS.items()
+        for key, (chart_type, _required, _optional) in CHART_TYPE_CONTRACTS.items()
     }
     return aliases.get(normalized, normalized)
 
@@ -167,9 +167,9 @@ def select_charts(user_intent: str, available_columns: list[str] | None = None, 
     }
     scored = []
     name_by_id = {chart_id: (name, group) for chart_id, name, group in CHART_CATALOG}
-    for reference_id, (chart_type, required, optional) in REFERENCE_CHARTS.items():
+    for catalog_id, (chart_type, required, optional) in CHART_TYPE_CONTRACTS.items():
         score = 0
-        if reference_id.lower() in intent or chart_type.replace("_", " ") in intent:
+        if catalog_id.lower() in intent or chart_type.replace("_", " ") in intent:
             score += 30
         score += 12 * sum(keyword in intent for keyword in _CHART_KEYWORDS.get(chart_type, ()))
         if chart_type in signals:
@@ -181,22 +181,23 @@ def select_charts(user_intent: str, available_columns: list[str] | None = None, 
                 score += 2
         if score:
             name, group = name_by_id[chart_type]
-            scored.append((score, reference_id, chart_type, name, group, required, optional))
+            scored.append((score, catalog_id, chart_type, name, group, required, optional))
     scored.sort(key=lambda item: (-item[0], item[1]))
     if not scored:
         defaults = ["Bar_Chart", "Line_Chart", "Pie_Chart"]
         scored = [
-            (0, reference_id, REFERENCE_CHARTS[reference_id][0], name_by_id[REFERENCE_CHARTS[reference_id][0]][0],
-             name_by_id[REFERENCE_CHARTS[reference_id][0]][1], REFERENCE_CHARTS[reference_id][1],
-             REFERENCE_CHARTS[reference_id][2])
-            for reference_id in defaults
+            (0, catalog_id, CHART_TYPE_CONTRACTS[catalog_id][0],
+             name_by_id[CHART_TYPE_CONTRACTS[catalog_id][0]][0],
+             name_by_id[CHART_TYPE_CONTRACTS[catalog_id][0]][1],
+             CHART_TYPE_CONTRACTS[catalog_id][1], CHART_TYPE_CONTRACTS[catalog_id][2])
+            for catalog_id in defaults
         ]
     return [
         {
-            "chart_id": reference_id, "type": chart_type, "name": name, "category": group,
+            "chart_id": catalog_id, "type": chart_type, "name": name, "category": group,
             "required_roles": required, "optional_roles": optional, "score": score,
         }
-        for score, reference_id, chart_type, name, group, required, optional in scored[:max(1, min(top_n, 10))]
+        for score, catalog_id, chart_type, name, group, required, optional in scored[:max(1, min(top_n, 10))]
     ]
 
 
