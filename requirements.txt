@@ -28,6 +28,7 @@ cryptography>=50.0.1,<51
 paramiko>=5.0,<6
 pypdf>=4.0,<7
 plotly>=5.0,<7
+pyecharts>=2.1,<3
 matplotlib>=3.7,<4
 lark-oapi>=1.7.1,<2
 gspread>=6.0,<7

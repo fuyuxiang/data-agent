@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from typing import Any
@@ -107,6 +108,8 @@ def run_team_member(
     source_ids: list[str],
     session_id: str,
     cancel,
+    result_max_tokens: int = 0,
+    timeout_seconds: int = 300,
 ) -> dict:
     profile = _db().get("agent_profiles", str(member.get("profile_id") or ""))
     effective = {**(profile or {}), **member}
@@ -143,15 +146,24 @@ def run_team_member(
     tool_evidence = []
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": provider["model"]}
     consecutive_errors = 0
+    deadline = time.monotonic() + max(10, min(300, int(timeout_seconds or 300)))
     for _turn in range(12):
         if cancel.is_set():
             raise RuntimeError("团队任务已取消")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"团队成员 {name} 超过执行时限")
         quota = ensure_quota(_db(), team["workspace_id"])
         max_tokens = min(
             int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
             quota["remaining"],
         )
-        response = client.chat.completions.create(
+        if result_max_tokens:
+            max_tokens = min(max_tokens, result_max_tokens)
+        request_client = client
+        if callable(getattr(client, "with_options", None)):
+            request_client = client.with_options(timeout=max(1.0, min(60.0, remaining)))
+        response = request_client.chat.completions.create(
             model=provider["model"], messages=messages, tools=schemas, tool_choice="auto",
             temperature=float(provider.get("temperature", 0.2)), max_tokens=max(1, max_tokens),
         )
@@ -279,6 +291,10 @@ def start_team_plan(team: dict, plan: dict, payload: dict | None = None) -> tupl
         "task": plan.get("goal"), "assignments": assignments,
         "source_ids": payload.get("source_ids") or plan.get("source_ids") or [],
         "session_id": payload.get("session_id"), "context": payload.get("context", ""),
+        "plan_id": plan["id"],
+        "timeout_seconds": payload.get("timeout_seconds"),
+        "max_concurrency": payload.get("max_concurrency"),
+        "result_max_tokens": payload.get("result_max_tokens"),
     })
     plan = _db().patch("team_plans", plan["id"], {"status": "running", "run_id": run["id"]}) or plan
     return plan, run, job
@@ -359,7 +375,19 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
         if not source or source.get("workspace_id", "default") != team["workspace_id"]:
             raise PermissionError("团队任务引用的数据源不属于当前工作空间")
     if existing_run:
-        run = existing_run
+        existing_limits = dict(existing_run.get("limits") or {})
+        limits = {
+            "timeout_seconds": max(10, min(300, int(
+                payload.get("timeout_seconds") or existing_limits.get("timeout_seconds") or 300,
+            ))),
+            "max_concurrency": max(1, min(8, int(
+                payload.get("max_concurrency") or existing_limits.get("max_concurrency") or 6,
+            ))),
+            "result_max_tokens": max(400, min(2500, int(
+                payload.get("result_max_tokens") or existing_limits.get("result_max_tokens") or 1200,
+            ))),
+        }
+        run = _db().patch("team_runs", existing_run["id"], {"limits": limits}) or existing_run
     else:
         assignments = payload.get("assignments")
         if not assignments:
@@ -371,13 +399,19 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
                 for index, member in enumerate(team["members"], 1)
             ]
         tasks = _validate_assignments(team, assignments)
+        limits = {
+            "timeout_seconds": max(10, min(300, int(payload.get("timeout_seconds") or 300))),
+            "max_concurrency": max(1, min(8, int(payload.get("max_concurrency") or min(6, len(tasks))))),
+            "result_max_tokens": max(400, min(2500, int(payload.get("result_max_tokens") or 1200))),
+        }
         run = _db().put(
             "team_runs",
             {
                 "id": _db().new_id("teamrun"), "workspace_id": team["workspace_id"], "team_id": team["id"],
                 "task": task, "context": str(payload.get("context") or "")[:12000], "source_ids": source_ids,
                 "session_id": str(payload.get("session_id") or ""), "status": "queued", "tasks": tasks,
-                "responses": [], "review": None, "summary": "",
+                "responses": [], "review": None, "summary": "", "limits": limits,
+                "plan_id": str(payload.get("plan_id") or ""),
             },
             workspace_id=team["workspace_id"],
         )
@@ -413,10 +447,17 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
                             team, members[item["member_name"]], item["prompt"],
                             f"{stored['context']}\n{dependency_context}", source_ids,
                             stored.get("session_id") or stored["id"], cancel,
+                            int((stored.get("limits") or {}).get("result_max_tokens") or 1200),
+                            int((stored.get("limits") or {}).get("timeout_seconds") or 300),
                         )
                         return item, result
 
-                with ThreadPoolExecutor(max_workers=min(6, len(ready)), thread_name_prefix="meridian-team") as pool:
+                with ThreadPoolExecutor(
+                    max_workers=min(
+                        int((stored.get("limits") or {}).get("max_concurrency") or 6), len(ready),
+                    ),
+                    thread_name_prefix="meridian-team",
+                ) as pool:
                     futures = {pool.submit(execute, item): item for item in ready}
                     for future in as_completed(futures):
                         item = futures[future]
@@ -440,6 +481,11 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
                         _db().put("team_runs", stored, workspace_id=team["workspace_id"])
             if stored.get("status") == "cancelled":
                 final = _db().put("team_runs", stored, workspace_id=team["workspace_id"])
+                if final.get("plan_id"):
+                    _db().patch(
+                        "team_plans", final["plan_id"], {"status": "cancelled", "run_id": final["id"]},
+                        workspace_id=team["workspace_id"],
+                    )
                 return {"status": "cancelled", "run_id": final["id"]}
             review = _quality_review(team, responses, source_ids)
             summary = _synthesize(team, task, responses)
@@ -454,6 +500,11 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
                 },
             })
             _db().put("team_runs", stored, workspace_id=team["workspace_id"])
+            if stored.get("plan_id"):
+                _db().patch(
+                    "team_plans", stored["plan_id"], {"status": status, "run_id": stored["id"]},
+                    workspace_id=team["workspace_id"],
+                )
             return {"run_id": stored["id"], "status": status, "responses": responses, "review": review, "summary": summary}
 
     job = get_job_manager(app).submit(

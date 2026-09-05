@@ -308,6 +308,7 @@ def _chart_html(spec: dict, title: str = "Chart") -> str:
   <title>{title_text}</title>
   <style>html,body,#chart{{width:100%;height:100%;margin:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}</style>
   <script src="/vendor/echarts.min.js"></script>
+  <script src="/vendor/echarts-china.min.js"></script>
 </head>
 <body>
   <div id="chart"></div>
@@ -365,6 +366,7 @@ def _dashboard_html(record: dict) -> str:
     h1{{font-size:22px;margin:0}}h2{{font-size:15px;margin:0 0 10px}}.chart{{height:300px}}
   </style>
   <script src="/vendor/echarts.min.js"></script>
+  <script src="/vendor/echarts-china.min.js"></script>
 </head>
 <body>
   <header><h1>{title}</h1></header>

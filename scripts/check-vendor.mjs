@@ -23,6 +23,13 @@ const echarts = await load('echarts.min.js');
 assert.equal(echarts.echarts?.version, '6.1.0');
 assert.equal(typeof echarts.echarts?.init, 'function');
 
+vm.runInNewContext(
+  await readFile(new URL('../frontend/vendor/echarts-china.min.js', import.meta.url), 'utf8'),
+  echarts,
+  { filename: 'echarts-china.min.js' },
+);
+assert.ok(echarts.echarts?.getMap('china')?.geoJSON);
+
 const marked = await load('marked.min.js');
 assert.equal(typeof marked.marked?.parse, 'function');
 assert.match(marked.marked.parse('# Meridian'), /<h1>Meridian<\/h1>/);

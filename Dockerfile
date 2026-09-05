@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY backend ./backend
 COPY skills ./skills
 COPY deploy/samples ./deploy/samples
-COPY app.py ./
+COPY app.py baa_remote_runner.py README.md THIRD_PARTY_NOTICES.md ./
 COPY scripts/backup.py scripts/restore.py ./scripts/
 COPY --from=frontend-build /workspace/frontend/dist ./frontend
 RUN mkdir -p storage/uploads storage/exports storage/knowledge storage/workspaces storage/trash \

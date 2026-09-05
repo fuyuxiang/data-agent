@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 
-from flask import Blueprint, Response, request, stream_with_context
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ..services.agent_runtime import run_conversation
 from ..services.hooks import dispatch_hooks
@@ -13,6 +14,14 @@ from .common import api_errors, body, db, ok, require_workspace_record, workspac
 bp = Blueprint("conversation", __name__)
 _cancelled: set[str] = set()
 _lock = threading.RLock()
+
+
+def _owned_tool_result(session_id: str, artifact_id: str) -> tuple[dict, dict]:
+    session = require_workspace_record("sessions", session_id)
+    item = require_workspace_record("tool_results", artifact_id, session["workspace_id"])
+    if item.get("session_id") != session_id:
+        raise FileNotFoundError(f"tool_results 记录不存在：{artifact_id}")
+    return session, item
 
 
 @bp.get("/api/sessions/<session_id>/messages")
@@ -25,10 +34,7 @@ def messages(session_id: str):
 @bp.get("/api/sessions/<session_id>/tool-results/<artifact_id>")
 @api_errors
 def tool_result(session_id: str, artifact_id: str):
-    session = require_workspace_record("sessions", session_id)
-    item = require_workspace_record("tool_results", artifact_id, session["workspace_id"])
-    if item.get("session_id") != session_id:
-        raise PermissionError("工具结果不属于当前会话")
+    _, item = _owned_tool_result(session_id, artifact_id)
     content = str(item.get("content") or "")
     query = str(request.args.get("query") or "").strip().lower()
     limit = max(1, min(int(request.args.get("limit", "4000")), 4000))
@@ -50,6 +56,44 @@ def tool_result(session_id: str, artifact_id: str):
         artifact_id=artifact_id, content=content[offset:offset + limit], offset=offset,
         next_offset=offset + limit if offset + limit < len(content) else None,
         total_chars=len(content),
+    )
+
+
+@bp.get("/api/session/<session_id>/tool-results/<artifact_id>")
+@api_errors
+def legacy_tool_result(session_id: str, artifact_id: str):
+    """Serve the reference project's singular-session tool-result contract.
+
+    The modern endpoint above remains paginated JSON.  The compatibility route
+    intentionally returns the complete text by default because legacy clients
+    use it as an artifact URL, while ownership is still checked against both
+    the workspace and session.
+    """
+    _, item = _owned_tool_result(session_id, artifact_id)
+    content = str(item.get("content") or "")
+    content_type = str(item.get("content_type") or "text/plain; charset=utf-8")
+    digest = str(item.get("sha256") or hashlib.sha256(content.encode("utf-8")).hexdigest())
+    record = {
+        "version": 1,
+        "artifact_id": artifact_id,
+        "session_id": session_id,
+        "workspace_id": item.get("workspace_id", ""),
+        "tool": item.get("tool_name", ""),
+        "data": content,
+        "content_type": content_type,
+        "sha256": digest,
+        "total_chars": len(content),
+    }
+    if request.args.get("format") == "json":
+        return jsonify(record)
+    return Response(
+        content,
+        content_type=content_type,
+        headers={
+            "X-Artifact-Id": artifact_id,
+            "X-Tool-Name": str(item.get("tool_name") or ""),
+            "X-Content-SHA256": digest,
+        },
     )
 
 

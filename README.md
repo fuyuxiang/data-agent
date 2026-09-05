@@ -4,6 +4,8 @@
 
 ## 快速开始
 
+最简单的方式是 macOS 双击 `start.command`，或 Windows 双击 `start.bat`。脚本会在项目目录创建独立虚拟环境并安装锁定依赖。也可手动启动：
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -14,6 +16,8 @@ python app.py
 浏览器访问 `http://127.0.0.1:5001`。
 
 如果当前 Python 环境已经包含依赖，也可以直接运行 `python app.py`。生产环境使用已锁定的 `requirements.lock` 和 Waitress，完整配置、备份和容量边界见 [生产运行手册](docs/PRODUCTION.md)。
+
+从 Git 仓库进行一键安装时，macOS/Linux 使用 `install.sh`，Windows PowerShell 使用 `install.ps1`。Railway 可识别根目录的 `railway.json` 和 `Dockerfile`，但上线前仍必须配置生产密钥、可信 Host、Origin 和出站白名单。
 
 ## 前端
 
@@ -43,3 +47,5 @@ npm run build
 - 归档记录可恢复；永久删除要求显式确认。
 
 参考工程审阅见 [docs/REFERENCE_REVIEW.md](docs/REFERENCE_REVIEW.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，功能覆盖见 [docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md)。当前支持单节点生产运行，不代表已具备多副本高可用能力。
+
+> 商用前必读：当前仓库包含受 CC BY-NC 4.0 条款约束的上游同源组件。在获得著作权人书面授权，或完成独立替换前，不应将当前整仓库宣称为可无条件商用。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -352,10 +352,13 @@ def export_dashboard_html(dashboard: dict, workspace_id: str) -> dict:
         )
         for index, widget in enumerate(widgets)
     ]
-    vendor_path = Path(__file__).resolve().parents[2] / "frontend" / "vendor" / "echarts.min.js"
-    if not vendor_path.is_file():
+    vendor_dir = Path(__file__).resolve().parents[2] / "frontend" / "vendor"
+    vendor_path = vendor_dir / "echarts.min.js"
+    map_path = vendor_dir / "echarts-china.min.js"
+    if not vendor_path.is_file() or not map_path.is_file():
         raise FileNotFoundError("ECharts 离线资源不存在")
     echarts_source = vendor_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
+    map_source = map_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
 
     def json_safe(value):
         if isinstance(value, dict):
@@ -371,7 +374,7 @@ def export_dashboard_html(dashboard: dict, workspace_id: str) -> dict:
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(dashboard.get('name', '分析看板'))}</title>
 <style>body{{font:16px system-ui;margin:0;background:#eef2f7;color:#14213d}}header{{padding:32px 5vw;background:#14213d;color:#fff}}main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;padding:24px 5vw}}article{{background:#fff;border-radius:14px;padding:20px;box-shadow:0 8px 24px #14213d12}}h2{{font-size:16px;margin:0 0 8px}}.chart{{height:360px}}.kpi{{display:grid;place-content:center;text-align:center;font-size:42px;font-weight:700}}.kpi small{{font-size:14px;color:#667085}}.error{{display:grid;place-content:center;color:#b42318}}@media print{{body{{background:white}}article{{break-inside:avoid;box-shadow:none;border:1px solid #ddd}}}}</style>
 <header><h1>{html.escape(dashboard.get('name', '分析看板'))}</h1><p>{html.escape(dashboard.get('description', ''))}</p></header><main>{''.join(cards)}</main>
-<script>{echarts_source}</script><script id="dashboard-data" type="application/json">{widget_json}</script>
+<script>{echarts_source}</script><script>{map_source}</script><script id="dashboard-data" type="application/json">{widget_json}</script>
 <script>(function(){{
 const palette=['#167c80','#e59b4c','#4058b4','#9a5bc4','#42a46f','#df6b62'];
 const widgets=JSON.parse(document.getElementById('dashboard-data').textContent);

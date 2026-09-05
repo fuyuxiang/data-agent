@@ -705,6 +705,67 @@ def register_derived_tables(
     return record
 
 
+def delete_derived_tables(table_names: list[str], workspace_id: str) -> dict:
+    """Remove exact tables from derived workbooks while protecting raw sources."""
+    requested = {str(value).strip() for value in table_names if str(value).strip()}
+    if not requested:
+        raise ValueError("请提供至少一个要删除的分析表名")
+    deleted: list[str] = []
+    archived_sources: list[str] = []
+    updated_sources: list[str] = []
+    for source in db().list("sources", workspace_id=workspace_id, limit=5000):
+        if source.get("kind") != "derived":
+            continue
+        tables = list(source.get("tables") or [])
+        matched = [
+            table for table in tables
+            if str(table.get("name") or "") in requested or str(table.get("source_name") or "") in requested
+        ]
+        if not matched:
+            continue
+        matched_names = {
+            str(value) for table in matched for value in (table.get("name"), table.get("source_name")) if value
+        }
+        remaining = [table for table in tables if table not in matched]
+        deleted.extend(str(table.get("name") or table.get("source_name")) for table in matched)
+        if not remaining:
+            db().archive("sources", source["id"], workspace_id=workspace_id)
+            archived_sources.append(source["id"])
+            continue
+        frames = source_frames(source)
+        remaining_frames = {
+            str(table["source_name"]): frames[str(table["source_name"])]
+            for table in remaining
+            if str(table.get("source_name") or "") in frames
+        }
+        if len(remaining_frames) != len(remaining):
+            raise RuntimeError(f"分析表存储与元数据不一致：{source['id']}")
+        path = Path(str(source.get("path") or ""))
+        temporary = path.with_name(f".{path.stem}.{db().new_id('rewrite')}.xlsx")
+        try:
+            with pd.ExcelWriter(temporary, engine="openpyxl") as writer:
+                for sheet, frame in remaining_frames.items():
+                    frame.to_excel(writer, sheet_name=sheet[:31], index=False)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        db().patch("sources", source["id"], {"tables": remaining}, workspace_id=workspace_id)
+        updated_sources.append(source["id"])
+        requested -= matched_names
+    missing = sorted(requested)
+    db().audit(
+        "analysis.tables_deleted", workspace_id=workspace_id, object_type="derived_table",
+        detail={
+            "deleted": deleted, "missing": missing,
+            "archived_sources": archived_sources, "updated_sources": updated_sources,
+        },
+    )
+    return {
+        "deleted": deleted, "deleted_tables": deleted, "missing": missing,
+        "archived_sources": archived_sources, "updated_sources": updated_sources,
+    }
+
+
 def source_frames(source: dict) -> dict[str, pd.DataFrame]:
     if source["kind"] in {
         "file", "http", "derived", "workspace", "google_sheet", "lark_table", "lark_table_snapshot",

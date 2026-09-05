@@ -11,8 +11,9 @@ from flask import current_app
 from ..core.database import Database
 from .analytics import ANALYSIS_METHODS, clean_frame, profile, run_analysis_with_frames
 from .charts import catalog as chart_catalog
-from .charts import make_spec
+from .charts import make_spec, normalize_chart_type, select_charts
 from .datasets import (
+    delete_derived_tables,
     execute_query,
     load_result_frame,
     register_derived_tables,
@@ -74,19 +75,24 @@ BUILTIN_TOOLS = [
     ),
     _function(
         "select_chart",
-        "List supported chart types and recommend an appropriate chart for a query result.",
-        {"result_id": {"type": "string"}},
+        "Rank supported chart types from the visualization intent, available columns, and optional query result.",
+        {
+            "user_intent": {"type": "string"},
+            "available_columns": {"type": "array", "items": {"type": "string"}},
+            "result_id": {"type": "string"},
+        },
     ),
     _function(
         "generate_chart",
         "Generate and save a chart specification from a prior query result.",
         {
             "result_id": {"type": "string"}, "type": {"type": "string"},
+            "chart_type": {"type": "string"}, "sql": {"type": "string"},
+            "field_mapping": {"type": "object"},
             "title": {"type": "string"}, "x": {"type": "string"},
             "y": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
             "group": {"type": "string"}, "options": {"type": "object"},
         },
-        ["result_id"],
     ),
     _function(
         "export_excel",
@@ -110,21 +116,27 @@ BUILTIN_TOOLS = [
     _function(
         "memory_read",
         "Read enabled long-term memories in the current workspace.",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+        {
+            "name": {"type": "string"}, "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        },
     ),
     _function(
         "search_mcp_tools",
         "Search tools discovered from connected MCP servers.",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10}},
+        {
+            "query": {"type": "string"}, "server": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
         ["query"],
     ),
 ]
 
 EXTRA_TOOLS = [
     _function("workspace_status", "Show mounted and system workspace roots and safety limits."),
-    _function("get_table_detail", "Return detailed schema for one exact table.", {"source_id": {"type": "string"}, "table": {"type": "string"}}, ["table"]),
+    _function("get_table_detail", "Return detailed schema for one exact table.", {"source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}}),
     _function("create_analysis_table", "Create a queryable derived table from read-only SQL.", {"sql": {"type": "string"}, "table_name": {"type": "string"}}, ["sql", "table_name"]),
-    _function("delete_analysis_tables", "Archive derived analysis sources only.", {"source_ids": {"type": "array", "items": {"type": "string"}}, "confirm": {"type": "boolean"}}, ["source_ids", "confirm"]),
+    _function("delete_analysis_tables", "Delete named derived tables or archive exact derived sources only.", {"source_ids": {"type": "array", "items": {"type": "string"}}, "table_names": {"type": "array", "items": {"type": "string"}}, "confirm": {"type": "boolean"}}, ["confirm"]),
     _function("clean_data", "Apply non-destructive cleaning and create a derived source.", {"result_id": {"type": "string"}, "source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}, "operations": {"type": "array", "items": {"type": "object"}}, "operation": {"type": "string", "enum": ["fill_na", "winsorize", "trimming"]}, "columns": {"type": "array", "items": {"type": "string"}}, "fill_method": {"type": "string"}, "lower_pct": {"type": "number"}, "upper_pct": {"type": "number"}, "trim_column": {"type": "string"}, "min_val": {"type": "number"}, "max_val": {"type": "number"}, "output_table": {"type": "string"}, "name": {"type": "string"}}),
     _function("propose_excel_export", "Return an Excel export outline for user review.", {"title": {"type": "string"}, "tables": {"type": "array", "items": {"type": "string"}}, "filename": {"type": "string"}, "summary": {"type": "string"}}),
     _function("propose_report_outline", "Return a report outline for user review.", {"title": {"type": "string"}, "sections": {"type": "array", "items": {"type": "object"}}}),
@@ -132,10 +144,10 @@ EXTRA_TOOLS = [
     _function("generate_ppt", "Generate a PPTX from a query result and grounded outline.", {"result_id": {"type": "string"}, "title": {"type": "string"}, "filename": {"type": "string"}, "slides": {"type": "array", "items": {"type": "object"}}, "summary": {"type": "string"}, "insights": {"type": "array", "items": {"type": "string"}}}),
     _function("set_ppt_color_scheme", "Select a validated color scheme for later PPT generation.", {"scheme": {"type": "string"}, "colors": {"type": "array", "items": {"type": "string"}}}, ["scheme"]),
     _function("propose_dashboard_outline", "Return a dashboard widget outline for user review.", {"name": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}}),
-    _function("generate_dashboard", "Create a refreshable dashboard from widget query results or SQL.", {"name": {"type": "string"}, "description": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}}, ["name", "widgets"]),
-    _function("ask_user", "Ask the user for missing information; the question is surfaced as a structured event.", {"question": {"type": "string"}, "choices": {"type": "array", "items": {"type": "string"}}}, ["question"]),
+    _function("generate_dashboard", "Create a refreshable dashboard from widget query results or SQL.", {"name": {"type": "string"}, "description": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}, "color_scheme": {"type": "string"}}, ["name", "widgets"]),
+    _function("ask_user", "Ask the user for missing information; the question is surfaced as a structured event.", {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 6}, "choices": {"type": "array", "items": {"type": "string"}}, "multi_select": {"type": "boolean"}}, ["question"]),
     _function("browse_webpage", "Read bounded text from an explicitly provided public HTTP(S) page.", {"url": {"type": "string"}, "max_chars": {"type": "integer"}}, ["url"]),
-    _function("configure_hooks", "Create one or more workspace lifecycle hooks.", {"hooks": {"type": "array", "items": {"type": "object"}}}, ["hooks"]),
+    _function("configure_hooks", "Create, replace, or merge workspace lifecycle hooks.", {"settings": {"type": "object"}, "hooks": {"type": "array", "items": {"type": "object"}}, "merge": {"type": "boolean"}, "reason": {"type": "string"}, "confirm_command_hooks": {"type": "boolean"}}),
     _function("list_feishu_bitable_tables", "List tables in a Feishu Bitable using configured application credentials.", {"bitable": {"type": "string"}}, ["bitable"]),
     _function("load_feishu_bitable", "Load a bounded Feishu Bitable snapshot as an analyzable source.", {"bitable": {"type": "string"}, "table_id": {"type": "string"}, "source_name": {"type": "string"}, "max_records": {"type": "integer"}}, ["bitable"]),
     _function("create_feishu_bitable", "Create a Feishu Bitable after explicit external-write confirmation.", {"name": {"type": "string"}, "table_name": {"type": "string"}, "fields": {"type": "array", "items": {"type": "string"}}, "records": {"type": "array", "items": {"type": "object"}}, "folder_token": {"type": "string"}, "confirm": {"type": "boolean"}}, ["name", "table_name", "fields", "confirm"]),
@@ -163,7 +175,7 @@ EXTRA_TOOLS = [
     _function("send_message", "Send a team mailbox message.", {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, ["team_name", "recipient", "message"]),
     _function("agent_delegate", "Run one bounded delegated reasoning task with read-only evidence tools.", {"prompt": {"type": "string"}, "description": {"type": "string"}, "team_name": {"type": "string"}, "member_name": {"type": "string"}}, ["prompt"]),
     _function("team_plan_create", "Create and validate a dependency-aware team plan without running it.", {"team_name": {"type": "string"}, "goal": {"type": "string"}, "assignments": {"type": "array", "items": {"type": "object"}}}, ["team_name", "goal", "assignments"]),
-    _function("team_delegate", "Start or retry a bounded parallel team plan.", {"team_name": {"type": "string"}, "goal": {"type": "string"}, "plan_id": {"type": "string"}, "retry_plan_id": {"type": "string"}, "retry_task_ids": {"type": "array", "items": {"type": "string"}}, "assignments": {"type": "array", "items": {"type": "object"}}, "source_ids": {"type": "array", "items": {"type": "string"}}}, ["team_name"]),
+    _function("team_delegate", "Start, retry, or revise a bounded parallel team plan.", {"team_name": {"type": "string"}, "goal": {"type": "string"}, "plan_id": {"type": "string"}, "retry_plan_id": {"type": "string"}, "retry_task_ids": {"type": "array", "items": {"type": "string"}}, "review_plan_id": {"type": "string"}, "review_task_ids": {"type": "array", "items": {"type": "string"}}, "assignments": {"type": "array", "items": {"type": "object"}}, "source_ids": {"type": "array", "items": {"type": "string"}}, "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 300}, "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8}, "result_max_tokens": {"type": "integer", "minimum": 400, "maximum": 2500}}, ["team_name"]),
     _function("workflow_create", "Create and publish an auditable workflow from a built-in template.", {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string"}, "template": {"type": "string"}, "source_key": {"type": "string"}}),
     _function("workflow_create_custom", "Create and publish a custom dependency-aware Agent workflow.", {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string"}, "source_key": {"type": "string"}, "agents": {"type": "array", "items": {"type": "object"}}}, ["name", "agents"]),
     _function("workflow_list", "List published workspace workflows."),
@@ -349,10 +361,12 @@ def _frame(context: AgentToolContext, args: dict):
     return source_table(source, args.get("table") or args.get("table_name"))[1], ""
 
 
-def _search_mcp(context: AgentToolContext, query: str, limit: int) -> list[dict]:
+def _search_mcp(context: AgentToolContext, query: str, limit: int, server_filter: str = "") -> list[dict]:
     terms = {part for part in re.split(r"\W+", query.lower()) if part}
     ranked = []
     for exposed, (server_id, raw_name) in context.mcp_names.items():
+        if server_filter and server_id != server_filter:
+            continue
         server = context.database.get("mcp_servers", server_id) or {}
         tool = next((item for item in server.get("tools", []) if item.get("name") == raw_name), {})
         haystack = f"{raw_name} {tool.get('description', '')}".lower()
@@ -573,15 +587,91 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         )
         return _public_record(record), events
     if name == "select_chart":
-        frame, result_id = _frame(context, args)
-        recommendation = make_spec(frame, title="图表推荐")["type"]
-        return {"result_id": result_id or None, "recommended": recommendation, "catalog": chart_catalog()}, events
+        result_id = ""
+        columns = [str(value) for value in args.get("available_columns") or []]
+        if args.get("result_id") or (not columns and context.latest_result_id):
+            frame, result_id = _frame(context, args)
+            columns = [str(value) for value in frame.columns]
+        candidates = select_charts(str(args.get("user_intent") or ""), columns, 3)
+        return {
+            "result_id": result_id or None, "recommended": candidates[0]["type"],
+            "candidates": candidates, "catalog": chart_catalog(),
+        }, events
     if name == "generate_chart":
+        if args.get("sql") and not args.get("result_id"):
+            query = execute_query(
+                context.source_ids, str(args["sql"]), context.workspace_id,
+                int(args.get("limit", 5000)),
+            )
+            context.latest_result_id = query["id"]
         frame, result_id = _frame(context, args)
+        mapping = args.get("field_mapping") if isinstance(args.get("field_mapping"), dict) else {}
+        requested_type = str(args.get("type") or args.get("chart_type") or "")
+        chart_type = normalize_chart_type(requested_type, mapping)
+        explicit_y = args.get("y")
+        if explicit_y is None:
+            explicit_y = mapping.get("value_cols") or mapping.get("y")
+        if explicit_y is None:
+            roles = (
+                "value", "values", "actual", "target", "start", "end", "left_value", "right_value",
+                "z", "weight", "longitude", "latitude", "size",
+            )
+            explicit_y = [mapping[role] for role in roles if mapping.get(role) is not None]
+        x = args.get("x")
+        if not x:
+            for role in ("x", "time", "category", "label", "group", "source", "names", "labels"):
+                value = mapping.get(role)
+                if isinstance(value, str):
+                    x = value
+                    break
+        if chart_type in {"boxplot", "violin", "beeswarm"} and mapping.get("x"):
+            x = mapping["x"]
+        if chart_type == "dot_map" and mapping.get("longitude") and mapping.get("latitude"):
+            explicit_y = [mapping["longitude"], mapping["latitude"]]
+            if mapping.get("value"):
+                explicit_y.append(mapping["value"])
+        if chart_type in {"scatter", "bubble", "connected_scatter"} and isinstance(mapping.get("size"), str):
+            relationship_y = [explicit_y] if isinstance(explicit_y, str) else list(explicit_y or [])
+            if mapping["size"] not in relationship_y:
+                relationship_y.append(mapping["size"])
+            explicit_y = relationship_y
+        if chart_type == "parallel" and isinstance(mapping.get("dimensions"), list):
+            dimensions = [str(value) for value in mapping["dimensions"]]
+            selected_dimensions = [value for value in dimensions if value in frame.columns]
+            if isinstance(mapping.get("color"), str) and mapping["color"] in frame.columns:
+                selected_dimensions.append(mapping["color"])
+            frame = frame[list(dict.fromkeys(selected_dimensions))]
+            x, explicit_y = (dimensions[0] if dimensions else None), dimensions[1:]
+        ordered_roles = {
+            "heatmap": ("x", "y", "value"),
+            "sankey": ("source", "target", "value"),
+            "chord": ("source", "target", "value"),
+            "network": ("source", "target", "weight"),
+        }.get(str(chart_type))
+        if chart_type == "network" and not mapping.get("source") and mapping.get("x") and mapping.get("y"):
+            ordered_roles = ("x", "y", "z")
+        if ordered_roles:
+            ordered = [str(mapping[role]) for role in ordered_roles if isinstance(mapping.get(role), str)]
+            if len(ordered) != len(set(ordered)):
+                raise ValueError(f"{requested_type or chart_type} 的字段角色必须映射到不同列")
+            if len(ordered) >= 2 and all(value in frame.columns for value in ordered):
+                frame = frame[ordered]
+                x, explicit_y = ordered[0], ordered[1:]
+        options = {**(args.get("options") or {})}
+        for role in (
+            "parents", "color", "category", "type", "low", "medium", "high",
+            "highlight", "order", "x_mid", "y_mid",
+        ):
+            if mapping.get(role) is not None:
+                options[role] = mapping[role]
+        if requested_type == "Marimekko_PCT":
+            options["percent"] = True
         spec = make_spec(
-            frame, chart_type=args.get("type"), title=str(args.get("title") or "分析结果"),
-            x=args.get("x"), y=args.get("y"), group=args.get("group"), options=args.get("options"),
+            frame, chart_type=chart_type, title=str(args.get("title") or "分析结果"),
+            x=x, y=explicit_y, group=args.get("group") or mapping.get("series") or mapping.get("group"),
+            options=options,
         )
+        spec["reference_chart_id"] = requested_type or None
         chart = context.database.put(
             "charts",
             {
@@ -624,14 +714,18 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         events.append(("artifact", public))
         return public, events
     if name == "memory_read":
+        query = str(args.get("name") or args.get("query") or "")
         return {
             "items": search_memories(
-                str(args.get("query") or ""), context.workspace_id,
+                query, context.workspace_id,
                 max(1, min(int(args.get("limit", 12)), 20)),
             ),
         }, events
     if name == "search_mcp_tools":
-        return {"items": _search_mcp(context, str(args.get("query") or ""), max(1, min(int(args.get("limit", 5)), 10)))}, events
+        return {"items": _search_mcp(
+            context, str(args.get("query") or ""), max(1, min(int(args.get("limit", 5)), 10)),
+            str(args.get("server") or ""),
+        )}, events
     if name == "workspace_status":
         return WorkspaceFiles(
             context.database, context.workspace_id, context.read_paths, context.session_id,
@@ -642,12 +736,15 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         if not source or source.get("workspace_id", "default") != context.workspace_id:
             raise ValueError("数据源不存在或不属于当前工作空间")
         schema = schema_for_source(source)
+        table_name = args.get("table") or args.get("table_name")
+        if not table_name:
+            raise ValueError("get_table_detail 需要 table 或 table_name")
         table = next(
-            (item for item in schema["tables"] if item["name"] == args.get("table") or item["source_name"] == args.get("table")),
+            (item for item in schema["tables"] if item["name"] == table_name or item["source_name"] == table_name),
             None,
         )
         if not table:
-            raise ValueError(f"数据表不存在：{args.get('table')}")
+            raise ValueError(f"数据表不存在：{table_name}")
         return {"source_id": source_id, "table": table}, events
     if name == "create_analysis_table":
         query = execute_query(context.source_ids, str(args.get("sql") or ""), context.workspace_id, 5000)
@@ -663,6 +760,14 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
     if name == "delete_analysis_tables":
         if args.get("confirm") is not True:
             raise PermissionError("删除分析表需要 confirm=true")
+        if args.get("table_names"):
+            result = delete_derived_tables(
+                [str(value) for value in args.get("table_names") or []], context.workspace_id,
+            )
+            for source_id in result["archived_sources"]:
+                if source_id in context.source_ids:
+                    context.source_ids.remove(source_id)
+            return result, events
         archived = []
         for source_id in args.get("source_ids") or []:
             source = context.database.get("sources", str(source_id))
@@ -766,9 +871,21 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         events.append(("dashboard", {"id": dashboard["id"], "name": dashboard["name"]}))
         return {"dashboard": dashboard, "url": f"/api/dashboards/{dashboard['id']}"}, events
     if name == "ask_user":
-        request = {"question": str(args.get("question") or ""), "choices": args.get("choices") or []}
-        events.append(("ask_user", request))
-        return {**request, "status": "awaiting_user_reply"}, events
+        question = str(args.get("question") or "").strip()
+        choices = args.get("options") if args.get("options") is not None else args.get("choices")
+        if not question:
+            raise ValueError("ask_user 需要非空 question")
+        if not isinstance(choices, list) or not 2 <= len(choices) <= 6:
+            raise ValueError("ask_user 需要 2–6 个 options/choices")
+        normalized = [str(value).strip()[:40] for value in choices]
+        if any(not value for value in normalized):
+            raise ValueError("ask_user 选项不能为空")
+        interaction = {
+            "question": question[:120], "choices": normalized, "options": normalized,
+            "multi_select": bool(args.get("multi_select", False)),
+        }
+        events.append(("ask_user", interaction))
+        return {**interaction, "status": "awaiting_user_reply"}, events
     if name == "browse_webpage":
         response = safe_http_request("GET", str(args.get("url") or ""), timeout=20)
         response.raise_for_status()
@@ -783,26 +900,48 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         limit = max(100, min(int(args.get("max_chars", 12000)), 20000))
         return {"url": response.url, "status": response.status_code, "content": text[:limit]}, events
     if name == "configure_hooks":
-        hooks = args.get("hooks")
+        settings = args.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            raise ValueError("settings 必须是对象")
+        hooks = (settings or {}).get("hooks") if settings is not None else args.get("hooks")
         if not isinstance(hooks, list) or not hooks or len(hooks) > 20:
-            raise ValueError("hooks 需要 1–20 个配置")
+            raise ValueError("settings.hooks/hooks 需要 1–20 个配置")
+        merge = bool(args.get("merge", True))
+        current_hooks = context.database.list("hooks", workspace_id=context.workspace_id, limit=5000)
+        current_by_id = {str(item["id"]): item for item in current_hooks}
+        if not merge:
+            for item in current_hooks:
+                context.database.archive("hooks", item["id"], workspace_id=context.workspace_id)
         created = []
         for value in hooks:
             if not isinstance(value, dict) or not value.get("event") or not isinstance(value.get("action"), dict):
                 raise ValueError("Hook 需要 event 和 action")
+            action = dict(value["action"])
+            if str(action.get("type") or "").lower() == "command" and args.get("confirm_command_hooks") is not True:
+                raise PermissionError("命令 Hook 需要 confirm_command_hooks=true，且运行时仍受管理员允许列表限制")
+            requested_id = str(value.get("id") or "").strip()[:128]
+            previous = current_by_id.get(requested_id, {}) if merge and requested_id else {}
             created.append(context.database.put(
                 "hooks",
                 {
-                    "id": context.database.new_id("hook"), "workspace_id": context.workspace_id,
+                    **previous,
+                    "id": requested_id or context.database.new_id("hook"), "workspace_id": context.workspace_id,
                     "name": str(value.get("name") or value["event"])[:100],
                     "event": str(value["event"])[:100], "condition": value.get("condition", {}),
-                    "action": value["action"], "enabled": bool(value.get("enabled", True)),
+                    "action": action,
+                    "enabled": bool((settings or {}).get("enabled", True) and value.get("enabled", True)),
                     "once": bool(value.get("once", False)), "once_scope": value.get("once_scope", "session"),
-                    "run_count": 0, "execution_keys": [],
+                    "run_count": int(previous.get("run_count", 0)),
+                    "execution_keys": list(previous.get("execution_keys") or []),
                 },
                 workspace_id=context.workspace_id,
             ))
-        return {"items": created}, events
+        return {
+            "items": created, "merge": merge, "hook_count": len(created),
+            "hook_ids": [item["id"] for item in created],
+            "reason": str(args.get("reason") or "")[:500],
+            "command_hooks_enabled": any(item["action"].get("type") == "command" for item in created),
+        }, events
     if name in {
         "list_feishu_bitable_tables", "load_feishu_bitable", "create_feishu_bitable",
         "append_feishu_bitable_records", "update_feishu_bitable_record",
@@ -1028,15 +1167,39 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             plan, run, job = start_team_plan(team, plan, {
                 "source_ids": args.get("source_ids") or context.source_ids,
                 "session_id": context.session_id,
+                "timeout_seconds": args.get("timeout_seconds"),
+                "max_concurrency": args.get("max_concurrency"),
+                "result_max_tokens": args.get("result_max_tokens"),
             })
             return {"plan": plan, "run": run, "job": job}, events
+        if args.get("review_plan_id"):
+            plan = _named_record(context, "team_plans", str(args["review_plan_id"]))
+            if not plan.get("run_id"):
+                raise ValueError("团队计划尚未执行")
+            run = _named_record(context, "team_runs", str(plan["run_id"]))
+            if run.get("status") != "needs_review":
+                raise ValueError("只有 needs_review 状态的团队计划可按复核意见修订")
+            review_ids = [str(value) for value in args.get("review_task_ids") or []]
+            selected = review_ids or [item["id"] for item in run.get("tasks") or []]
+            reset = retry_team_run(run, selected)
+            rerun, job = start_team_run(team, {
+                "timeout_seconds": args.get("timeout_seconds"),
+                "max_concurrency": args.get("max_concurrency"),
+                "result_max_tokens": args.get("result_max_tokens"),
+            }, existing_run=reset)
+            context.database.patch("team_plans", plan["id"], {"status": "running"})
+            return {"plan": plan, "run": rerun, "job": job, "review_task_ids": selected}, events
         if args.get("retry_plan_id"):
             plan = _named_record(context, "team_plans", str(args["retry_plan_id"]))
             if not plan.get("run_id"):
                 raise ValueError("团队计划尚未执行")
             run = _named_record(context, "team_runs", str(plan["run_id"]))
             reset = retry_team_run(run, [str(value) for value in args.get("retry_task_ids") or []] or None)
-            rerun, job = start_team_run(team, {}, existing_run=reset)
+            rerun, job = start_team_run(team, {
+                "timeout_seconds": args.get("timeout_seconds"),
+                "max_concurrency": args.get("max_concurrency"),
+                "result_max_tokens": args.get("result_max_tokens"),
+            }, existing_run=reset)
             context.database.patch("team_plans", plan["id"], {"status": "running"})
             return {"plan": plan, "run": rerun, "job": job}, events
 
@@ -1044,6 +1207,9 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             "task": args.get("goal"), "assignments": args.get("assignments"),
             "source_ids": args.get("source_ids") or context.source_ids,
             "session_id": context.session_id,
+            "timeout_seconds": args.get("timeout_seconds"),
+            "max_concurrency": args.get("max_concurrency"),
+            "result_max_tokens": args.get("result_max_tokens"),
         })
         return {"run": run, "job": job}, events
     if name in {"workflow_create", "workflow_create_custom"}:

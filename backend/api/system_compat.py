@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,11 +26,16 @@ from .common import api_errors, body, require_system_owner, workspace_id
 
 
 bp = Blueprint("system_compat", __name__)
-CURRENT_VERSION = "v1.0.0"
-RELEASES_API = "https://api.github.com/repos/Zafer-Liu/Data-Analysis-Agent/releases/latest"
-RELEASES_PAGE = "https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest"
+CURRENT_VERSION = os.getenv("MERIDIAN_VERSION", "v1.0.0").strip() or "v1.0.0"
+RELEASE_REPOSITORY = os.getenv("MERIDIAN_RELEASE_REPOSITORY", "fuyuxiang/data-agent").strip()
+if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", RELEASE_REPOSITORY):
+    RELEASE_REPOSITORY = "fuyuxiang/data-agent"
+RELEASES_API = f"https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{RELEASE_REPOSITORY}/releases/latest"
 _directory_lock = threading.Lock()
 _download_lock = threading.Lock()
+_update_lock = threading.Lock()
+_update_cache: dict = {"timestamp": 0.0, "payload": None}
 
 
 def _version(value: str) -> tuple[int, int, int]:
@@ -97,6 +103,12 @@ def select_directory():
 
 @bp.get("/api/system/check-update")
 def check_update():
+    now = time.monotonic()
+    with _update_lock:
+        cached = _update_cache.get("payload")
+        cached_at = float(_update_cache.get("timestamp") or 0)
+        if cached and now - cached_at < 15 * 60:
+            return jsonify({**cached, "source": "cache"})
     try:
         response = safe_http_request(
             "GET", RELEASES_API, timeout=15,
@@ -105,7 +117,7 @@ def check_update():
         response.raise_for_status()
         release = response.json()
         latest = str(release.get("tag_name") or "")
-        return jsonify({
+        payload = {
             "ok": True, "source": "github_api", "current_version": CURRENT_VERSION,
             "latest_version": latest, "has_update": _version(latest) > _version(CURRENT_VERSION),
             "release_url": release.get("html_url", RELEASES_PAGE),
@@ -114,8 +126,43 @@ def check_update():
                 "name": item.get("name", ""), "size": item.get("size", 0),
                 "download_url": item.get("browser_download_url", ""),
             } for item in release.get("assets") or []],
-        })
+        }
+        with _update_lock:
+            _update_cache.update(timestamp=now, payload=payload)
+        return jsonify(payload)
     except Exception as exc:
+        with _update_lock:
+            cached = _update_cache.get("payload")
+            cached_at = float(_update_cache.get("timestamp") or 0)
+        if cached and now - cached_at < 24 * 60 * 60:
+            return jsonify({
+                **cached, "source": "stale_cache", "stale": True,
+                "warning": "GitHub 更新检查暂时不可用，已返回最近一次成功结果。",
+            })
+        try:
+            fallback = safe_http_request(
+                "GET", RELEASES_PAGE, timeout=15,
+                headers={"User-Agent": f"Meridian/{CURRENT_VERSION}", "Accept": "text/html"},
+            )
+            fallback.raise_for_status()
+            match = re.search(r"/releases/tag/([^/?#\"']+)", str(fallback.url)) or re.search(
+                rf"/{re.escape(RELEASE_REPOSITORY)}/releases/tag/([^/?#\"']+)", fallback.text[:512_000],
+            )
+            if match:
+                latest = match.group(1)
+                payload = {
+                    "ok": True, "source": "github_page", "current_version": CURRENT_VERSION,
+                    "latest_version": latest, "has_update": _version(latest) > _version(CURRENT_VERSION),
+                    "release_url": str(fallback.url), "release_notes": "", "published_at": "", "assets": [],
+                    "warning": "GitHub API 暂时不可用，已通过 Releases 页面确认版本。",
+                }
+                with _update_lock:
+                    _update_cache.update(timestamp=now, payload=payload)
+                return jsonify(payload)
+        except Exception as fallback_exc:
+            current_app.logger.info(
+                "GitHub release page fallback failed: %s", type(fallback_exc).__name__,
+            )
         return jsonify({
             "ok": False, "code": "github_update_check_failed", "error": f"检查更新失败：{exc}",
             "current_version": CURRENT_VERSION, "release_url": RELEASES_PAGE, "retryable": True,

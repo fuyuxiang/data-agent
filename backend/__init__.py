@@ -72,6 +72,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             settings.frontend_dir / "index.html",
             settings.frontend_dir / "src" / "renders.js",
             settings.frontend_dir / "vendor" / "vue.global.prod.js",
+            settings.frontend_dir / "vendor" / "echarts-china.min.js",
             settings.frontend_dir / "drawio" / "index.html",
         )
         if not all(path.is_file() for path in required_frontend_files):
