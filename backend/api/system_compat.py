@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -57,9 +58,17 @@ def select_directory():
         if not initial.is_dir():
             initial = Path.home()
         if platform.system() == "Darwin":
-            script = 'POSIX path of (choose folder with prompt "选择要挂载的工作目录" default location POSIX file "' + str(initial).replace('"', '\\"') + '")'
-            completed = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, text=True,
+            executable = shutil.which("osascript")
+            if not executable:
+                raise FileNotFoundError("当前系统未安装 osascript")
+            script = (
+                "on run argv\n"
+                "set initialFolder to POSIX file (item 1 of argv)\n"
+                'return POSIX path of (choose folder with prompt "选择要挂载的工作目录" '
+                "default location initialFolder)\nend run"
+            )
+            completed = subprocess.run(  # noqa: S603 -- fixed osascript executable; path is passed as argv
+                [executable, "-e", script, "--", str(initial)], capture_output=True, text=True,
                 timeout=300, check=False,
             )
             if completed.returncode:

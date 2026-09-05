@@ -48,7 +48,7 @@ def parse_knowledge_file():
     suffix = Path(original_name).suffix.lower()
     if suffix not in {".xlsx", ".xls", ".docx"}:
         raise ValueError(f"不支持的文件格式 {suffix}，请上传 .xlsx / .xls / .docx")
-    wid = str(request.form.get("workspace_id") or request.headers.get("X-Workspace-Id") or "default")[:128]
+    wid = workspace_id()
     stem = "".join(character if character.isalnum() or character in "-_." else "_" for character in Path(original_name).stem)[:60] or "knowledge"
     import_id = db().new_id("kbimp")
     filename = f"{import_id.split('_', 1)[-1][:8]}_{stem}{suffix}"

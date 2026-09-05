@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
@@ -13,12 +15,13 @@ import duckdb
 import numpy as np
 import pandas as pd
 from flask import current_app
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import URL, make_url
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
 from ..core.database import Database, utcnow
-from .security import SecretVault, safe_http_request, validate_outbound_url
+from .security import SecretVault, safe_http_request, validate_outbound_host, validate_outbound_url
 from .sql_security import bounded_read_only_sql, validate_read_only_sql
 
 
@@ -46,6 +49,9 @@ def _configure_read_only(connection, timeout_seconds: int) -> None:
     if dialect == "sqlite":
         connection.exec_driver_sql("PRAGMA query_only = ON")
         connection.exec_driver_sql(f"PRAGMA busy_timeout = {timeout_ms}")
+        deadline = time.monotonic() + timeout_seconds
+        raw = connection.connection.driver_connection
+        raw.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
     elif dialect == "postgresql":
         connection.exec_driver_sql("SET TRANSACTION READ ONLY")
         connection.exec_driver_sql(f"SET LOCAL statement_timeout = {timeout_ms}")
@@ -54,6 +60,25 @@ def _configure_read_only(connection, timeout_seconds: int) -> None:
         connection.exec_driver_sql(f"SET SESSION MAX_EXECUTION_TIME = {timeout_ms}")
     elif dialect == "mssql":
         connection.exec_driver_sql(f"SET LOCK_TIMEOUT {timeout_ms}")
+        connection.exec_driver_sql("SET DEADLOCK_PRIORITY LOW")
+
+
+def _database_engine(url: str):
+    engine = create_engine(url, pool_pre_ping=True, pool_recycle=300)
+    if engine.dialect.name == "mssql":
+        timeout = settings().query_timeout_seconds
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _set_query_timeout(_conn, cursor, _statement, _parameters, _context, _executemany):
+            cursor.timeout = timeout
+    return engine
+
+
+def _qualified_table(engine, table: dict) -> str:
+    quote = engine.dialect.identifier_preparer.quote
+    name = quote(str(table["source_name"]))
+    schema_name = str(table.get("schema_name") or "").strip()
+    return f"{quote(schema_name)}.{name}" if schema_name else name
 
 
 def _json_safe(value: Any) -> Any:
@@ -196,84 +221,160 @@ def register_upload(file: FileStorage, workspace_id: str) -> dict:
     return record
 
 
+def _checked_sqlite_path(url: URL, workspace_id: str) -> str:
+    path = Path(str(url.database or "")).expanduser().resolve()
+    workspace = db().get("workspaces", workspace_id) or {}
+    allowed = [settings().storage_dir.resolve()]
+    if workspace.get("mounted_path"):
+        allowed.append(Path(workspace["mounted_path"]).resolve())
+    if not any(path == root or root in path.parents for root in allowed):
+        raise ValueError("SQLite 文件必须位于工作区存储或已挂载目录内")
+    return str(path)
+
+
+def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) -> str:
+    try:
+        url = make_url(str(raw_url)) if not isinstance(raw_url, URL) else raw_url
+    except Exception as exc:
+        raise ValueError("数据库连接字符串无效") from exc
+    backend = url.get_backend_name().lower()
+    supported = {
+        "sqlite": {"sqlite"},
+        "postgresql": {"postgresql", "postgresql+psycopg2"},
+        "mysql": {"mysql", "mysql+pymysql"},
+        "mssql": {"mssql", "mssql+pyodbc"},
+    }
+    if backend not in supported or url.drivername not in supported[backend]:
+        raise ValueError("数据库驱动必须是 SQLite、psycopg2、PyMySQL 或 pyodbc")
+    if backend == "sqlite":
+        path = _checked_sqlite_path(url, workspace_id)
+        return URL.create("sqlite", database=path).render_as_string(hide_password=False)
+    if not url.host:
+        raise ValueError("数据库连接必须包含主机名")
+    default_ports = {"postgresql": 5432, "mysql": 3306, "mssql": 1433}
+    port = int(url.port or default_ports[backend])
+    if not 1 <= port <= 65535:
+        raise ValueError("数据库端口必须在 1-65535 之间")
+    production = settings().environment == "production"
+    database_allowlist = {
+        item.strip().lower().rstrip(".")
+        for item in os.getenv("MERIDIAN_DATABASE_HOST_ALLOWLIST", "").split(",")
+        if item.strip()
+    }
+    if production and not database_allowlist:
+        raise ValueError("生产环境连接数据库前必须配置 MERIDIAN_DATABASE_HOST_ALLOWLIST")
+    validate_outbound_host(
+        str(url.host), port, allowlist=database_allowlist,
+        allow_private=os.getenv("MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", "0") == "1",
+    )
+    query = {str(key): str(value) for key, value in url.query.items()}
+    if "odbc_connect" in {key.lower() for key in query}:
+        raise ValueError("不允许使用可绕过安全配置的 odbc_connect 参数")
+    connect_timeout = max(1, min(int(config.get("connect_timeout") or 10), 60))
+    drivername = {
+        "postgresql": "postgresql+psycopg2",
+        "mysql": "mysql+pymysql",
+        "mssql": "mssql+pyodbc",
+    }[backend]
+    if backend == "postgresql":
+        ssl_mode = str(config.get("ssl_mode") or query.get("sslmode") or ("verify-full" if production else "prefer")).lower()
+        if ssl_mode not in {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}:
+            raise ValueError("PostgreSQL ssl_mode 无效")
+        if production and ssl_mode not in {"verify-ca", "verify-full"}:
+            raise ValueError("生产环境 PostgreSQL 必须验证 TLS 证书")
+        query = {key: value for key, value in query.items() if key.lower() not in {"sslmode", "connect_timeout"}}
+        query.update({"sslmode": ssl_mode, "connect_timeout": str(connect_timeout)})
+    elif backend == "mysql":
+        ssl_mode = str(config.get("ssl_mode") or ("verify-identity" if production else "preferred")).lower()
+        if ssl_mode not in {"disabled", "preferred", "required", "verify-ca", "verify-identity"}:
+            raise ValueError("MySQL ssl_mode 无效")
+        if production and ssl_mode != "verify-identity":
+            raise ValueError("生产环境 MySQL 必须验证 TLS 证书和主机名")
+        query = {
+            key: value for key, value in query.items()
+            if key.lower() not in {"connect_timeout", "ssl_disabled", "ssl_verify_cert", "ssl_verify_identity"}
+        }
+        query["connect_timeout"] = str(connect_timeout)
+        if ssl_mode == "disabled":
+            query["ssl_disabled"] = "true"
+        elif ssl_mode != "preferred":
+            query["ssl_verify_cert"] = "true" if ssl_mode in {"verify-ca", "verify-identity"} else "false"
+            query["ssl_verify_identity"] = "true" if ssl_mode == "verify-identity" else "false"
+    else:
+        query = {
+            key: value for key, value in query.items()
+            if key.lower().replace(" ", "") not in {
+                "driver", "encrypt", "trustservercertificate", "connectiontimeout", "logintimeout",
+            }
+        }
+        query.update({
+            "driver": "ODBC Driver 18 for SQL Server",
+            "Encrypt": "yes",
+            "TrustServerCertificate": "no",
+            "Connection Timeout": str(connect_timeout),
+        })
+    return url.set(drivername=drivername, port=port, query=query).render_as_string(hide_password=False)
+
+
 def _build_database_url(config: dict, workspace_id: str) -> str:
     if config.get("url"):
-        url = str(config["url"])
-        parsed = urlparse(url)
-        driver = parsed.scheme.split("+", 1)[0].lower()
-        if driver == "sqlite":
-            path = Path(parsed.path).resolve()
-            workspace = db().get("workspaces", workspace_id) or {}
-            allowed = [settings().storage_dir.resolve()]
-            if workspace.get("mounted_path"):
-                allowed.append(Path(workspace["mounted_path"]).resolve())
-            if not any(path == root or root in path.parents for root in allowed):
-                raise ValueError("SQLite 文件必须位于工作区存储或已挂载目录内")
-        elif parsed.hostname:
-            validate_outbound_url(f"https://{parsed.hostname}:{parsed.port or 443}")
-        return url
+        return _harden_database_url(str(config["url"]), config, workspace_id)
     driver = str(config.get("driver", "sqlite")).lower()
-    if driver == "sqlite":
-        path = Path(str(config.get("database") or "")).expanduser().resolve()
-        workspace = db().get("workspaces", workspace_id) or {}
-        allowed = [settings().storage_dir.resolve()]
-        if workspace.get("mounted_path"):
-            allowed.append(Path(workspace["mounted_path"]).resolve())
-        if not any(path == root or root in path.parents for root in allowed):
-            raise ValueError("SQLite 文件必须位于工作区存储或已挂载目录内")
-        return f"sqlite:///{path}"
     dialects = {
-        "postgresql": "postgresql+psycopg2",
-        "postgres": "postgresql+psycopg2",
-        "mysql": "mysql+pymysql",
-        "sqlserver": "mssql+pyodbc",
-        "mssql": "mssql+pyodbc",
+        "postgresql": "postgresql+psycopg2", "postgres": "postgresql+psycopg2",
+        "mysql": "mysql+pymysql", "sqlserver": "mssql+pyodbc", "mssql": "mssql+pyodbc",
     }
-    dialect = dialects.get(driver)
-    if not dialect:
+    if driver == "sqlite":
+        raw = URL.create("sqlite", database=str(config.get("database") or ""))
+    elif driver in dialects:
+        raw = URL.create(
+            dialects[driver], username=str(config.get("username") or "") or None,
+            password=str(config.get("password") or "") or None, host=str(config.get("host") or ""),
+            port=int(config["port"]) if config.get("port") else None,
+            database=str(config.get("database") or "") or None,
+        )
+    else:
         raise ValueError("数据库类型必须是 SQLite、PostgreSQL、MySQL 或 SQL Server")
-    user = quote_plus(str(config.get("username") or ""))
-    password = quote_plus(str(config.get("password") or ""))
-    host = str(config.get("host") or "localhost")
-    port = str(config.get("port") or "")
-    database = quote_plus(str(config.get("database") or ""))
-    auth = f"{user}:{password}@" if user else ""
-    address = f"{host}:{port}" if port else host
-    validate_outbound_url(f"https://{address}")
-    suffix = "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes" if dialect.startswith("mssql") else ""
-    return f"{dialect}://{auth}{address}/{database}{suffix}"
+    return _harden_database_url(raw, config, workspace_id)
 
 
 def register_database(config: dict, workspace_id: str) -> dict:
     url = _build_database_url(config, workspace_id)
-    engine = create_engine(url, pool_pre_ping=True)
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
-    inspector = inspect(engine)
+    engine = _database_engine(url)
+    schema_name = str(config.get("schema") or "").strip()[:128] or None
     tables = []
-    for name in inspector.get_table_names()[:200]:
-        columns = inspector.get_columns(name)
-        tables.append({
-            "name": name,
-            "source_name": name,
-            "columns": len(columns),
-            "schema": [
-                {"name": col["name"], "type": str(col["type"]), "nullable": bool(col.get("nullable", True))}
-                for col in columns
-            ],
-        })
+    try:
+        with engine.connect() as connection:
+            _configure_read_only(connection, settings().query_timeout_seconds)
+            connection.execute(text("SELECT 1"))
+            inspector = inspect(connection)
+            objects = [(name, "table") for name in inspector.get_table_names(schema=schema_name)]
+            objects.extend((name, "view") for name in inspector.get_view_names(schema=schema_name))
+            for name, object_type in objects[:200]:
+                columns = inspector.get_columns(name, schema=schema_name)
+                tables.append({
+                    "name": name, "source_name": name, "schema_name": schema_name,
+                    "object_type": object_type, "columns": len(columns),
+                    "schema": [
+                        {"name": col["name"], "type": str(col["type"]), "nullable": bool(col.get("nullable", True))}
+                        for col in columns
+                    ],
+                })
+    finally:
+        engine.dispose()
     source_id = db().new_id("src")
     vault = SecretVault(current_app.config["VAULT_KEY"])
-    parsed = urlparse(url)
+    parsed = make_url(url)
     record = db().put(
         "sources",
         {
             "id": source_id,
             "workspace_id": workspace_id,
-            "name": str(config.get("name") or config.get("database") or parsed.hostname or "SQL 数据源"),
+            "name": str(config.get("name") or config.get("database") or parsed.host or "SQL 数据源"),
             "kind": "database",
-            "driver": str(config.get("driver") or parsed.scheme.split("+")[0]),
-            "endpoint": parsed.hostname or "local",
+            "driver": str(config.get("driver") or parsed.get_backend_name()),
+            "endpoint": parsed.host or "local",
+            "schema_name": schema_name,
             "credential": vault.seal({"url": url}),
             "tables": tables,
             "status": "ready",
@@ -423,7 +524,7 @@ def _register_google_service_account(config: dict, workspace_id: str, creds: dic
     if not spreadsheet:
         raise ValueError("电子表格 URL 或 ID 不能为空")
     token_uri = str(creds.get("token_uri") or "https://oauth2.googleapis.com/token")
-    if token_uri != "https://oauth2.googleapis.com/token":
+    if token_uri != "https://oauth2.googleapis.com/token":  # noqa: S105 -- official endpoint, not a token
         raise ValueError("Google 服务账号 token_uri 必须使用官方 HTTPS 端点")
     creds["token_uri"] = token_uri
     if spreadsheet.startswith("http"):
@@ -612,25 +713,27 @@ def source_frames(source: dict) -> dict[str, pd.DataFrame]:
     if source["kind"] == "database":
         vault = SecretVault(current_app.config["VAULT_KEY"])
         secret = vault.open(source.get("credential", ""), {})
-        engine = create_engine(secret["url"], pool_pre_ping=True)
+        engine = _database_engine(secret["url"])
         result: dict[str, pd.DataFrame] = {}
-        with engine.connect() as connection:
-            _configure_read_only(connection, settings().query_timeout_seconds)
-            selected = source.get("analysis_tables")
-            candidates = source.get("tables", [])
-            if isinstance(selected, list):
-                selected_names = {str(value) for value in selected}
-                candidates = [
-                    table for table in candidates
-                    if table.get("name") in selected_names or table.get("source_name") in selected_names
-                ]
-            for table in candidates[:50]:
-                name = table["source_name"]
-                quoted = engine.dialect.identifier_preparer.quote(name)
-                statement = bounded_read_only_sql(
-                    f"SELECT * FROM {quoted}", settings().source_sample_rows, _dialect_name(engine),
-                )
-                result[table["name"]] = pd.read_sql(text(statement), connection)
+        try:
+            with engine.connect() as connection:
+                _configure_read_only(connection, settings().query_timeout_seconds)
+                selected = source.get("analysis_tables")
+                candidates = source.get("tables", [])
+                if isinstance(selected, list):
+                    selected_names = {str(value) for value in selected}
+                    candidates = [
+                        table for table in candidates
+                        if table.get("name") in selected_names or table.get("source_name") in selected_names
+                    ]
+                for table in candidates[:50]:
+                    statement = bounded_read_only_sql(
+                        f"SELECT * FROM {_qualified_table(engine, table)}",  # noqa: S608 -- identifiers are quoted
+                        settings().source_sample_rows, _dialect_name(engine),
+                    )
+                    result[table["name"]] = pd.read_sql(text(statement), connection)
+        finally:
+            engine.dispose()
         return result
     raise ValueError("未知数据源类型")
 
@@ -729,11 +832,14 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
         source = sources[0]
         vault = SecretVault(current_app.config["VAULT_KEY"])
         url = vault.open(source.get("credential", ""), {}).get("url")
-        engine = create_engine(url, pool_pre_ping=True)
-        with engine.connect() as connection:
-            _configure_read_only(connection, settings().query_timeout_seconds)
-            bounded = bounded_read_only_sql(statement, limit, _dialect_name(engine))
-            frame = pd.read_sql(text(bounded), connection)
+        engine = _database_engine(url)
+        try:
+            with engine.connect() as connection:
+                _configure_read_only(connection, settings().query_timeout_seconds)
+                bounded = bounded_read_only_sql(statement, limit, _dialect_name(engine))
+                frame = pd.read_sql(text(bounded), connection)
+        finally:
+            engine.dispose()
     else:
         connection = duckdb.connect(database=":memory:")
         try:

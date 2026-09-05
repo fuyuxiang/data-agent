@@ -45,20 +45,20 @@ def _fallback_plan(question: str, source: dict) -> dict:
     group = next((column for column in mentioned if column not in numeric), None)
     metric = next((column for column in mentioned if column in numeric), numeric[0] if numeric else None)
     if any(token in lower for token in ("多少", "count", "数量", "几条")):
-        sql = f"SELECT COUNT(*) AS {_quote('记录数')} FROM {_quote(table_name)}"
+        sql = f"SELECT COUNT(*) AS {_quote('记录数')} FROM {_quote(table_name)}"  # noqa: S608
         chart = None
     elif group and metric:
         aggregate = "AVG" if any(token in lower for token in ("平均", "均值", "average", "avg")) else "SUM"
         sql = (
-            f"SELECT {_quote(group)}, {aggregate}({_quote(metric)}) AS {_quote(metric)} "
+            f"SELECT {_quote(group)}, {aggregate}({_quote(metric)}) AS {_quote(metric)} "  # noqa: S608
             f"FROM {_quote(table_name)} GROUP BY {_quote(group)} ORDER BY {_quote(metric)} DESC LIMIT 100"
         )
         chart = "bar"
     elif metric and any(token in lower for token in ("平均", "均值", "average", "avg")):
-        sql = f"SELECT AVG({_quote(metric)}) AS {_quote(metric + '平均值')} FROM {_quote(table_name)}"
+        sql = f"SELECT AVG({_quote(metric)}) AS {_quote(metric + '平均值')} FROM {_quote(table_name)}"  # noqa: S608
         chart = None
     else:
-        sql = f"SELECT * FROM {_quote(table_name)} LIMIT 200"
+        sql = f"SELECT * FROM {_quote(table_name)} LIMIT 200"  # noqa: S608
         chart = None
     return {
         "sql": sql,

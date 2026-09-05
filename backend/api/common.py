@@ -21,7 +21,8 @@ def body() -> dict:
 def workspace_id() -> str:
     return str(
         request.args.get("workspace_id") or request.headers.get("X-Workspace-Id")
-        or body().get("workspace_id") or session.get("active_workspace_id") or "default"
+        or body().get("workspace_id") or request.form.get("workspace_id")
+        or session.get("active_workspace_id") or "default"
     )[:128]
 
 
@@ -54,10 +55,9 @@ def require_record(collection: str, record_id: str) -> dict:
 
 
 def require_workspace_record(collection: str, record_id: str, expected_workspace_id: str | None = None) -> dict:
-    record = require_record(collection, record_id)
     expected = expected_workspace_id or workspace_id()
-    actual = str(record.get("workspace_id") or "default")
-    if actual != expected:
+    record = db().get(collection, record_id, workspace_id=expected)
+    if not record:
         # 不向请求方暴露其他工作空间中的记录是否存在。
         raise FileNotFoundError(f"{collection} 记录不存在：{record_id}")
     return record

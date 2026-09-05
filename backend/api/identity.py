@@ -14,16 +14,23 @@ from ..services.usage import quota_status
 
 
 bp = Blueprint("identity", __name__)
+PASSWORD_ITERATIONS = 600_000
+MIN_PASSWORD_LENGTH = 12
 
 
-def _password_hash(password: str, salt: bytes | None = None) -> tuple[str, str]:
+def _password_hash(
+    password: str, salt: bytes | None = None, iterations: int = PASSWORD_ITERATIONS,
+) -> tuple[str, str]:
     salt = salt or os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310_000)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return salt.hex(), digest.hex()
 
 
 def _public(user: dict) -> dict:
-    return {key: value for key, value in user.items() if key not in {"password_hash", "password_salt"}}
+    return {
+        key: value for key, value in user.items()
+        if key not in {"password_hash", "password_salt", "password_iterations"}
+    }
 
 
 def _start_session(user: dict, active_workspace_id: str) -> str:
@@ -120,8 +127,8 @@ def register():
     if require_code:
         code = str(payload.get("code") or "").strip()
         _verify_email_code(email, code)
-    if "@" not in email or len(password) < 8:
-        raise ValueError("请输入有效邮箱，密码至少 8 位")
+    if "@" not in email or len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"请输入有效邮箱，密码至少 {MIN_PASSWORD_LENGTH} 位")
     if any(user.get("email") == email for user in db().list("users", include_archived=True)):
         raise ValueError("该邮箱已经注册")
     salt, digest = _password_hash(password)
@@ -130,6 +137,7 @@ def register():
             "id": db().new_id("usr"), "email": email,
             "name": str(payload.get("name") or email.split("@")[0])[:80],
             "password_salt": salt, "password_hash": digest,
+            "password_iterations": PASSWORD_ITERATIONS,
             "enabled": True, "session_version": 0,
         },
         allow_additional=bool(
@@ -193,11 +201,20 @@ def login():
         attempt["failures"] = int(attempt.get("failures") or 0) + 1
         db().put("auth_attempts", attempt, workspace_id="default")
         raise ValueError("邮箱或密码错误")
-    _, digest = _password_hash(str(payload.get("password") or ""), bytes.fromhex(user["password_salt"]))
+    iterations = int(user.get("password_iterations") or 310_000)
+    _, digest = _password_hash(
+        str(payload.get("password") or ""), bytes.fromhex(user["password_salt"]), iterations,
+    )
     if not hmac.compare_digest(digest, user["password_hash"]):
         attempt["failures"] = int(attempt.get("failures") or 0) + 1
         db().put("auth_attempts", attempt, workspace_id="default")
         raise ValueError("邮箱或密码错误")
+    if iterations < PASSWORD_ITERATIONS:
+        salt, digest = _password_hash(str(payload.get("password") or ""))
+        user = db().patch("users", user["id"], {
+            "password_salt": salt, "password_hash": digest,
+            "password_iterations": PASSWORD_ITERATIONS,
+        }) or user
     db().delete("auth_attempts", attempt_id)
     memberships = [
         item for item in db().list("workspace_members")
@@ -221,7 +238,7 @@ def reset_password():
     email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
     user = next((item for item in db().list("users") if item.get("email") == email), None)
-    if not user or len(password) < 8:
+    if not user or len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError("邮箱、验证码或新密码无效")
     _verify_email_code(email, str(payload.get("code") or "").strip())
     salt, digest = _password_hash(password)
@@ -230,6 +247,7 @@ def reset_password():
         {
             "password_salt": salt,
             "password_hash": digest,
+            "password_iterations": PASSWORD_ITERATIONS,
             "session_version": int(user.get("session_version") or 0) + 1,
         },
     )

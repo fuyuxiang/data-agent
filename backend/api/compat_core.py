@@ -328,7 +328,7 @@ def clear_builtin_model():
     provider = str(body().get("provider") or "").strip()
     item = require_workspace_record("providers", provider)
     item.pop("credential", None)
-    item["secret_source"] = "environment"
+    item["secret_source"] = "environment"  # noqa: S105 -- status label, not a credential
     db().put("providers", item, workspace_id=item.get("workspace_id", "default"))
     return jsonify({"ok": True, "message": "已清除模型密钥"})
 

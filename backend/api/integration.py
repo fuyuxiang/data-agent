@@ -16,6 +16,9 @@ from flask import Blueprint, current_app, request
 from ..core.database import utcnow
 from ..services.mcp import get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
+from ..services.remote_gpu import (
+    TunnelError, inspect_host_key, open_ssh_client, trust_host_key,
+)
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
 from .common import (
     api_errors, body, current_user_id, db, ok, require_system_owner,
@@ -391,17 +394,18 @@ def _local_compute() -> dict:
 
         memory = resource.getrlimit(resource.RLIMIT_AS)[0]
     except Exception:
-        pass
+        current_app.logger.debug("Unable to inspect the process memory limit", exc_info=True)
     gpu = {"available": False, "backend": None, "devices": []}
-    if shutil.which("nvidia-smi"):
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
         try:
-            output = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            output = subprocess.run(  # noqa: S603 -- executable is resolved from the fixed nvidia-smi name
+                [nvidia_smi, "--query-gpu=name,memory.total", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=5, check=True,
             ).stdout.strip()
             gpu = {"available": bool(output), "backend": "cuda", "devices": output.splitlines()}
         except Exception:
-            pass
+            current_app.logger.debug("Unable to inspect local NVIDIA devices", exc_info=True)
     elif platform.system() == "Darwin" and platform.machine() == "arm64":
         gpu = {"available": True, "backend": "metal", "devices": ["Apple Silicon"]}
     return {"cpu_count": cpu, "platform": platform.platform(), "python": platform.python_version(), "memory_limit": memory, "gpu": gpu}
@@ -416,6 +420,9 @@ def _public_compute(item: dict) -> dict:
     value = dict(item)
     value.pop("credential", None)
     value["has_credential"] = bool(item.get("credential"))
+    value["host_key_trusted"] = bool(db().get(
+        "ssh_host_keys", f"hostkey_{item['id']}", workspace_id=str(item.get("workspace_id") or "default"),
+    ))
     return value
 
 
@@ -425,14 +432,25 @@ def create_compute_node():
     payload = body()
     if not payload.get("host") or not payload.get("username"):
         raise ValueError("远程计算节点需要 host 和 username")
-    validate_outbound_url(f"https://{payload['host']}:{int(payload.get('port', 22))}")
+    port = int(payload.get("port", 22))
+    if not 1 <= port <= 65535:
+        raise ValueError("端口必须在 1-65535 之间")
+    validate_outbound_url(f"https://{payload['host']}:{port}")
+    auth_method = str(payload.get("auth_method") or "agent")
+    if auth_method not in {"agent", "password", "private_key"}:
+        raise ValueError("auth_method 必须是 agent、password 或 private_key")
+    if auth_method == "password" and not payload.get("password"):
+        raise ValueError("密码认证必须提供 password")
+    if auth_method == "private_key" and not payload.get("private_key"):
+        raise ValueError("私钥认证必须提供 private_key")
     wid = workspace_id()
     credential = SecretVault(current_app.config["VAULT_KEY"]).seal({"password": payload.get("password", ""), "private_key": payload.get("private_key", "")})
     item = db().put(
         "compute_nodes",
         {
             "id": db().new_id("node"), "workspace_id": wid, "name": str(payload.get("name") or payload["host"])[:100],
-            "host": str(payload["host"]), "port": int(payload.get("port", 22)), "username": str(payload["username"]),
+            "host": str(payload["host"]), "port": port, "username": str(payload["username"])[:128],
+            "connection_type": "ssh", "auth_method": auth_method,
             "credential": credential, "status": "configured", "enabled": True,
         },
         workspace_id=wid,
@@ -440,22 +458,51 @@ def create_compute_node():
     return ok(item=_public_compute(item)), 201
 
 
+@bp.post("/api/compute/nodes/<node_id>/host-key")
+@api_errors
+def compute_node_host_key(node_id: str):
+    node = require_workspace_record("compute_nodes", node_id)
+    try:
+        return ok(host_key=inspect_host_key(node))
+    except TunnelError as exc:
+        raise ConnectionError(str(exc)) from exc
+
+
+@bp.post("/api/compute/nodes/<node_id>/trust-host-key")
+@api_errors
+def compute_node_trust_host_key(node_id: str):
+    node = require_workspace_record("compute_nodes", node_id)
+    payload = body()
+    try:
+        trusted = trust_host_key(
+            db(), node, str(payload.get("key_type") or ""), str(payload.get("key_base64") or ""),
+        )
+    except TunnelError as exc:
+        raise ValueError(str(exc)) from exc
+    return ok(fingerprint=trusted["fingerprint"])
+
+
 @bp.post("/api/compute/nodes/<node_id>/test")
 @api_errors
 def test_compute_node(node_id: str):
     node = require_workspace_record("compute_nodes", node_id)
-    import paramiko
-
     secret = SecretVault(current_app.config["VAULT_KEY"]).open(node.get("credential", ""), {})
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    kwargs = {"hostname": node["host"], "port": node["port"], "username": node["username"], "timeout": 10, "look_for_keys": True}
-    if secret.get("password"):
-        kwargs["password"] = secret["password"]
-    client.connect(**kwargs)
-    _, stdout, _ = client.exec_command("python3 --version && uname -srm", timeout=10)
-    output = stdout.read().decode("utf-8", errors="replace").strip()
-    client.close()
+    trusted = db().get("ssh_host_keys", f"hostkey_{node_id}", workspace_id=node["workspace_id"])
+    try:
+        client = open_ssh_client(
+            node, trusted, password=secret.get("password") or None,
+            private_key=secret.get("private_key") or None,
+        )
+        try:
+            _, stdout, stderr = client.exec_command("python3 --version && uname -srm", timeout=10)
+            output = stdout.read(65_536).decode("utf-8", errors="replace").strip()
+            error = stderr.read(4096).decode("utf-8", errors="replace").strip()
+            if stdout.channel.recv_exit_status() != 0:
+                raise ConnectionError(error or "远程计算节点预检失败")
+        finally:
+            client.close()
+    except TunnelError as exc:
+        raise ConnectionError(str(exc)) from exc
     node.update({"status": "online", "last_tested_at": utcnow(), "system": output})
     db().put("compute_nodes", node, workspace_id=node["workspace_id"])
     return ok(result={"status": "online", "system": output})
@@ -464,7 +511,8 @@ def test_compute_node(node_id: str):
 @bp.delete("/api/compute/nodes/<node_id>")
 @api_errors
 def delete_compute_node(node_id: str):
-    require_workspace_record("compute_nodes", node_id)
-    if not db().archive("compute_nodes", node_id):
+    node = require_workspace_record("compute_nodes", node_id)
+    db().archive("ssh_host_keys", f"hostkey_{node_id}", workspace_id=node["workspace_id"])
+    if not db().archive("compute_nodes", node_id, workspace_id=node["workspace_id"]):
         raise FileNotFoundError("计算节点不存在")
     return ok(archived=True)

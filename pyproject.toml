@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["database_integration: requires disposable external database services"]
 
 [tool.ruff]
 line-length = 120

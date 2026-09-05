@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import hmac
 import re
+import secrets
 import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, g, jsonify, request, send_from_directory, session
+from flask import Flask, abort, g, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -52,6 +54,16 @@ def create_app(test_config: dict | None = None) -> Flask:
         configured_encryption = os.getenv("MERIDIAN_ENCRYPTION_KEY", "").strip()
         if len(configured_encryption) < 32:
             raise RuntimeError("生产环境必须配置至少 32 字符且独立持久化的 MERIDIAN_ENCRYPTION_KEY")
+        if hmac.compare_digest(configured_secret, configured_encryption):
+            raise RuntimeError("MERIDIAN_SECRET_KEY 与 MERIDIAN_ENCRYPTION_KEY 必须使用两个独立密钥")
+        configured_backup = os.getenv("MERIDIAN_BACKUP_KEY", "").strip()
+        if len(configured_backup) < 32:
+            raise RuntimeError("生产环境必须配置至少 32 字符且独立保管的 MERIDIAN_BACKUP_KEY")
+        if any(
+            hmac.compare_digest(configured_backup, value)
+            for value in (configured_secret, configured_encryption)
+        ):
+            raise RuntimeError("MERIDIAN_BACKUP_KEY 必须独立于应用会话和凭据加密密钥")
         if not settings.trusted_hosts:
             raise RuntimeError("生产环境必须配置 MERIDIAN_TRUSTED_HOSTS")
         if not os.getenv("MERIDIAN_OUTBOUND_HOST_ALLOWLIST", "").strip():
@@ -92,6 +104,10 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     register_blueprints(app)
     if not app.config.get("TESTING"):
+        from .services.jobs import get_job_manager
+
+        job_manager = get_job_manager(app)
+        atexit.register(job_manager.shutdown)
         from .services.feishu_bot import start_long_connection
 
         for connector in database.list("connectors", limit=5000):
@@ -100,13 +116,15 @@ def create_app(test_config: dict | None = None) -> Flask:
     if not app.config.get("TESTING") and os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") != "1":
         from .services.scheduler import start_scheduler
 
-        start_scheduler(app)
+        scheduler = start_scheduler(app)
+        atexit.register(scheduler.stop)
 
     @app.before_request
     def establish_request_context():
         supplied = str(request.headers.get("X-Request-ID") or "")
         g.request_id = supplied if re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", supplied) else uuid.uuid4().hex
         g.request_started = time.perf_counter()
+        g.csp_nonce = secrets.token_urlsafe(18)
 
     @app.before_request
     def reject_oversized_json():
@@ -218,6 +236,9 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.get("/static/drawio/<path:filename>")
     def drawio_asset(filename: str):
+        parts = {part.upper() for part in filename.replace("\\", "/").split("/")}
+        if parts & {"WEB-INF", "META-INF"}:
+            abort(404)
         return send_from_directory(settings.frontend_dir / "drawio", filename)
 
     @app.get("/api/health")
@@ -289,7 +310,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "base-uri 'self'; frame-ancestors 'self'",
             )
         else:
-            script_policy = "'self'" if settings.environment == "production" or app.config.get("TESTING") else "'self' 'unsafe-eval'"
+            nonce = str(getattr(g, "csp_nonce", ""))
+            script_policy = f"'self' 'nonce-{nonce}'"
+            if settings.environment != "production" and not app.config.get("TESTING"):
+                script_policy += " 'unsafe-eval'"
             response.headers.setdefault(
                 "Content-Security-Policy",
                 f"default-src 'self'; script-src {script_policy}; style-src 'self' 'unsafe-inline'; "

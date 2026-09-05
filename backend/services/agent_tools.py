@@ -552,8 +552,9 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             context.analysis_source_id = derived["id"]
             context.source_ids.append(derived["id"])
             for table in derived.get("tables", []):
+                safe_table = str(table["name"]).replace('"', '""')
                 query = execute_query(
-                    [derived["id"]], f'SELECT * FROM "{table["name"]}"', context.workspace_id, 5000,
+                    [derived["id"]], f'SELECT * FROM "{safe_table}"', context.workspace_id, 5000,  # noqa: S608
                 )
                 result_ids[table["name"]] = query["id"]
             if result_ids:
@@ -714,7 +715,9 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         context.source_ids.append(derived["id"])
         table_name = str(args.get("output_table") or "data")
         safe_table = table_name.replace('"', '""')
-        query = execute_query([derived["id"]], f'SELECT * FROM "{safe_table}"', context.workspace_id, 5000)
+        query = execute_query(  # The table identifier is escaped immediately above.
+            [derived["id"]], f'SELECT * FROM "{safe_table}"', context.workspace_id, 5000,  # noqa: S608
+        )
         context.latest_result_id = query["id"]
         return {"source": _public_record(derived), "result_id": query["id"], "operations": operation_log}, events
     if name in {"propose_excel_export", "propose_report_outline", "propose_ppt_outline", "propose_dashboard_outline"}:

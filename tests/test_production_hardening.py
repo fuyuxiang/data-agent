@@ -6,9 +6,12 @@ import hashlib
 import io
 import sqlite3
 import tarfile
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.engine import make_url
 
 from backend.services.agent_tools import AgentToolContext, tool_schemas
 from backend.services.models import resolve_provider
@@ -271,6 +274,68 @@ def test_backup_contains_consistent_database_and_files(app, tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] >= 1
 
 
+def test_encrypted_backup_can_be_verified_and_restored(app, tmp_path):
+    from scripts.backup import BACKUP_MAGIC, create_backup
+    from scripts.restore import restore_backup
+
+    storage = app.config["SETTINGS"].storage_dir
+    marker = storage / "knowledge" / "private.txt"
+    marker.write_text("confidential", encoding="utf-8")
+    key = "backup-key-that-is-longer-than-thirty-two-characters"
+    output = tmp_path / "backup.tar.gz.enc"
+    result = create_backup(storage, output, app.extensions["meridian_db"].path, key)
+    assert result["encrypted"] is True
+    assert output.read_bytes().startswith(BACKUP_MAGIC)
+    assert b"confidential" not in output.read_bytes()
+
+    destination = tmp_path / "restore"
+    restored = restore_backup(
+        output, destination, encryption_key=key, expected_sha256=str(result["sha256"]),
+    )
+    assert restored["database_integrity"] == "ok"
+    assert (destination / "storage/knowledge/private.txt").read_text(encoding="utf-8") == "confidential"
+    with pytest.raises(ValueError, match="空目录"):
+        restore_backup(output, destination, encryption_key=key)
+
+
+def test_outbound_session_pins_dns_and_ignores_environment_proxy(monkeypatch):
+    import requests
+
+    from backend.services.security import _pinned_session, validate_outbound_url
+
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+    assert validate_outbound_url("https://api.example.com/v1") == "https://api.example.com/v1"
+    session = _pinned_session("https://api.example.com/v1")
+    try:
+        assert session.trust_env is False
+        adapter = session.get_adapter("https://api.example.com/v1")
+        prepared = requests.Request("GET", "https://api.example.com/v1").prepare()
+        host, pool = adapter.build_connection_pool_key_attributes(prepared, True)
+        assert host["host"] == "93.184.216.34"
+        assert pool["assert_hostname"] == "api.example.com"
+        assert pool["server_hostname"] == "api.example.com"
+    finally:
+        session.close()
+
+
+def test_production_requires_independent_backup_key(monkeypatch, tmp_path):
+    from backend import create_app
+
+    monkeypatch.setenv("MERIDIAN_ENV", "production")
+    monkeypatch.setenv("MERIDIAN_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("MERIDIAN_FRONTEND_DIR", str(tmp_path / "frontend"))
+    monkeypatch.setenv("MERIDIAN_SECRET_KEY", "s" * 48)
+    monkeypatch.setenv("MERIDIAN_ENCRYPTION_KEY", "e" * 48)
+    monkeypatch.setenv("MERIDIAN_TRUSTED_HOSTS", "localhost")
+    monkeypatch.setenv("MERIDIAN_OUTBOUND_HOST_ALLOWLIST", "api.example.com")
+    monkeypatch.delenv("MERIDIAN_BACKUP_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="MERIDIAN_BACKUP_KEY"):
+        create_app()
+
+
 def test_invalid_compressed_upload_is_a_client_error(client):
     response = client.post(
         "/api/sources/upload",
@@ -308,3 +373,221 @@ def test_sensitive_integrations_require_workspace_owner(app):
     assert editor.put(
         "/api/feishu-bot", json={"app_id": "blocked", "app_secret": "blocked"},
     ).status_code == 403
+
+
+def test_multipart_upload_uses_authenticated_active_workspace(app):
+    client = app.test_client()
+    client.post(
+        "/api/auth/register",
+        json={"email": "uploader@company.test", "password": "correct-horse"},
+    )
+    workspace = client.post("/api/workspaces", json={"name": "Upload target"}).get_json()["item"]
+    assert client.post(f"/api/workspaces/{workspace['id']}/activate").status_code == 200
+    uploaded = client.post(
+        "/api/sources/upload",
+        data={"file": (io.BytesIO(b"name,value\na,1\n"), "active.csv")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    source = uploaded.get_json()["items"][0]
+    assert source["workspace_id"] == workspace["id"]
+    assert app.extensions["meridian_db"].get("sources", source["id"], workspace_id="default") is None
+
+
+def test_legacy_routes_cannot_cross_workspace_boundaries(app, tmp_path):
+    owner = app.test_client()
+    attacker = app.test_client()
+    owner.post(
+        "/api/auth/register",
+        json={"email": "owner@company.test", "password": "correct-horse"},
+    )
+    secret_workspace = owner.post("/api/workspaces", json={"name": "Secret"}).get_json()["item"]
+    attacker_registration = attacker.post(
+        "/api/auth/register",
+        json={"email": "attacker@company.test", "password": "correct-horse"},
+    ).get_json()
+    attacker_workspace_id = attacker_registration["active_workspace_id"]
+    database = app.extensions["meridian_db"]
+    database.put(
+        "sessions",
+        {"id": "foreign-session", "workspace_id": secret_workspace["id"], "name": "Private"},
+        workspace_id=secret_workspace["id"],
+    )
+    database.add_message("foreign-session", "assistant", "TOP-SECRET-METRIC=42")
+    database.put(
+        "charts",
+        {"id": "foreign-chart", "workspace_id": secret_workspace["id"], "name": "Private chart", "spec": {}},
+        workspace_id=secret_workspace["id"],
+    )
+    database.put(
+        "dashboards",
+        {"id": "foreign-dashboard", "workspace_id": secret_workspace["id"], "name": "Private dashboard", "widgets": []},
+        workspace_id=secret_workspace["id"],
+    )
+
+    assert attacker.get("/api/session/foreign-session/load-current").status_code == 404
+    assert attacker.get("/api/chart/foreign-chart").status_code == 404
+    assert attacker.get("/api/dashboard/foreign-dashboard").status_code == 404
+    assert app.test_client().get("/dashboard/foreign-dashboard").status_code == 404
+
+    attacker_session = attacker.post("/api/session/new", json={"name": "attacker"}).get_json()["session_id"]
+    listed = attacker.get(f"/api/session/{attacker_session}/workspaces").get_json()["workspaces"]
+    assert {item["id"] for item in listed} == {attacker_workspace_id}
+    assert attacker.patch(
+        f"/api/session/{attacker_session}/workspaces/{secret_workspace['id']}",
+        json={"name": "PWNED"},
+    ).status_code == 403
+    assert database.get("workspaces", secret_workspace["id"])["name"] == "Secret"
+
+    outside = tmp_path / "foreign-files"
+    outside.mkdir()
+    (outside / "foreign.csv").write_text("secret\n42\n", encoding="utf-8")
+    mounted = attacker.post(
+        f"/api/session/{attacker_session}/workspace/mount",
+        json={"path": str(outside), "permission": "read_only"},
+    )
+    assert mounted.status_code == 403
+    assert not any(
+        source.get("name") == "foreign.csv"
+        for source in database.list("sources", workspace_id=attacker_workspace_id)
+    )
+
+
+def test_legacy_saved_sessions_are_workspace_scoped(app):
+    first = app.test_client()
+    second = app.test_client()
+    first.post(
+        "/api/auth/register",
+        json={"email": "first@company.test", "password": "correct-horse"},
+    )
+    second_workspace = second.post(
+        "/api/auth/register",
+        json={"email": "second@company.test", "password": "correct-horse"},
+    ).get_json()["active_workspace_id"]
+    database = app.extensions["meridian_db"]
+    database.put(
+        "saved_sessions",
+        {
+            "id": "private-session.json", "filename": "private-session.json",
+            "workspace_id": "default", "name": "Private", "history": [{"role": "user", "content": "secret"}],
+        },
+        workspace_id="default",
+    )
+    target = second.post("/api/session/new", json={"name": "target"}).get_json()["session_id"]
+    response = second.post(
+        f"/api/session/{target}/load", json={"filename": "private-session.json"},
+    )
+    assert response.status_code == 404
+    assert second.patch(
+        "/api/saved-sessions/private-session.json", json={"name": "PWNED"},
+    ).status_code == 404
+    assert second.delete("/api/saved-sessions/private-session.json").status_code == 404
+    assert database.list("saved_sessions", workspace_id=second_workspace) == []
+    assert database.get("saved_sessions", "private-session.json")["name"] == "Private"
+
+
+def test_database_urls_enforce_transport_security(app, monkeypatch):
+    from backend.services import datasets
+
+    monkeypatch.setattr(datasets, "validate_outbound_host", lambda *_args, **_kwargs: ["203.0.113.10"])
+    monkeypatch.setenv("MERIDIAN_DATABASE_HOST_ALLOWLIST", "db.example.test")
+    app.config["SETTINGS"] = replace(app.config["SETTINGS"], environment="production")
+    with app.app_context():
+        postgres = make_url(datasets._build_database_url({
+            "driver": "postgresql", "host": "db.example.test", "database": "analytics",
+            "username": "reader", "password": "secret",
+        }, "default"))
+        assert postgres.query["sslmode"] == "verify-full"
+        assert postgres.query["connect_timeout"] == "10"
+
+        mysql = make_url(datasets._build_database_url({
+            "driver": "mysql", "host": "db.example.test", "database": "analytics",
+            "username": "reader", "password": "secret",
+        }, "default"))
+        assert mysql.query["ssl_verify_cert"] == "true"
+        assert mysql.query["ssl_verify_identity"] == "true"
+
+        sqlserver = make_url(datasets._build_database_url({
+            "driver": "sqlserver", "host": "db.example.test", "database": "analytics",
+            "username": "reader", "password": "secret",
+        }, "default"))
+        assert sqlserver.query["Encrypt"] == "yes"
+        assert sqlserver.query["TrustServerCertificate"] == "no"
+        assert sqlserver.query["driver"] == "ODBC Driver 18 for SQL Server"
+
+        with pytest.raises(ValueError, match="TLS"):
+            datasets._build_database_url({
+                "driver": "postgresql", "host": "db.example.test", "database": "analytics",
+                "ssl_mode": "disable",
+            }, "default")
+        with pytest.raises(ValueError, match="odbc_connect"):
+            datasets._build_database_url({
+                "url": "mssql+pyodbc://db.example.test/analytics?odbc_connect=unsafe",
+            }, "default")
+        monkeypatch.delenv("MERIDIAN_DATABASE_HOST_ALLOWLIST")
+        with pytest.raises(ValueError, match="DATABASE_HOST_ALLOWLIST"):
+            datasets._build_database_url({
+                "driver": "postgresql", "host": "db.example.test", "database": "analytics",
+            }, "default")
+
+
+def test_job_manager_has_a_bounded_queue(app):
+    from backend.services.jobs import JobManager
+
+    started = threading.Event()
+    release = threading.Event()
+    manager = JobManager(app, max_workers=1, max_pending=0)
+
+    def blocking(_progress, _cancel):
+        started.set()
+        release.wait(3)
+        return {"ok": True}
+
+    try:
+        job = manager.submit(
+            workspace_id="default", session_id=None, kind="test", title="first", work=blocking,
+        )
+        assert started.wait(1)
+        with pytest.raises(ValueError, match="队列已满"):
+            manager.submit(
+                workspace_id="default", session_id=None, kind="test", title="second", work=blocking,
+            )
+        release.set()
+        deadline = time.time() + 3
+        while time.time() < deadline and app.extensions["meridian_db"].get("jobs", job["id"])["status"] != "completed":
+            time.sleep(0.02)
+        assert app.extensions["meridian_db"].get("jobs", job["id"])["status"] == "completed"
+    finally:
+        release.set()
+        manager.shutdown()
+
+
+def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch):
+    from backend.services import jobs
+
+    manager = jobs.JobManager(app, max_workers=1, max_pending=0)
+
+    def failing_started_hook(event, *_args, **_kwargs):
+        if event == "job.started":
+            raise RuntimeError("hook failed")
+        return []
+
+    monkeypatch.setattr(jobs, "dispatch_hooks", failing_started_hook)
+    try:
+        first = manager.submit(
+            workspace_id="default", session_id=None, kind="test", title="first",
+            work=lambda _progress, _cancel: {"ok": True},
+        )
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            current = app.extensions["meridian_db"].get("jobs", first["id"])
+            if current and current["status"] == "failed":
+                break
+            time.sleep(0.02)
+        second = manager.submit(
+            workspace_id="default", session_id=None, kind="test", title="second",
+            work=lambda _progress, _cancel: {"ok": True},
+        )
+        assert second["status"] == "queued"
+    finally:
+        manager.shutdown()

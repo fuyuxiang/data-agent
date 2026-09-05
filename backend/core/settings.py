@@ -27,6 +27,8 @@ class Settings:
     max_query_rows: int
     source_sample_rows: int
     query_timeout_seconds: int
+    max_analysis_rows: int
+    max_analysis_cells: int
     daily_token_limit: int
     agent_max_iterations: int
     agent_max_run_seconds: int
@@ -77,6 +79,8 @@ class Settings:
             max_query_rows=max(1, int(os.getenv("MERIDIAN_MAX_QUERY_ROWS", "10000"))),
             source_sample_rows=max(1, int(os.getenv("MERIDIAN_SOURCE_SAMPLE_ROWS", "50000"))),
             query_timeout_seconds=max(1, int(os.getenv("MERIDIAN_QUERY_TIMEOUT_SECONDS", "30"))),
+            max_analysis_rows=max(100, int(os.getenv("MERIDIAN_MAX_ANALYSIS_ROWS", "100000"))),
+            max_analysis_cells=max(1000, int(os.getenv("MERIDIAN_MAX_ANALYSIS_CELLS", "2000000"))),
             daily_token_limit=max(1, int(os.getenv("MERIDIAN_DAILY_TOKEN_LIMIT", "1000000"))),
             agent_max_iterations=max(1, int(os.getenv("MERIDIAN_AGENT_MAX_ITERATIONS", "32"))),
             agent_max_run_seconds=max(10, int(os.getenv("MERIDIAN_AGENT_MAX_RUN_SECONDS", "600"))),

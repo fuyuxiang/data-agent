@@ -3,7 +3,8 @@ from __future__ import annotations
 import sys
 
 
-def test_persistent_stdio_mcp_discovery_call_and_validation(client, tmp_path):
+def test_persistent_stdio_mcp_discovery_call_and_validation(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("MERIDIAN_SECRET_KEY", "must-not-reach-mcp")
     server_script = tmp_path / "mcp_server.py"
     server_script.write_text(
         """
@@ -31,7 +32,7 @@ for line in sys.stdin:
             },
         }]}
     elif method == "tools/call":
-        text = f"{os.getpid()}:{message['params']['arguments']['message']}"
+        text = f"{os.getpid()}:{message['params']['arguments']['message']}:{os.getenv('MERIDIAN_SECRET_KEY', 'missing')}"
         result = {"content": [{"type": "text", "text": text}], "isError": False}
     else:
         result = {}
@@ -62,7 +63,7 @@ for line in sys.stdin:
     first_text = first.get_json()["result"]["content"][0]["text"]
     second_text = second.get_json()["result"]["content"][0]["text"]
     assert first_text.split(":", 1)[0] == second_text.split(":", 1)[0]
-    assert second_text.endswith(":two")
+    assert second_text.endswith(":two:missing")
 
     invalid = client.post(f"/api/mcp/servers/{server_id}/tools/echo/call", json={"arguments": {}})
     assert invalid.status_code == 400

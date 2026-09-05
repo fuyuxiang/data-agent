@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Blueprint, current_app, request
 
@@ -11,6 +12,7 @@ from ..core.database import utcnow
 from ..services.jobs import get_job_manager
 from ..services.hooks import SUPPORTED_EVENTS, dispatch_hooks as run_hooks, normalize_event_name
 from ..services.security import validate_outbound_url
+from ..services.scheduler import validate_cron
 from ..services.teams import retry_team_run, start_team_run, team_run_to_workflow
 from ..services.workflows import (
     STEP_TYPES,
@@ -23,7 +25,10 @@ from ..services.workflows import (
     start_workflow,
     validate_definition,
 )
-from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, current_user_id, db, ok, require_workspace_access,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("automation", __name__)
@@ -358,6 +363,7 @@ def retry_run(run_id: str):
 @api_errors
 def approve_run(run_id: str):
     run = require_workspace_record("workflow_runs", run_id)
+    require_workspace_access(run["workspace_id"], owner=True)
     step_id = str(body().get("step_id") or run.get("current_step_id") or "")
     state = run.get("step_states", {}).get(step_id)
     if not state or state.get("status") != "waiting_approval":
@@ -371,7 +377,7 @@ def approve_run(run_id: str):
     if state.get("approval_id"):
         db().patch("workflow_approvals", state["approval_id"], {
             "status": "approved", "decision": "approve", "decided_at": utcnow(),
-            "comment": state["comment"],
+            "decided_by": current_user_id(), "comment": state["comment"],
         })
     run["status"] = "queued"
     db().put("workflow_runs", run, workspace_id=run["workspace_id"])
@@ -382,6 +388,7 @@ def approve_run(run_id: str):
 @api_errors
 def reject_run(run_id: str):
     run = require_workspace_record("workflow_runs", run_id)
+    require_workspace_access(run["workspace_id"], owner=True)
     payload = body()
     step_id = str(payload.get("step_id") or run.get("current_step_id") or "")
     state = run.get("step_states", {}).get(step_id)
@@ -397,7 +404,7 @@ def reject_run(run_id: str):
     if approval_id:
         db().patch("workflow_approvals", approval_id, {
             "status": "rejected", "decision": decision, "decided_at": utcnow(),
-            "comment": str(payload.get("comment") or "")[:1000],
+            "decided_by": current_user_id(), "comment": str(payload.get("comment") or "")[:1000],
         })
     if decision in {"retry", "rework", "reject_and_retry"}:
         state.update({
@@ -532,6 +539,7 @@ def workflow_approvals(session_id: str, run_id: str):
 @api_errors
 def decide_workflow_approval(session_id: str, run_id: str, approval_id: str):
     _, run = _require_session_run(session_id, run_id)
+    require_workspace_access(run["workspace_id"], owner=True)
     approval = require_workspace_record("workflow_approvals", approval_id, run["workspace_id"])
     if approval.get("run_id") != run_id:
         raise FileNotFoundError("工作流审批不存在")
@@ -547,7 +555,7 @@ def decide_workflow_approval(session_id: str, run_id: str, approval_id: str):
         raise ValueError("审批对应节点不再等待审批")
     decided = db().patch("workflow_approvals", approval_id, {
         "status": "approved" if decision == "approve" else "rejected", "decision": decision,
-        "decided_by": str(payload.get("decided_by") or "")[:200],
+        "decided_by": current_user_id(),
         "comment": str(payload.get("comment") or "")[:2000], "comments": payload.get("comments") or {},
         "revised_outputs": payload.get("revised_outputs") or {}, "revised_summary": str(payload.get("revised_summary") or "")[:8000],
         "decided_at": utcnow(),
@@ -627,7 +635,7 @@ def mark_workflow_template(session_id: str, run_id: str):
     payload = body()
     item = create_run_template(
         db(), run, name=str(payload.get("name") or ""), description=str(payload.get("description") or ""),
-        created_by=str(payload.get("created_by") or ""),
+        created_by=current_user_id(),
     )
     return ok(template=item), 201
 
@@ -686,7 +694,7 @@ def decide_workflow_knowledge_candidate(session_id: str, candidate_id: str):
     candidate = db().patch("workflow_knowledge_candidates", candidate_id, {
         "status": "accepted" if decision == "accept" else "rejected",
         "decision_comment": str(payload.get("comment") or "")[:2000],
-        "decided_by": str(payload.get("decided_by") or "")[:200], "decided_at": utcnow(),
+        "decided_by": current_user_id(), "decided_at": utcnow(),
         "published_ref": published_ref,
     })
     return ok(candidate=candidate)
@@ -841,16 +849,22 @@ def list_schedules():
 @api_errors
 def create_schedule():
     payload = body()
-    require_workspace_record("workflows", str(payload.get("workflow_id") or ""))
-    if not payload.get("cron"):
-        raise ValueError("cron 表达式不能为空")
     wid = workspace_id()
+    workflow = require_workspace_record("workflows", str(payload.get("workflow_id") or ""), wid)
+    if workflow.get("status") != "published" or not workflow.get("published_definition"):
+        raise ValueError("只能为已发布的工作流创建调度")
+    cron = validate_cron(str(payload.get("cron") or ""))
+    timezone_name = str(payload.get("timezone") or "Asia/Shanghai")[:60]
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("时区名称无效") from exc
     item = db().put(
         "schedules",
         {
             "id": db().new_id("sched"), "workspace_id": wid, "name": str(payload.get("name") or "定时分析")[:100],
-            "workflow_id": payload["workflow_id"], "cron": str(payload["cron"])[:100],
-            "timezone": str(payload.get("timezone") or "Asia/Shanghai")[:60], "inputs": payload.get("inputs", {}),
+            "workflow_id": payload["workflow_id"], "cron": cron,
+            "timezone": timezone_name, "inputs": payload.get("inputs", {}),
             "enabled": bool(payload.get("enabled", True)), "last_run_at": None, "next_run_at": payload.get("next_run_at"),
         },
         workspace_id=wid,
@@ -861,8 +875,27 @@ def create_schedule():
 @bp.patch("/api/schedules/<schedule_id>")
 @api_errors
 def update_schedule(schedule_id: str):
-    require_workspace_record("schedules", schedule_id)
-    return ok(item=db().patch("schedules", schedule_id, body()))
+    schedule = require_workspace_record("schedules", schedule_id)
+    payload = body()
+    allowed = {"name", "workflow_id", "cron", "timezone", "inputs", "enabled"}
+    changes = {key: payload[key] for key in allowed if key in payload}
+    workflow_id = str(changes.get("workflow_id") or schedule.get("workflow_id") or "")
+    workflow = require_workspace_record("workflows", workflow_id, schedule["workspace_id"])
+    if workflow.get("status") != "published" or not workflow.get("published_definition"):
+        raise ValueError("调度只能关联已发布的工作流")
+    if "cron" in changes:
+        changes["cron"] = validate_cron(str(changes["cron"]))
+    if "timezone" in changes:
+        changes["timezone"] = str(changes["timezone"])[:60]
+        try:
+            ZoneInfo(changes["timezone"])
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("时区名称无效") from exc
+    if "name" in changes:
+        changes["name"] = str(changes["name"])[:100]
+    if "enabled" in changes:
+        changes["enabled"] = bool(changes["enabled"])
+    return ok(item=db().patch("schedules", schedule_id, changes))
 
 
 @bp.delete("/api/schedules/<schedule_id>")
@@ -878,8 +911,10 @@ def delete_schedule(schedule_id: str):
 @api_errors
 def run_schedule_now(schedule_id: str):
     schedule = require_workspace_record("schedules", schedule_id)
-    workflow = require_workspace_record("workflows", schedule["workflow_id"])
-    executable = {**workflow, "definition": workflow.get("published_definition") or workflow["definition"]}
+    workflow = require_workspace_record("workflows", schedule["workflow_id"], schedule["workspace_id"])
+    if workflow.get("status") != "published" or not workflow.get("published_definition"):
+        raise ValueError("调度关联的工作流尚未发布")
+    executable = {**workflow, "definition": workflow["published_definition"]}
     run = start_workflow(executable, schedule.get("inputs", {}))
     db().patch("schedules", schedule_id, {"last_run_at": utcnow(), "last_run_id": run["id"]})
     return ok(run=run), 202

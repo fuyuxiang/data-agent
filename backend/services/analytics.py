@@ -75,6 +75,23 @@ def _safe(value: Any) -> Any:
     return value
 
 
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _bounded_order(value: Any, default: list[int], maximum: int = 10) -> tuple[int, int, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        value = default
+    try:
+        return tuple(max(0, min(int(item), maximum)) for item in value)
+    except (TypeError, ValueError):
+        return tuple(default)
+
+
 def profile(frame: pd.DataFrame) -> dict:
     numeric = frame.select_dtypes(include=np.number)
     columns = []
@@ -204,7 +221,21 @@ def _reference_params(method: str, params: dict) -> tuple[str, str | None, int, 
             count = params.get("degree", 0)
         else:
             count = 0
-    return target, str(groupby) if groupby is not None else None, int(count or 0), params.get("analysis_options") or {}
+    maximum = 0
+    if method == "K_Means":
+        maximum = 12
+    elif method.startswith("Time_Series_"):
+        maximum = 120
+    elif method == "Decision_Tree":
+        maximum = 50
+    elif method == "Logistic_Regression":
+        maximum = 5000
+    elif method == "Regression":
+        maximum = 10
+    elif count:
+        maximum = 100
+    count = _bounded_int(count, 0, 0, maximum) if maximum else 0
+    return target, str(groupby) if groupby is not None else None, count, params.get("analysis_options") or {}
 
 
 def _run_reference(
@@ -341,17 +372,17 @@ def run_analysis(frame: pd.DataFrame, method: str, params: dict | None = None) -
         elif method == "random_forest":
             model = RandomForestRegressor(n_estimators=160, random_state=42)
         elif method == "decision_tree" and classification:
-            model = DecisionTreeClassifier(max_depth=int(params.get("max_depth", 5)), random_state=42)
+            model = DecisionTreeClassifier(max_depth=_bounded_int(params.get("max_depth"), 5, 1, 50), random_state=42)
         elif method == "decision_tree":
-            model = DecisionTreeRegressor(max_depth=int(params.get("max_depth", 5)), random_state=42)
+            model = DecisionTreeRegressor(max_depth=_bounded_int(params.get("max_depth"), 5, 1, 50), random_state=42)
         elif method == "gradient_boosting" and classification:
             model = GradientBoostingClassifier(random_state=42)
         elif method == "gradient_boosting":
             model = GradientBoostingRegressor(random_state=42)
         elif method == "mlp" and classification:
-            model = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=int(params.get("max_iter", 500)), random_state=42)
+            model = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=_bounded_int(params.get("max_iter"), 500, 10, 2000), random_state=42)
         else:
-            model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=int(params.get("max_iter", 500)), random_state=42)
+            model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=_bounded_int(params.get("max_iter"), 500, 10, 2000), random_state=42)
         model.fit(x_train, y_train)
         prediction = model.predict(x_test)
         metrics = {"accuracy": _safe(accuracy_score(y_test, prediction))} if classification else {"r2": _safe(r2_score(y_test, prediction)), "mae": _safe(mean_absolute_error(y_test, prediction))}
@@ -397,18 +428,30 @@ def run_analysis(frame: pd.DataFrame, method: str, params: dict | None = None) -
                 from statsmodels.tsa.statespace.sarimax import SARIMAX
             except ImportError as exc:
                 raise ValueError("请安装 statsmodels 后使用 ARIMA 系列模型") from exc
-            order = tuple(params.get("order", [1, 1, 1]))
-            seasonal_order = tuple(params.get("seasonal_order", [1, 0, 1, int(params.get("season_length", 12))])) if method == "sarima" else (0, 0, 0, 0)
+            order = _bounded_order(params.get("order"), [1, 1, 1], 10)
+            if method == "sarima":
+                raw_seasonal = params.get("seasonal_order", [1, 0, 1, params.get("season_length", 12)])
+                if not isinstance(raw_seasonal, (list, tuple)) or len(raw_seasonal) != 4:
+                    raw_seasonal = [1, 0, 1, 12]
+                seasonal_order = (
+                    _bounded_int(raw_seasonal[0], 1, 0, 5),
+                    _bounded_int(raw_seasonal[1], 0, 0, 2),
+                    _bounded_int(raw_seasonal[2], 1, 0, 5),
+                    _bounded_int(raw_seasonal[3], 12, 2, 365),
+                )
+            else:
+                seasonal_order = (0, 0, 0, 0)
             fitted = SARIMAX(values, order=order, seasonal_order=seasonal_order, enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
             predicted = fitted.get_forecast(horizon)
             forecasts = predicted.predicted_mean
-            confidence = predicted.conf_int(alpha=float(params.get("alpha", 0.05)))
+            alpha = max(0.001, min(float(params.get("alpha", 0.05)), 0.5))
+            confidence = predicted.conf_int(alpha=alpha)
             result_frame = pd.DataFrame({date_column: future_dates, "forecast": forecasts, "lower": confidence[:, 0], "upper": confidence[:, 1]})
             diagnostics = {"aic": _safe(fitted.aic), "bic": _safe(fitted.bic)}
         elif method == "prophet_like":
             x = np.arange(len(values), dtype=float)
             future_x = np.arange(len(values), len(values) + horizon, dtype=float)
-            period = max(2, int(params.get("season_length", min(12, max(2, len(values) // 3)))))
+            period = _bounded_int(params.get("season_length"), min(12, max(2, len(values) // 3)), 2, 365)
             order = max(1, min(int(params.get("fourier_order", 3)), 8))
             def design(points):
                 features = [np.ones_like(points), points]
@@ -425,7 +468,7 @@ def run_analysis(frame: pd.DataFrame, method: str, params: dict | None = None) -
             lookback = max(2, min(int(params.get("lookback", 6)), len(values) // 2))
             x_train = np.asarray([values[index - lookback:index] for index in range(lookback, len(values))])
             y_train = values[lookback:]
-            model = MLPRegressor(hidden_layer_sizes=(48, 24), max_iter=int(params.get("max_iter", 800)), random_state=42)
+            model = MLPRegressor(hidden_layer_sizes=(48, 24), max_iter=_bounded_int(params.get("max_iter"), 800, 10, 2000), random_state=42)
             model.fit(x_train, y_train)
             window = list(values[-lookback:])
             forecasts = []

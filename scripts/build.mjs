@@ -11,6 +11,10 @@ await mkdir(output, { recursive: true });
 await cp(resolve(frontend, 'src'), resolve(output, 'src'), { recursive: true });
 await cp(resolve(frontend, 'vendor'), resolve(output, 'vendor'), { recursive: true });
 await cp(resolve(frontend, 'drawio'), resolve(output, 'drawio'), { recursive: true });
+// Java server descriptors, placeholder OAuth secrets and JAR files are not
+// browser assets. Keep them out of the production static tree entirely.
+await rm(resolve(output, 'drawio/WEB-INF'), { recursive: true, force: true });
+await rm(resolve(output, 'drawio/META-INF'), { recursive: true, force: true });
 
 const vueSource = await readFile(resolve(frontend, 'vendor/vue.global.prod.js'), 'utf8');
 const decodeHtml = (value) => value

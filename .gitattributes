@@ -1,2 +1,7 @@
 backend/data/warning_file/*.mp4 filter=lfs diff=lfs merge=lfs -text
 backend/data/model/*.pt filter=lfs diff=lfs merge=lfs -text
+
+# Keep bundled browser dependencies in Git, but exclude them from GitHub's
+# repository-language calculation so the bar reflects first-party code.
+frontend/drawio/** linguist-vendored
+frontend/vendor/** linguist-vendored

@@ -15,7 +15,31 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: meridian
+          POSTGRES_USER: meridian
+          POSTGRES_PASSWORD: meridian-ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meridian -d meridian"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: meridian
+          MYSQL_USER: meridian
+          MYSQL_PASSWORD: meridian-ci-password
+          MYSQL_ROOT_PASSWORD: meridian-ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pmeridian-ci-root-password"
+          --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,15 +53,38 @@ jobs:
         run: python -m pip install --requirement requirements-dev.txt
       - name: Verify Python
         run: |
-          ruff check backend tests app.py
-          python -m compileall -q backend app.py
-          pytest -q
+          ruff check backend scripts tests app.py
+          ruff check --select S backend scripts app.py
+          python -m compileall -q backend scripts app.py
+          pytest -q \
+            --cov=backend/api --cov=backend/core --cov=backend/services \
+            --cov-report=term --cov-fail-under=60
+      - name: Verify PostgreSQL and MySQL connectors
+        env:
+          MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK: "1"
+          MERIDIAN_DATABASE_HOST_ALLOWLIST: 127.0.0.1
+          MERIDIAN_TEST_POSTGRES_URL: postgresql+psycopg2://meridian:meridian-ci-password@127.0.0.1:5432/meridian
+          MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:meridian-ci-password@127.0.0.1:3306/meridian
+        run: pytest -q -m database_integration tests/test_database_integration.py
+      - name: Audit locked production dependencies
+        run: pip-audit -r requirements.lock --no-deps --disable-pip
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Verify production frontend
         run: |
+          (cd frontend/vendor && sha256sum --check SHA256SUMS)
           npm run check
           npm run build
           node --check frontend/dist/src/app.js
           node --check frontend/dist/src/api.js
+      - name: Validate Compose configuration
+        env:
+          MERIDIAN_SECRET_KEY: ci-secret-key-that-is-at-least-32-characters
+          MERIDIAN_ENCRYPTION_KEY: ci-encryption-key-that-is-at-least-32-characters
+          MERIDIAN_BACKUP_KEY: ci-backup-key-that-is-at-least-32-characters
+          MERIDIAN_TRUSTED_HOSTS: localhost
+          MERIDIAN_OUTBOUND_HOST_ALLOWLIST: api.openai.com
+        run: docker compose config --quiet
+      - name: Build production image
+        run: docker build --tag meridian-ci:${{ github.sha }} .

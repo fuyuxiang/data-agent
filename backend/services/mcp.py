@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import threading
@@ -14,11 +15,12 @@ from urllib.parse import urljoin
 from flask import Flask, current_app, has_app_context
 
 from ..core.database import Database, utcnow
-from .security import SecretVault, validate_outbound_url
+from .security import SecretVault, safe_http_request, validate_outbound_url
 
 
 ALLOWED_STDIO_COMMANDS = frozenset({"uvx", "uv", "npx", "npm", "node", "python", "python3", "deno"})
 PROTOCOL_VERSION = "2025-06-18"
+log = logging.getLogger(__name__)
 
 
 def _safe_command(command: str) -> str:
@@ -28,7 +30,10 @@ def _safe_command(command: str) -> str:
     basename = Path(command).stem.lower()
     if basename not in ALLOWED_STDIO_COMMANDS:
         raise ValueError(f"MCP stdio 命令不在白名单中：{command}")
-    if os.path.sep in command or (os.altsep and os.altsep in command):
+    has_path = os.path.sep in command or bool(os.altsep and os.altsep in command)
+    if has_path and not testing:
+        raise ValueError("MCP stdio 命令必须通过受控 PATH 解析，不能使用自定义路径")
+    if has_path:
         resolved = command
     else:
         resolved = shutil.which(command) or ""
@@ -84,7 +89,14 @@ class StdioTransport(Transport):
         self.arguments = [str(item) for item in arguments]
         if any(item in {"-c", "-e", "--eval", "--print"} for item in self.arguments):
             raise ValueError("stdio MCP 禁止解释器内联执行参数")
-        self.environment = {**os.environ, **{str(key): str(value) for key, value in environment.items()}}
+        inherited = {
+            key: os.environ[key]
+            for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT", "WINDIR", "PATHEXT")
+            if os.environ.get(key)
+        }
+        # Do not leak the application's database, model, SMTP or encryption
+        # secrets into an optional third-party MCP subprocess.
+        self.environment = {**inherited, **{str(key): str(value) for key, value in environment.items()}}
         self.process: asyncio.subprocess.Process | None = None
         self.request_id = 0
         self.lock = asyncio.Lock()
@@ -166,26 +178,39 @@ class HttpTransport(Transport):
         self.session_id = ""
 
     async def connect(self) -> dict:
-        import httpx
-
-        self.client = httpx.AsyncClient(
-            headers={"Accept": "application/json, text/event-stream", **self.headers}, timeout=30,
-        )
+        self.client = True
         if self.legacy_sse:
-            async with self.client.stream("GET", self.url) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    try:
-                        value = json.loads(payload)
-                        endpoint = value.get("endpoint") if isinstance(value, dict) else None
-                    except json.JSONDecodeError:
-                        endpoint = payload
-                    if endpoint:
-                        self.endpoint = validate_outbound_url(urljoin(self.url, str(endpoint)))
-                        break
+            def discover_endpoint():
+                response = safe_http_request(
+                    "GET", self.url, headers={"Accept": "text/event-stream", **self.headers},
+                    timeout=30, max_redirects=0, max_response_bytes=1024 * 1024, stream=True,
+                )
+                consumed = 0
+                try:
+                    response.raise_for_status()
+                    for raw_line in response.iter_lines():
+                        consumed += len(raw_line)
+                        if consumed > 1024 * 1024:
+                            raise ValueError("MCP SSE 端点响应超过 1MB 限制")
+                        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        try:
+                            value = json.loads(payload)
+                            endpoint = value.get("endpoint") if isinstance(value, dict) else None
+                        except json.JSONDecodeError:
+                            endpoint = payload
+                        if endpoint:
+                            return validate_outbound_url(urljoin(self.url, str(endpoint)))
+                    raise ConnectionError("MCP SSE 未返回端点")
+                finally:
+                    response.close()
+                    pinned = getattr(response, "_meridian_session", None)
+                    if pinned:
+                        pinned.close()
+
+            self.endpoint = await asyncio.to_thread(discover_endpoint)
         initialized = await self.request("initialize", _initialize_params())
         await self._notification("notifications/initialized", {})
         return initialized if isinstance(initialized, dict) else {}
@@ -217,8 +242,11 @@ class HttpTransport(Transport):
         if not self.client:
             raise ConnectionError("MCP HTTP 客户端未连接")
         headers = {"Mcp-Session-Id": self.session_id} if self.session_id else {}
-        response = await self.client.post(
-            self.endpoint, json={"jsonrpc": "2.0", "method": method, "params": params}, headers=headers,
+        response = await asyncio.to_thread(
+            safe_http_request, "POST", self.endpoint,
+            json={"jsonrpc": "2.0", "method": method, "params": params},
+            headers={"Accept": "application/json, text/event-stream", **self.headers, **headers},
+            timeout=30, max_redirects=0, max_response_bytes=4 * 1024 * 1024,
         )
         response.raise_for_status()
 
@@ -229,10 +257,11 @@ class HttpTransport(Transport):
             self.request_id += 1
             request_id = self.request_id
             headers = {"Mcp-Session-Id": self.session_id} if self.session_id else {}
-            response = await self.client.post(
-                self.endpoint,
+            response = await asyncio.to_thread(
+                safe_http_request, "POST", self.endpoint,
                 json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-                headers=headers, timeout=60,
+                headers={"Accept": "application/json, text/event-stream", **self.headers, **headers},
+                timeout=60, max_redirects=0, max_response_bytes=4 * 1024 * 1024,
             )
             response.raise_for_status()
             returned_session = response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id")
@@ -244,10 +273,13 @@ class HttpTransport(Transport):
         if self.client:
             if self.session_id:
                 try:
-                    await self.client.delete(self.endpoint, headers={"Mcp-Session-Id": self.session_id})
+                    await asyncio.to_thread(
+                        safe_http_request, "DELETE", self.endpoint,
+                        headers={**self.headers, "Mcp-Session-Id": self.session_id},
+                        timeout=10, max_redirects=0, max_response_bytes=1024 * 1024,
+                    )
                 except Exception:
-                    pass
-            await self.client.aclose()
+                    log.debug("Unable to close remote MCP session", exc_info=True)
             self.client = None
 
 

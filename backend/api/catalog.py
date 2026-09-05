@@ -90,7 +90,7 @@ def upload_source():
     files = request.files.getlist("files") or ([request.files["file"]] if "file" in request.files else [])
     if not files:
         raise ValueError("没有收到上传文件")
-    wid = str(request.form.get("workspace_id") or request.headers.get("X-Workspace-Id") or "default")
+    wid = workspace_id()
     items = [public_source(register_upload(file, wid)) for file in files]
     return ok(items=items), 201
 
@@ -237,7 +237,7 @@ def upload_document():
         raise ValueError("请选择知识文档")
     tags_raw = request.form.get("tags", "")
     tags = [item.strip() for item in tags_raw.split(",") if item.strip()]
-    wid = str(request.form.get("workspace_id") or request.headers.get("X-Workspace-Id") or "default")
+    wid = workspace_id()
     return ok(item=add_document(request.files["file"], wid, tags)), 201
 
 

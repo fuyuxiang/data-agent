@@ -80,12 +80,14 @@ def test_legacy_chart_dashboard_and_export_routes(client, source):
     ).get_json()["result"]
     chart = client.post(
         "/api/charts/spec",
-        json={"result_id": query["id"], "type": "bar", "title": "区域销售"},
+        json={"result_id": query["id"], "type": "bar", "title": "区域销售</script><script>alert(1)"},
     ).get_json()["item"]
 
     chart_page = client.get(f"/api/chart/{chart['id']}")
     assert chart_page.status_code == 200
     assert b"echarts.init" in chart_page.data
+    assert b"<script>alert(1)" not in chart_page.data
+    assert b"\\u003c/script\\u003e" in chart_page.data
 
     dashboard = client.post(
         "/api/dashboard/generate",

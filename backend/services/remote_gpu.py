@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib
+import io
 import json
 import logging
 import platform
@@ -170,6 +171,52 @@ def trust_host_key(database: Database, connection: dict, key_type: str, key_base
     )
 
 
+def _private_key(value: str):
+    paramiko = _paramiko()
+    for class_name in ("Ed25519Key", "ECDSAKey", "RSAKey"):
+        key_class = getattr(paramiko, class_name, None)
+        if key_class is None:
+            continue
+        try:
+            return key_class.from_private_key(io.StringIO(value))
+        except Exception:  # noqa: S112 -- try each supported private-key encoding
+            continue
+    raise TunnelError("私钥格式无效或私钥需要未提供的口令")
+
+
+def open_ssh_client(
+    connection: dict, trusted_key: dict | None, *, password: str | None = None,
+    private_key: str | None = None, key_filename: str | None = None,
+):
+    if not trusted_key or trusted_key.get("connection_id") != connection.get("id"):
+        raise UnknownHostKeyError("SSH 主机尚未确认；请先核对并信任主机指纹")
+    paramiko = _paramiko()
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    host_name = connection["host"] if connection["port"] == 22 else f"[{connection['host']}]:{connection['port']}"
+    key = _decode_key(trusted_key["key_type"], trusted_key["key_base64"])
+    client.get_host_keys().add(host_name, trusted_key["key_type"], key)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    pkey = _private_key(private_key) if private_key else None
+    try:
+        client.connect(
+            hostname=connection["host"], port=connection["port"], username=connection["username"],
+            password=password, pkey=pkey, key_filename=key_filename, timeout=10,
+            banner_timeout=10, auth_timeout=10,
+            look_for_keys=not any((password, pkey, key_filename)),
+            allow_agent=not any((password, pkey, key_filename)),
+        )
+    except paramiko.SSHException as exc:
+        client.close()
+        if "known_hosts" in str(exc).lower() or "host key" in str(exc).lower():
+            raise UnknownHostKeyError("SSH 主机指纹未信任或已变更") from exc
+        raise TunnelError(f"SSH 连接失败: {exc}") from exc
+    except OSError as exc:
+        client.close()
+        raise TunnelError(f"SSH 网络连接失败: {exc}") from exc
+    return client
+
+
 class _ForwardServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -231,32 +278,11 @@ class ConnectionManager:
         self._tunnels: dict[str, SshTunnel] = {}
 
     def connect(self, connection: dict, trusted_key: dict, password: str | None = None) -> SshTunnel:
-        if not trusted_key:
-            raise UnknownHostKeyError("SSH 主机尚未确认；请先核对并信任主机指纹")
-        paramiko = _paramiko()
         with self._lock:
             self.close(connection["id"])
-            client = paramiko.SSHClient()
-            client.load_system_host_keys()
-            host_name = connection["host"] if connection["port"] == 22 else f"[{connection['host']}]:{connection['port']}"
-            key = _decode_key(trusted_key["key_type"], trusted_key["key_base64"])
-            client.get_host_keys().add(host_name, trusted_key["key_type"], key)
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
-            try:
-                client.connect(
-                    hostname=connection["host"], port=connection["port"], username=connection["username"],
-                    password=password, key_filename=connection.get("key_file"), timeout=10,
-                    banner_timeout=10, auth_timeout=10, look_for_keys=password is None,
-                    allow_agent=password is None,
-                )
-            except paramiko.SSHException as exc:
-                client.close()
-                if "known_hosts" in str(exc).lower() or "host key" in str(exc).lower():
-                    raise UnknownHostKeyError("SSH 主机指纹未信任或已变更") from exc
-                raise TunnelError(f"SSH 连接失败: {exc}") from exc
-            except OSError as exc:
-                client.close()
-                raise TunnelError(f"SSH 网络连接失败: {exc}") from exc
+            client = open_ssh_client(
+                connection, trusted_key, password=password, key_filename=connection.get("key_file"),
+            )
             server = _ForwardServer(("127.0.0.1", 0), _ForwardHandler)
             tunnel = SshTunnel(connection["id"], client, server, connection["target_host"], connection["target_port"])
             server.tunnel = tunnel  # type: ignore[attr-defined]
@@ -366,7 +392,7 @@ def _nvidia() -> dict:
     if not executable:
         return {"kind": "none", "gpus": [], "message": "未检测到 nvidia-smi：本机无 NVIDIA 独显，或驱动未安装"}
     try:
-        process = subprocess.run(
+        process = subprocess.run(  # noqa: S603 -- executable is resolved from the fixed nvidia-smi name
             [executable, "--query-gpu=name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5, check=False,
         )

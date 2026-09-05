@@ -2,41 +2,42 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, Response, current_app, jsonify, request, send_file
+from flask import Blueprint, Response, current_app, g, jsonify, request, send_file
 from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
+from ..services.dashboard_refresh import refresh_dashboard as refresh_dashboard_record
+from ..services.dashboard_refresh import refresh_widget as refresh_widget_record
 from ..services.datasets import SUPPORTED_FILE_EXTENSIONS, public_source, register_upload
-from .common import api_errors, body, db, safe_child, workspace_id
+from .common import (
+    api_errors,
+    body,
+    db,
+    require_workspace_access,
+    require_workspace_record,
+    safe_child,
+    workspace_id,
+    workspace_membership,
+)
 
 
 bp = Blueprint("compat_legacy", __name__)
 
 
-def _requested_workspace_id() -> str:
-    return str(
-        request.args.get("workspace_id")
-        or request.headers.get("X-Workspace-Id")
-        or body().get("workspace_id")
-        or ""
-    )[:128]
-
-
 def _session(session_id: str, *, create: bool = False) -> dict:
+    wid = workspace_id()
     record = db().get("sessions", session_id)
-    requested = _requested_workspace_id()
-    if record and requested and str(record.get("workspace_id") or "default") != requested:
-        raise FileNotFoundError("session not found")
     if record:
-        return record
+        return require_workspace_record("sessions", session_id, wid)
     if not create:
         raise FileNotFoundError("session not found")
-    wid = requested or workspace_id()
+    require_workspace_access(wid, write=True)
     return db().put(
         "sessions",
         {
@@ -151,12 +152,13 @@ def _saved_session_public(record: dict) -> dict:
 
 
 def _find_saved_session(identifier: str, wid: str | None = None) -> dict | None:
+    wid = wid or workspace_id()
     safe = Path(identifier).name
     for key in (identifier, safe):
         record = db().get("saved_sessions", key)
-        if record and (wid is None or str(record.get("workspace_id") or "default") == wid):
+        if record and str(record.get("workspace_id") or "default") == wid:
             return record
-    for record in db().list("saved_sessions", workspace_id=wid or workspace_id(), limit=5000):
+    for record in db().list("saved_sessions", workspace_id=wid, limit=5000):
         if Path(str(record.get("filename") or "")).name == safe:
             return record
     return None
@@ -282,9 +284,22 @@ def _workspace_status(session: dict) -> dict:
     }
 
 
+def _script_json(value: object) -> str:
+    """Serialize JSON without allowing data to terminate its script container."""
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _chart_html(spec: dict, title: str = "Chart") -> str:
-    encoded = html.escape(json.dumps(spec or {}, ensure_ascii=False), quote=False)
+    encoded = _script_json(spec or {})
     title_text = html.escape(title or "Chart")
+    nonce = html.escape(str(getattr(g, "csp_nonce", "")), quote=True)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -296,8 +311,8 @@ def _chart_html(spec: dict, title: str = "Chart") -> str:
 </head>
 <body>
   <div id="chart"></div>
-  <script id="chart-spec" type="application/json">{encoded}</script>
-  <script>
+  <script id="chart-spec" type="application/json" nonce="{nonce}">{encoded}</script>
+  <script nonce="{nonce}">
     const spec = JSON.parse(document.getElementById('chart-spec').textContent || '{{}}');
     const option = spec.option || spec;
     const chart = echarts.init(document.getElementById('chart'));
@@ -324,8 +339,9 @@ def _dashboard_public(record: dict) -> dict:
 
 
 def _dashboard_html(record: dict) -> str:
-    data = html.escape(json.dumps(_dashboard_public(record), ensure_ascii=False), quote=False)
+    data = _script_json(_dashboard_public(record))
     title = html.escape(str(record.get("name") or "Dashboard"))
+    nonce = html.escape(str(getattr(g, "csp_nonce", "")), quote=True)
     widget_blocks = []
     for widget in record.get("widgets") or []:
         spec = widget.get("chart") or {}
@@ -353,8 +369,8 @@ def _dashboard_html(record: dict) -> str:
 <body>
   <header><h1>{title}</h1></header>
   <main>{''.join(widget_blocks) or '<p>暂无组件</p>'}</main>
-  <script id="dashboard-data" type="application/json">{data}</script>
-  <script>
+  <script id="dashboard-data" type="application/json" nonce="{nonce}">{data}</script>
+  <script nonce="{nonce}">
     document.querySelectorAll('.chart').forEach((el) => {{
       const spec = JSON.parse(el.dataset.spec || '{{}}');
       if (!spec.option && !Object.keys(spec).length) return;
@@ -490,7 +506,7 @@ def autosave_session(session_id: str):
 @bp.get("/api/session/<session_id>/autosave")
 @api_errors
 def get_autosave(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     record = _find_saved_session(f"autosave_{session_id}.json", session["workspace_id"])
     if not record:
         return jsonify({"exists": False})
@@ -522,10 +538,10 @@ def load_session(session_id: str):
     filename = str(payload.get("filename") or payload.get("id") or "").strip()
     if not filename:
         return jsonify({"error": "未指定文件名"}), 400
-    saved = _find_saved_session(filename)
+    session = _session(session_id, create=True)
+    saved = _find_saved_session(filename, session["workspace_id"])
     if not saved:
         return jsonify({"error": "文件不存在"}), 404
-    session = _session(session_id, create=True)
     history = [
         {**item, "id": db().new_id("msg"), "session_id": session_id}
         for item in saved.get("history") or saved.get("messages") or []
@@ -564,7 +580,7 @@ def load_session(session_id: str):
 @bp.patch("/api/saved-sessions/<path:identifier>")
 @api_errors
 def rename_saved_session(identifier: str):
-    saved = _find_saved_session(identifier)
+    saved = _find_saved_session(identifier, workspace_id())
     if not saved:
         return jsonify({"error": "文件不存在"}), 404
     name = str(body().get("name") or "").strip()
@@ -581,7 +597,7 @@ def rename_saved_session(identifier: str):
 @bp.delete("/api/saved-sessions/<path:identifier>")
 @api_errors
 def delete_saved_session(identifier: str):
-    saved = _find_saved_session(identifier)
+    saved = _find_saved_session(identifier, workspace_id())
     if not saved:
         return jsonify({"error": "文件不存在"}), 404
     db().archive("saved_sessions", saved["id"])
@@ -679,12 +695,7 @@ def record_command_metric(session_id: str):
 @bp.get("/api/chart/<chart_id>")
 @api_errors
 def serve_chart(chart_id: str):
-    chart = db().get("charts", chart_id)
-    if not chart:
-        return Response("Chart not found", status=404, mimetype="text/plain")
-    raw_html = chart.get("html")
-    if raw_html:
-        return Response(str(raw_html), mimetype="text/html")
+    chart = require_workspace_record("charts", chart_id)
     return Response(_chart_html(chart.get("spec") or {}, str(chart.get("name") or "Chart")), mimetype="text/html")
 
 
@@ -692,7 +703,7 @@ def serve_chart(chart_id: str):
 @api_errors
 def dashboard_page(dashboard_id: str):
     dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
+    if not dashboard or not workspace_membership(str(dashboard.get("workspace_id") or "default")):
         return Response("Dashboard not found", status=404, mimetype="text/plain")
     return Response(_dashboard_html(dashboard), mimetype="text/html")
 
@@ -722,7 +733,7 @@ def generate_dashboard():
         if not isinstance(raw, dict):
             continue
         chart_id = str(raw.get("chart_id") or "")
-        chart = db().get("charts", chart_id) if chart_id else None
+        chart = require_workspace_record("charts", chart_id, wid) if chart_id else None
         spec = raw.get("chart") or raw.get("spec") or (chart or {}).get("spec") or {}
         widgets.append({
             "id": str(raw.get("id") or f"widget-{index}")[:100],
@@ -759,18 +770,14 @@ def generate_dashboard():
 @bp.get("/api/dashboard/<dashboard_id>")
 @api_errors
 def get_dashboard(dashboard_id: str):
-    dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
-        raise FileNotFoundError("看板不存在")
+    dashboard = require_workspace_record("dashboards", dashboard_id)
     return jsonify(_dashboard_public(dashboard))
 
 
 @bp.put("/api/dashboard/<dashboard_id>")
 @api_errors
 def update_dashboard(dashboard_id: str):
-    dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
-        raise FileNotFoundError("看板不存在")
+    dashboard = require_workspace_record("dashboards", dashboard_id)
     payload = body()
     changes: dict[str, Any] = {}
     if "name" in payload:
@@ -801,8 +808,7 @@ def update_dashboard(dashboard_id: str):
 @bp.delete("/api/dashboard/<dashboard_id>")
 @api_errors
 def delete_dashboard(dashboard_id: str):
-    if not db().get("dashboards", dashboard_id):
-        raise FileNotFoundError("看板不存在")
+    require_workspace_record("dashboards", dashboard_id)
     db().archive("dashboards", dashboard_id)
     return jsonify({"ok": True})
 
@@ -810,33 +816,29 @@ def delete_dashboard(dashboard_id: str):
 @bp.post("/api/dashboard/<dashboard_id>/refresh")
 @api_errors
 def refresh_dashboard(dashboard_id: str):
-    dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
-        raise FileNotFoundError("看板不存在")
-    widgets = []
-    results = []
-    for widget in dashboard.get("widgets") or []:
-        updated = {**widget, "refresh_status": "static", "refreshed_at": utcnow()}
-        widgets.append(updated)
-        results.append({"id": updated.get("id"), "chart_id": updated.get("chart_id"), "error": updated.get("error")})
-    dashboard["widgets"] = widgets
-    dashboard["refreshed_at"] = utcnow()
-    dashboard["revision"] = int(dashboard.get("revision", 1)) + 1
-    db().put("dashboards", dashboard, workspace_id=dashboard.get("workspace_id", "default"))
+    dashboard = require_workspace_record("dashboards", dashboard_id)
+    dashboard = refresh_dashboard_record(db(), dashboard)
+    results = [
+        {
+            "id": widget.get("id"), "chart_id": widget.get("chart_id"),
+            "error": widget.get("refresh_error"), "result_id": widget.get("result_id"),
+        }
+        for widget in dashboard.get("widgets") or []
+    ]
     return jsonify({"ok": True, "widgets": results, "kpi_widgets": [], "item": dashboard})
 
 
 @bp.post("/api/dashboard/<dashboard_id>/widget/<widget_id>/refresh")
 @api_errors
 def refresh_widget(dashboard_id: str, widget_id: str):
-    dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
-        raise FileNotFoundError("看板不存在")
+    dashboard = require_workspace_record("dashboards", dashboard_id)
     found = None
     widgets = []
     for widget in dashboard.get("widgets") or []:
         if str(widget.get("id")) == widget_id:
-            widget = {**widget, "refresh_status": "static", "refreshed_at": utcnow()}
+            widget = refresh_widget_record(
+                db(), widget, str(dashboard.get("workspace_id") or "default"),
+            )
             found = widget
         widgets.append(widget)
     if found is None:
@@ -850,9 +852,7 @@ def refresh_widget(dashboard_id: str, widget_id: str):
 @bp.get("/api/dashboard/<dashboard_id>/export-html")
 @api_errors
 def export_dashboard_legacy(dashboard_id: str):
-    dashboard = db().get("dashboards", dashboard_id)
-    if not dashboard:
-        raise FileNotFoundError("看板不存在")
+    dashboard = require_workspace_record("dashboards", dashboard_id)
     return Response(
         _dashboard_html(dashboard),
         mimetype="text/html",
@@ -882,6 +882,7 @@ def download_export(filename: str):
 @api_errors
 def mount_workspace(session_id: str):
     session = _session(session_id, create=True)
+    require_workspace_access(session["workspace_id"], write=True)
     payload = body()
     raw_path = str(payload.get("path") or "").strip()
     if not raw_path:
@@ -889,6 +890,10 @@ def mount_workspace(session_id: str):
     root = Path(raw_path).expanduser().resolve()
     if not root.is_dir():
         return jsonify({"ok": False, "error": "目录不存在或不是文件夹。"}), 400
+    if db().list("users", include_archived=True) and os.getenv("MERIDIAN_ALLOW_HOST_MOUNTS", "0") != "1":
+        allowed_root = (current_app.config["SETTINGS"].workspace_dir / session["workspace_id"]).resolve()
+        if root != allowed_root and allowed_root not in root.parents:
+            raise PermissionError("服务器模式只能挂载该工作空间的受控目录")
     permission = str(payload.get("permission") or "read_only")
     if permission not in {"read_only", "read_write"}:
         return jsonify({"ok": False, "error": "permission 必须是 read_only 或 read_write。"}), 400
@@ -928,6 +933,7 @@ def finalize_workspace_job(session_id: str, job_id: str):
 @api_errors
 def unmount_workspace(session_id: str):
     session = _session(session_id)
+    require_workspace_access(session["workspace_id"], write=True)
     workspace = db().get("workspaces", session["workspace_id"])
     if not workspace or not workspace.get("mounted_path"):
         return jsonify({"ok": False, "error": "未挂载工作目录。"}), 400
@@ -938,15 +944,17 @@ def unmount_workspace(session_id: str):
 @bp.get("/api/session/<session_id>/workspace")
 @api_errors
 def get_workspace(session_id: str):
-    return jsonify({"ok": True, "workspace": _workspace_status(_session(session_id, create=True))})
+    return jsonify({"ok": True, "workspace": _workspace_status(_session(session_id))})
 
 
 @bp.get("/api/session/<session_id>/workspaces")
 @api_errors
 def list_session_workspaces(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     items = []
     for item in db().list("workspaces", limit=5000):
+        if not workspace_membership(item["id"]):
+            continue
         items.append({
             "workspace_id": item["id"],
             "id": item["id"],
@@ -969,9 +977,7 @@ def list_session_workspaces(session_id: str):
 @api_errors
 def workspace_remove_preview(session_id: str, target_workspace_id: str):
     _session(session_id)
-    workspace = db().get("workspaces", target_workspace_id)
-    if not workspace:
-        return jsonify({"ok": False, "error": "工作目录不在发现列表中。", "code": "workspace_not_found"}), 404
+    workspace = require_workspace_access(target_workspace_id, owner=True)
     return jsonify({
         "ok": True,
         "workspace": {
@@ -990,6 +996,7 @@ def workspace_remove_preview(session_id: str, target_workspace_id: str):
 @api_errors
 def remove_workspace_record(session_id: str, target_workspace_id: str):
     _session(session_id)
+    require_workspace_access(target_workspace_id, owner=True)
     if body().get("confirmed") is not True:
         return jsonify({"ok": False, "error": "移除前必须明确确认。", "code": "confirmation_required"}), 400
     if target_workspace_id == "default":
@@ -1010,9 +1017,7 @@ def remove_workspace_record(session_id: str, target_workspace_id: str):
 @api_errors
 def storage_cleanup_preview(session_id: str, target_workspace_id: str):
     _session(session_id)
-    workspace = db().get("workspaces", target_workspace_id)
-    if not workspace:
-        return jsonify({"ok": False, "error": "工作目录不在发现列表中。", "code": "workspace_not_found"}), 404
+    workspace = require_workspace_access(target_workspace_id, owner=True)
     return jsonify({
         "ok": True,
         "workspace": {"workspace_id": target_workspace_id, "root_path": workspace.get("mounted_path") or ""},
@@ -1026,6 +1031,7 @@ def storage_cleanup_preview(session_id: str, target_workspace_id: str):
 @api_errors
 def storage_cleanup(session_id: str, target_workspace_id: str):
     _session(session_id)
+    require_workspace_access(target_workspace_id, owner=True)
     if body().get("confirmed") is not True:
         return jsonify({"ok": False, "error": "清理前必须明确确认。", "code": "confirmation_required"}), 400
     return jsonify({"ok": True, "workspace_id": target_workspace_id, "summary": {"files": 0, "bytes": 0}, "items": []})
@@ -1035,9 +1041,7 @@ def storage_cleanup(session_id: str, target_workspace_id: str):
 @api_errors
 def workspace_switch_preview(session_id: str, target_workspace_id: str):
     session = _session(session_id)
-    workspace = db().get("workspaces", target_workspace_id)
-    if not workspace:
-        return jsonify({"ok": False, "error": "目标工作目录已失效，请刷新列表后重试。", "code": "workspace_identity_unavailable"}), 409
+    workspace = require_workspace_access(target_workspace_id)
     return jsonify({
         "ok": True,
         "target": {
@@ -1058,6 +1062,7 @@ def workspace_switch_preview(session_id: str, target_workspace_id: str):
 @api_errors
 def rename_workspace(session_id: str, target_workspace_id: str):
     _session(session_id)
+    require_workspace_access(target_workspace_id, write=True)
     name = " ".join(str(body().get("name") or "").split())
     if not name:
         return jsonify({"ok": False, "error": "工作目录显示名称长度必须为 1-80 个字符，且不能包含控制字符。"}), 400
@@ -1082,6 +1087,7 @@ def workspace_checkpoints(session_id: str):
 @api_errors
 def restore_workspace_checkpoint(session_id: str, snapshot_id: str):
     session = _session(session_id)
+    require_workspace_access(session["workspace_id"], write=True)
     snapshot = db().get("checkpoints", snapshot_id)
     if not snapshot or snapshot.get("workspace_id") != session["workspace_id"]:
         raise FileNotFoundError("快照不存在")
@@ -1099,6 +1105,7 @@ def restore_workspace_checkpoint(session_id: str, snapshot_id: str):
 @api_errors
 def workspace_permission(session_id: str):
     session = _session(session_id)
+    require_workspace_access(session["workspace_id"], write=True)
     permission = str(body().get("permission") or "")
     if permission not in {"read_only", "read_write"}:
         return jsonify({"ok": False, "error": "permission 必须是 read_only 或 read_write。"}), 400
@@ -1109,7 +1116,7 @@ def workspace_permission(session_id: str):
 @bp.get("/api/session/<session_id>/agent-profiles")
 @api_errors
 def session_agent_profiles(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     defaults = [
         {"id": "data-specialist", "key": "data-specialist", "name": "数据工程顾问", "role": "负责结构识别、查询与质量校验", "built_in": True},
         {"id": "quant-specialist", "key": "quant-specialist", "name": "量化分析顾问", "role": "负责统计检验、建模与不确定性", "built_in": True},
@@ -1149,7 +1156,7 @@ def create_session_agent_profile(session_id: str):
 @bp.get("/api/session/<session_id>/workflows")
 @api_errors
 def session_workflows(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     workflows = db().list("workflows", workspace_id=session["workspace_id"], limit=5000)
     for workflow in workflows:
         version_id = str(workflow.get("current_version_id") or "")
@@ -1297,7 +1304,7 @@ def _team_by_name(session: dict, team_name: str) -> dict | None:
 @bp.get("/api/session/<session_id>/teams")
 @api_errors
 def list_teams(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     teams = db().list("teams", workspace_id=session["workspace_id"], limit=5000)
     return jsonify({"ok": True, "teams": teams, "items": teams})
 
@@ -1349,7 +1356,7 @@ def clear_team_messages(session_id: str, team_name: str):
 @bp.get("/api/session/<session_id>/team-plans")
 @api_errors
 def team_plans(session_id: str):
-    session = _session(session_id, create=True)
+    session = _session(session_id)
     plans = db().list("team_plans", workspace_id=session["workspace_id"], limit=5000)
     team_name = str(request.args.get("team_name") or "")
     if team_name:

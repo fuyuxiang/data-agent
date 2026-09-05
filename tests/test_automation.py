@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 
 def wait_for(client, path, statuses, timeout=8):
@@ -13,6 +16,36 @@ def wait_for(client, path, statuses, timeout=8):
             return item
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for {statuses}; last={item}")
+
+
+def test_cron_validation_and_standard_day_semantics():
+    from backend.services.scheduler import cron_matches, validate_cron
+
+    assert validate_cron("*/15 8-18 * * 1-5") == "*/15 8-18 * * 1-5"
+    with pytest.raises(ValueError):
+        validate_cron("99 * * * *")
+    assert cron_matches("0 9 1 * 1", datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc))
+    assert cron_matches("0 9 1 * 1", datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc))
+    assert not cron_matches("0 9 1 * 1", datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc))
+
+
+def test_schedule_requires_published_workflow_and_valid_configuration(client):
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "Scheduled", "definition": {"steps": [{"id": "n", "type": "notification", "config": {"message": "ok"}}]}},
+    ).get_json()["item"]
+    assert client.post(
+        "/api/schedules", json={"workflow_id": workflow["id"], "cron": "0 9 * * 1"},
+    ).status_code == 400
+    assert client.post(f"/api/workflows/{workflow['id']}/publish").status_code == 200
+    created = client.post(
+        "/api/schedules",
+        json={"workflow_id": workflow["id"], "cron": "0 9 * * 1", "timezone": "Asia/Shanghai"},
+    )
+    assert created.status_code == 201
+    schedule_id = created.get_json()["item"]["id"]
+    assert client.patch(f"/api/schedules/{schedule_id}", json={"cron": "90 * * * *"}).status_code == 400
+    assert client.patch(f"/api/schedules/{schedule_id}", json={"timezone": "Not/AZone"}).status_code == 400
 
 
 def test_workflow_validation_approval_resume_and_export(client, source):
@@ -130,6 +163,28 @@ def test_team_hook_map_dashboard_and_trash(client, source):
     trash = client.get("/api/trash").get_json()["items"]
     assert any(item["id"] == dashboard["id"] for item in trash)
     assert client.post(f"/api/trash/dashboards/{dashboard['id']}/restore").status_code == 200
+
+
+def test_dashboard_refresh_reexecutes_source_query(app, client, source):
+    query = client.post(
+        "/api/query",
+        json={"source_ids": [source["id"]], "sql": "SELECT SUM(sales) AS total_sales FROM data"},
+    ).get_json()["result"]
+    dashboard = client.post(
+        "/api/dashboards",
+        json={"name": "Live", "widgets": [{"id": "sales", "result_id": query["id"], "type": "kpi"}]},
+    ).get_json()["item"]
+    database = app.extensions["meridian_db"]
+    source_record = database.get("sources", source["id"])
+    with open(source_record["path"], "a", encoding="utf-8") as stream:
+        stream.write("North,2026-04-01,999,10,1\n")
+
+    response = client.post(f"/api/dashboards/{dashboard['id']}/refresh")
+    assert response.status_code == 200
+    widget = response.get_json()["item"]["widgets"][0]
+    assert widget["result_id"] != query["id"]
+    assert widget["refresh_status"] == "ready"
+    assert float(widget["kpi_value"]) == 1744
 
 
 def test_team_members_use_bounded_tools_mailbox_and_quality_review(client, source, monkeypatch):

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Blueprint, current_app, send_file
 
 from ..services.exports import export_dashboard_html, export_data, export_report
-from ..services.charts import make_spec
-from ..services.datasets import load_result_frame
+from ..services.dashboard_refresh import refresh_dashboard as refresh_dashboard_record
+from ..services.dashboard_refresh import refresh_widget as refresh_widget_record
 from .common import (
     api_errors,
     body,
@@ -72,6 +71,20 @@ def dashboards():
     return ok(items=db().list("dashboards", workspace_id=workspace_id()))
 
 
+def _normalize_refresh(value) -> dict:
+    if value is None:
+        return {"enabled": False, "minutes": 60}
+    if not isinstance(value, dict):
+        raise ValueError("看板刷新配置必须是对象")
+    try:
+        minutes = int(value.get("minutes", 60))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("看板刷新周期必须是整数") from exc
+    if not 1 <= minutes <= 10_080:
+        raise ValueError("看板刷新周期必须在 1-10080 分钟之间")
+    return {"enabled": bool(value.get("enabled", False)), "minutes": minutes}
+
+
 def _normalize_widgets(value, wid: str) -> list[dict]:
     if not isinstance(value, list):
         raise ValueError("看板组件必须是数组")
@@ -116,7 +129,7 @@ def create_dashboard():
             "name": str(payload["name"])[:100], "description": str(payload.get("description") or "")[:500],
             "widgets": _normalize_widgets(payload.get("widgets", []), wid),
             "layout": payload.get("layout", {"columns": 12}),
-            "refresh": payload.get("refresh", {"enabled": False, "minutes": 60}),
+            "refresh": _normalize_refresh(payload.get("refresh")),
             "revision": 1,
         },
         workspace_id=wid,
@@ -142,6 +155,8 @@ def update_dashboard(dashboard_id: str):
     changes = {key: value for key, value in payload.items() if key in allowed}
     if "widgets" in changes:
         changes["widgets"] = _normalize_widgets(changes["widgets"], current["workspace_id"])
+    if "refresh" in changes:
+        changes["refresh"] = _normalize_refresh(changes["refresh"])
     updated = {**current, **changes, "id": dashboard_id, "revision": int(current.get("revision", 1)) + 1}
     return ok(item=db().put("dashboards", updated, workspace_id=current.get("workspace_id", "default")))
 
@@ -162,64 +177,11 @@ def dashboard_export(dashboard_id: str):
     return ok(artifact=_public_artifact(export_dashboard_html(dashboard, dashboard.get("workspace_id", "default"))))
 
 
-def _refresh_widget(widget: dict) -> dict:
-    result_id = widget.get("result_id")
-    if not result_id:
-        return {**widget, "refresh_status": "static", "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    result = require_workspace_record("query_results", str(result_id))
-    frame = load_result_frame(result["id"])
-    if widget.get("type") == "kpi" or widget.get("chart_type") == "KPI_Card":
-        if frame.empty or not len(frame.columns):
-            raise ValueError("查询未返回 KPI 数据")
-        row = frame.iloc[0]
-        raw = row.iloc[0]
-        try:
-            value = float(raw)
-            if abs(value) >= 100_000_000:
-                shown = f"{value / 100_000_000:.2f} 亿"
-            elif abs(value) >= 10_000:
-                shown = f"{value / 10_000:.1f} 万"
-            else:
-                shown = str(int(value)) if value.is_integer() else f"{value:.2f}"
-        except (TypeError, ValueError):
-            shown = str(raw)
-        trend = None
-        if len(row) > 2:
-            try:
-                trend = round(float(row.iloc[2]), 1)
-            except (TypeError, ValueError):
-                pass
-        return {
-            **widget, "kpi_value": shown, "kpi_sub": str(row.iloc[1]) if len(row) > 1 else "",
-            "kpi_trend": trend, "refresh_status": "ready",
-            "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-    old = widget.get("chart", {})
-    chart = make_spec(
-        frame,
-        chart_type=old.get("type"),
-        title=old.get("title") or widget.get("title", "图表"),
-        x=old.get("x"), y=old.get("y"), group=old.get("group"), options=old.get("options"),
-    )
-    return {**widget, "chart": chart, "refresh_status": "ready", "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-
-
 @bp.post("/api/dashboards/<dashboard_id>/refresh")
 @api_errors
 def refresh_dashboard(dashboard_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
-    widgets = []
-    for widget in dashboard.get("widgets", []):
-        try:
-            widgets.append(_refresh_widget(widget))
-        except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
-            widgets.append({
-                **widget, "refresh_status": "error", "refresh_error": str(exc),
-                "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
-    dashboard["widgets"] = widgets
-    dashboard["revision"] = int(dashboard.get("revision", 1)) + 1
-    item = db().put("dashboards", dashboard, workspace_id=dashboard.get("workspace_id", "default"))
+    item = refresh_dashboard_record(db(), dashboard)
     return ok(item=item)
 
 
@@ -231,7 +193,7 @@ def refresh_dashboard_widget(dashboard_id: str, widget_id: str):
     widgets = []
     for widget in dashboard.get("widgets", []):
         if widget.get("id") == widget_id:
-            widget = _refresh_widget(widget)
+            widget = refresh_widget_record(db(), widget, str(dashboard.get("workspace_id") or "default"))
             found = True
         widgets.append(widget)
     if not found:

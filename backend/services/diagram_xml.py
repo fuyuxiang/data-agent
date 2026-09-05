@@ -16,11 +16,25 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from defusedxml.ElementTree import fromstring as safe_fromstring
+
 MAX_XML_SIZE = 1_000_000
 STRUCTURAL_ATTRS = {"edge", "parent", "source", "target", "vertex", "connectable"}
 VALID_ENTITIES = {"lt", "gt", "amp", "quot", "apos"}
 
 ROOT_CELLS = '<mxCell id="0"/>\n<mxCell id="1" parent="0"/>'
+
+
+def _parse_xml(value: str) -> ET.Element:
+    """Parse untrusted diagram XML with DTD, entities and external refs disabled."""
+    try:
+        return safe_fromstring(
+            value, forbid_dtd=True, forbid_entities=True, forbid_external=True,
+        )
+    except Exception as exc:
+        # Normalize defusedxml's security exceptions to the parse error already
+        # handled by the validation and editing call sites.
+        raise ET.ParseError(str(exc)) from exc
 
 
 # ── XML Validation ──────────────────────────────────────────────
@@ -91,7 +105,7 @@ def validate_mxcell_structure(xml: str) -> str | None:
 
     # 1. Try ElementTree parse
     try:
-        ET.fromstring(xml)
+        _parse_xml(xml)
     except ET.ParseError as exc:
         return f"XML syntax error: {exc}. Likely unescaped special characters in attribute values."
 
@@ -359,11 +373,11 @@ def apply_diagram_operations(xml_content: str, operations: list[dict[str, Any]])
         # Handle the case where XML might have multiple root-level elements
         # by wrapping in a temp root
         if "<mxfile>" in xml_content:
-            doc = ET.fromstring(xml_content)
+            doc = _parse_xml(xml_content)
         else:
             # Wrap bare content
             wrapped = f"<_wrap>{xml_content}</_wrap>"
-            doc = ET.fromstring(wrapped)
+            doc = _parse_xml(wrapped)
 
         # Find the <root> element
         root_el = _find_root_element(doc)
@@ -396,7 +410,7 @@ def apply_diagram_operations(xml_content: str, operations: list[dict[str, Any]])
                 continue
 
             try:
-                new_cell = ET.fromstring(f"<_wrap>{new_xml}</_wrap>").find("mxCell")
+                new_cell = _parse_xml(f"<_wrap>{new_xml}</_wrap>").find("mxCell")
                 if new_cell is None:
                     errors.append({"type": "update", "cellId": cell_id, "message": "new_xml must contain mxCell"})
                     continue
@@ -422,7 +436,7 @@ def apply_diagram_operations(xml_content: str, operations: list[dict[str, Any]])
                 errors.append({"type": "add", "cellId": cell_id, "message": "new_xml required for add"})
                 continue
             try:
-                new_cell = ET.fromstring(f"<_wrap>{new_xml}</_wrap>").find("mxCell")
+                new_cell = _parse_xml(f"<_wrap>{new_xml}</_wrap>").find("mxCell")
                 if new_cell is None:
                     errors.append({"type": "add", "cellId": cell_id, "message": "new_xml must contain mxCell"})
                     continue

@@ -306,7 +306,7 @@ class WorkspaceFiles:
             args, cwd = ["git", *suffix], self.user_root
         else:
             raise ValueError("不支持的固定操作")
-        completed = subprocess.run(
+        completed = subprocess.run(  # noqa: S603 -- operation maps to a fixed argv template
             args, cwd=cwd, shell=False, capture_output=True, text=True,
             timeout=max(1, min(int(timeout), 120)), check=False,
         )
@@ -333,8 +333,11 @@ class WorkspaceFiles:
             return self.grep(parts[1], include=parts[2] if len(parts) == 3 else "**/*")
         if name in {"python", "python3"} and parts[1:3] == ["-m", "compileall"] and len(parts) == 4:
             target, _namespace = self.resolve(parts[3])
-            completed = subprocess.run(
-                [name, "-m", "compileall", str(target)], cwd=target.parent, shell=False,
+            executable = shutil.which(name)
+            if not executable:
+                raise FileNotFoundError(f"找不到 Python 解释器：{name}")
+            completed = subprocess.run(  # noqa: S603 -- fixed interpreter and compileall module
+                [executable, "-m", "compileall", str(target)], cwd=target.parent, shell=False,
                 capture_output=True, text=True, timeout=max(1, min(int(timeout), 120)), check=False,
             )
             return {"returncode": completed.returncode, "output": (completed.stdout or completed.stderr)[:12000]}

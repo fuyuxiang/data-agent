@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from flask import Blueprint
+from flask import Blueprint, current_app
 
 from ..services.analytics import ANALYSIS_METHODS, run_analysis
 from ..services.charts import catalog as chart_catalog, make_spec
@@ -35,6 +35,16 @@ def analyze():
     payload = body()
     method = str(payload.get("method") or "profile")
     frame = _resolve_frame(payload)
+    limits = current_app.config["SETTINGS"]
+    if len(frame) > limits.max_analysis_rows:
+        raise ValueError(
+            f"分析数据超过 {limits.max_analysis_rows} 行上限；请先在数据库侧聚合或筛选",
+        )
+    cells = int(frame.shape[0] * frame.shape[1])
+    if cells > limits.max_analysis_cells:
+        raise ValueError(
+            f"分析数据超过 {limits.max_analysis_cells} 个单元格上限；请减少行数或字段",
+        )
     result = run_analysis(frame, method, payload.get("params") or {})
     record = db().put(
         "analysis_runs",

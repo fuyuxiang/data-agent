@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 from backend.services.agent_tools import AgentToolContext, execute_tool
+from backend.services.diagram_xml import apply_diagram_operations, validate_mxcell_structure
+
+
+def test_diagram_xml_parser_rejects_dtd_and_entities():
+    malicious = '<!DOCTYPE x [<!ENTITY read SYSTEM "file:///etc/passwd">]><mxfile>&read;</mxfile>'
+    assert "XML syntax error" in str(validate_mxcell_structure(malicious))
+    result = apply_diagram_operations(malicious, [{"operation": "delete", "cell_id": "2"}])
+    assert result["errors"]
+    assert "parse error" in result["errors"][0]["message"].lower()
 
 
 def test_business_canvas_templates_blocks_diagram_and_revisions(client):
@@ -95,3 +104,5 @@ def test_vendored_drawio_is_same_origin_and_csp_is_isolated(client):
     assert "'unsafe-eval'" in policy
     workbench_policy = client.get("/").headers["Content-Security-Policy"]
     assert "'unsafe-eval'" not in workbench_policy
+    assert client.get("/static/drawio/WEB-INF/web.xml").status_code == 404
+    assert client.get("/static/drawio/META-INF/MANIFEST.MF").status_code == 404

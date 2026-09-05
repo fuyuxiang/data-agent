@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 from typing import Any
@@ -228,9 +230,27 @@ def _execute_action(action: dict, payload: dict, workspace_id: str, database: Da
         arguments = shlex.split(str(_expand(action.get("command") or "", payload)))
         if not arguments:
             raise ValueError("Hook 命令不能为空")
-        completed = subprocess.run(
+        allowed = {
+            item.strip().lower() for item in os.getenv("MERIDIAN_COMMAND_HOOK_ALLOWLIST", "").split(",")
+            if item.strip()
+        }
+        if os.path.sep in arguments[0] or (os.altsep and os.altsep in arguments[0]):
+            raise PermissionError("Hook 命令必须通过受控 PATH 解析，不能使用自定义路径")
+        command_name = os.path.basename(arguments[0]).lower()
+        if command_name not in allowed:
+            raise PermissionError("Hook 命令不在 MERIDIAN_COMMAND_HOOK_ALLOWLIST 中")
+        executable = shutil.which(arguments[0])
+        if not executable:
+            raise FileNotFoundError(f"Hook 命令不存在：{arguments[0]}")
+        arguments[0] = executable
+        safe_environment = {
+            key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT")
+            if os.environ.get(key)
+        }
+        completed = subprocess.run(  # noqa: S603 -- opt-in owner-only command with allowlisted executable
             arguments, shell=False, capture_output=True, text=True,
             timeout=max(1, min(int(action.get("timeout", 10)), 60)), check=False,
+            env=safe_environment,
         )
         result["output"] = (completed.stdout or completed.stderr or "")[:4000]
         result["returncode"] = completed.returncode

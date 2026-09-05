@@ -59,6 +59,7 @@ class Database:
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL DEFAULT 'default',
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             metadata TEXT NOT NULL DEFAULT '{}',
@@ -96,6 +97,27 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(1,?,?)",
                 ("initial records, messages, audit, jobs and quota indexes", utcnow()),
+            )
+            message_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "workspace_id" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default'")
+                connection.execute(
+                    """UPDATE messages
+                       SET workspace_id=COALESCE(
+                           (SELECT workspace_id FROM records
+                            WHERE collection='sessions' AND id=messages.session_id),
+                           'default'
+                       )""",
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_workspace_session "
+                "ON messages(workspace_id, session_id, created_at)",
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(2,?,?)",
+                ("scope messages to their owning workspace", utcnow()),
             )
         self._seed()
 
@@ -231,10 +253,17 @@ class Database:
                 value = json.loads(row["payload"])
         return value, created
 
-    def get(self, collection: str, record_id: str, *, include_archived: bool = False) -> dict[str, Any] | None:
+    def get(
+        self, collection: str, record_id: str, *, include_archived: bool = False,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any] | None:
         query = "SELECT payload, archived_at FROM records WHERE collection=? AND id=?"
+        args: list[Any] = [collection, record_id]
+        if workspace_id is not None:
+            query += " AND workspace_id=?"
+            args.append(workspace_id)
         with self.connect() as connection:
-            row = connection.execute(query, (collection, record_id)).fetchone()
+            row = connection.execute(query, args).fetchone()
         if not row or (row["archived_at"] and not include_archived):
             return None
         value = json.loads(row["payload"])
@@ -260,7 +289,8 @@ class Database:
         args.append(max(1, min(limit, 5000)))
         with self.connect() as connection:
             rows = connection.execute(
-                f"SELECT payload, archived_at FROM records WHERE {' AND '.join(where)} ORDER BY updated_at DESC LIMIT ?",
+                # The only interpolated fragments are fixed predicates assembled above.
+                f"SELECT payload, archived_at FROM records WHERE {' AND '.join(where)} ORDER BY updated_at DESC LIMIT ?",  # noqa: S608
                 args,
             ).fetchall()
         result = []
@@ -271,12 +301,19 @@ class Database:
             result.append(value)
         return result
 
-    def patch(self, collection: str, record_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+    def patch(
+        self, collection: str, record_id: str, changes: dict[str, Any], *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any] | None:
         now = utcnow()
         with self.transaction() as connection:
+            query = "SELECT workspace_id,payload FROM records WHERE collection=? AND id=? AND archived_at IS NULL"
+            args: list[Any] = [collection, record_id]
+            if workspace_id is not None:
+                query += " AND workspace_id=?"
+                args.append(workspace_id)
             row = connection.execute(
-                "SELECT workspace_id,payload FROM records WHERE collection=? AND id=? AND archived_at IS NULL",
-                (collection, record_id),
+                query, args,
             ).fetchone()
             if not row:
                 return None
@@ -291,41 +328,58 @@ class Database:
                 current["workspace_id"] = str(row["workspace_id"])
             current["updated_at"] = now
             connection.execute(
-                "UPDATE records SET payload=?,updated_at=? WHERE collection=? AND id=?",
-                (json.dumps(current, ensure_ascii=False), now, collection, record_id),
+                "UPDATE records SET payload=?,updated_at=? WHERE collection=? AND id=? AND workspace_id=?",
+                (json.dumps(current, ensure_ascii=False), now, collection, record_id, row["workspace_id"]),
             )
         return current
 
-    def archive(self, collection: str, record_id: str) -> bool:
+    def archive(self, collection: str, record_id: str, *, workspace_id: str | None = None) -> bool:
         now = utcnow()
         with self.transaction() as connection:
+            query = "UPDATE records SET archived_at=?, updated_at=? WHERE collection=? AND id=? AND archived_at IS NULL"
+            args: list[Any] = [now, now, collection, record_id]
+            if workspace_id is not None:
+                query += " AND workspace_id=?"
+                args.append(workspace_id)
             cursor = connection.execute(
-                "UPDATE records SET archived_at=?, updated_at=? WHERE collection=? AND id=? AND archived_at IS NULL",
-                (now, now, collection, record_id),
+                query, args,
             )
         return cursor.rowcount > 0
 
-    def restore(self, collection: str, record_id: str) -> bool:
+    def restore(self, collection: str, record_id: str, *, workspace_id: str | None = None) -> bool:
         now = utcnow()
         with self.transaction() as connection:
+            query = "UPDATE records SET archived_at=NULL, updated_at=? WHERE collection=? AND id=? AND archived_at IS NOT NULL"
+            args: list[Any] = [now, collection, record_id]
+            if workspace_id is not None:
+                query += " AND workspace_id=?"
+                args.append(workspace_id)
             cursor = connection.execute(
-                "UPDATE records SET archived_at=NULL, updated_at=? WHERE collection=? AND id=? AND archived_at IS NOT NULL",
-                (now, collection, record_id),
+                query, args,
             )
         return cursor.rowcount > 0
 
-    def delete(self, collection: str, record_id: str) -> bool:
+    def delete(self, collection: str, record_id: str, *, workspace_id: str | None = None) -> bool:
         with self.transaction() as connection:
+            query = "DELETE FROM records WHERE collection=? AND id=?"
+            args: list[Any] = [collection, record_id]
+            if workspace_id is not None:
+                query += " AND workspace_id=?"
+                args.append(workspace_id)
             cursor = connection.execute(
-                "DELETE FROM records WHERE collection=? AND id=?",
-                (collection, record_id),
+                query, args,
             )
         return cursor.rowcount > 0
 
     def add_message(self, session_id: str, role: str, content: str, metadata: dict | None = None) -> dict:
+        session_record = self.get("sessions", session_id)
+        if not session_record:
+            raise FileNotFoundError("会话不存在")
+        workspace_id = str(session_record.get("workspace_id") or "default")
         message = {
             "id": self.new_id("msg"),
             "session_id": session_id,
+            "workspace_id": workspace_id,
             "role": role,
             "content": content,
             "metadata": metadata or {},
@@ -333,9 +387,9 @@ class Database:
         }
         with self.transaction() as connection:
             connection.execute(
-                "INSERT INTO messages(id,session_id,role,content,metadata,created_at) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO messages(id,session_id,workspace_id,role,content,metadata,created_at) VALUES(?,?,?,?,?,?,?)",
                 (
-                    message["id"], session_id, role, content,
+                    message["id"], session_id, workspace_id, role, content,
                     json.dumps(message["metadata"], ensure_ascii=False), message["created_at"],
                 ),
             )
@@ -350,6 +404,7 @@ class Database:
         return [
             {
                 "id": row["id"], "session_id": row["session_id"], "role": row["role"],
+                "workspace_id": row["workspace_id"],
                 "content": row["content"], "metadata": json.loads(row["metadata"]),
                 "created_at": row["created_at"],
             }
@@ -357,6 +412,10 @@ class Database:
         ]
 
     def replace_messages(self, session_id: str, messages: list[dict]) -> None:
+        session_record = self.get("sessions", session_id)
+        if not session_record:
+            raise FileNotFoundError("会话不存在")
+        workspace_id = str(session_record.get("workspace_id") or "default")
         with self.transaction() as connection:
             connection.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
             for item in messages:
@@ -364,9 +423,9 @@ class Database:
                 if item.get("session_id") and item.get("session_id") != session_id:
                     message_id = self.new_id("msg")
                 connection.execute(
-                    "INSERT INTO messages(id,session_id,role,content,metadata,created_at) VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO messages(id,session_id,workspace_id,role,content,metadata,created_at) VALUES(?,?,?,?,?,?,?)",
                     (
-                        message_id, session_id, item.get("role", "user"),
+                        message_id, session_id, workspace_id, item.get("role", "user"),
                         str(item.get("content", "")), json.dumps(item.get("metadata", {}), ensure_ascii=False),
                         item.get("created_at") or utcnow(),
                     ),
