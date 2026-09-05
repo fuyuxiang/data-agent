@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import json
 import re
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlparse
@@ -10,7 +12,6 @@ from urllib.parse import quote_plus, urlparse
 import duckdb
 import numpy as np
 import pandas as pd
-import requests
 from flask import current_app
 from sqlalchemy import create_engine, inspect, text
 from werkzeug.datastructures import FileStorage
@@ -18,7 +19,7 @@ from werkzeug.utils import secure_filename
 
 from ..core.database import Database, utcnow
 from .security import SecretVault, safe_http_request, validate_outbound_url
-from .sql_security import validate_read_only_sql
+from .sql_security import bounded_read_only_sql, validate_read_only_sql
 
 
 SUPPORTED_FILE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}
@@ -30,6 +31,29 @@ def db() -> Database:
 
 def settings():
     return current_app.config["SETTINGS"]
+
+
+def _dialect_name(engine) -> str:
+    return {
+        "postgresql": "postgres",
+        "mssql": "tsql",
+    }.get(engine.dialect.name, engine.dialect.name)
+
+
+def _configure_read_only(connection, timeout_seconds: int) -> None:
+    dialect = connection.engine.dialect.name
+    timeout_ms = max(1000, timeout_seconds * 1000)
+    if dialect == "sqlite":
+        connection.exec_driver_sql("PRAGMA query_only = ON")
+        connection.exec_driver_sql(f"PRAGMA busy_timeout = {timeout_ms}")
+    elif dialect == "postgresql":
+        connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+        connection.exec_driver_sql(f"SET LOCAL statement_timeout = {timeout_ms}")
+    elif dialect == "mysql":
+        connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+        connection.exec_driver_sql(f"SET SESSION MAX_EXECUTION_TIME = {timeout_ms}")
+    elif dialect == "mssql":
+        connection.exec_driver_sql(f"SET LOCK_TIMEOUT {timeout_ms}")
 
 
 def _json_safe(value: Any) -> Any:
@@ -92,6 +116,38 @@ def _read_tabular_file(path: Path) -> dict[str, pd.DataFrame]:
     raise ValueError(f"不支持的文件格式：{suffix}")
 
 
+def _validate_compressed_size(path: Path) -> None:
+    expanded_limit = min(max(settings().max_upload_bytes * 8, 128 * 1024 * 1024), 1024 * 1024 * 1024)
+    if path.suffix.lower() == ".xlsx":
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+            if len(members) > 10_000 or sum(item.file_size for item in members) > expanded_limit:
+                raise ValueError("Excel 文件解压后超过安全大小上限")
+            if any(item.file_size > 10 * 1024 * 1024 and item.file_size > max(1, item.compress_size) * 1000 for item in members):
+                raise ValueError("Excel 文件包含异常压缩比内容")
+    elif path.suffix.lower() == ".parquet":
+        import pyarrow.parquet as parquet
+
+        metadata = parquet.ParquetFile(path).metadata
+        expanded = sum(
+            metadata.row_group(group).column(column).total_uncompressed_size
+            for group in range(metadata.num_row_groups)
+            for column in range(metadata.row_group(group).num_columns)
+        )
+        if expanded > expanded_limit:
+            raise ValueError("Parquet 文件解压后超过安全大小上限")
+
+
+def _validate_frame_limits(frames: dict[str, pd.DataFrame]) -> None:
+    total_cells = 0
+    for name, frame in frames.items():
+        if len(frame) > settings().max_ingest_rows:
+            raise ValueError(f"数据表 {name} 超过 {settings().max_ingest_rows} 行导入上限")
+        total_cells += int(len(frame)) * int(len(frame.columns))
+        if total_cells > settings().max_ingest_cells:
+            raise ValueError(f"文件超过 {settings().max_ingest_cells} 个单元格导入上限")
+
+
 def register_upload(file: FileStorage, workspace_id: str) -> dict:
     original = secure_filename(file.filename or "")
     if not original:
@@ -103,7 +159,9 @@ def register_upload(file: FileStorage, workspace_id: str) -> dict:
     target = settings().upload_dir / f"{source_id}{suffix}"
     file.save(target)
     try:
+        _validate_compressed_size(target)
         frames = _read_tabular_file(target)
+        _validate_frame_limits(frames)
         tables = []
         for name, frame in frames.items():
             tables.append({
@@ -112,9 +170,12 @@ def register_upload(file: FileStorage, workspace_id: str) -> dict:
                 "rows": int(len(frame)),
                 "columns": int(len(frame.columns)),
             })
-    except Exception:
+    except (ValueError, PermissionError):
         target.unlink(missing_ok=True)
         raise
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        raise ValueError("文件无法安全解析，请检查文件格式和完整性") from exc
     record = db().put(
         "sources",
         {
@@ -196,10 +257,13 @@ def register_database(config: dict, workspace_id: str) -> dict:
             "name": name,
             "source_name": name,
             "columns": len(columns),
-            "schema": [{"name": col["name"], "type": str(col["type"])} for col in columns],
+            "schema": [
+                {"name": col["name"], "type": str(col["type"]), "nullable": bool(col.get("nullable", True))}
+                for col in columns
+            ],
         })
     source_id = db().new_id("src")
-    vault = SecretVault(current_app.config["SECRET_KEY"])
+    vault = SecretVault(current_app.config["VAULT_KEY"])
     parsed = urlparse(url)
     record = db().put(
         "sources",
@@ -246,10 +310,11 @@ def register_http(config: dict, workspace_id: str) -> dict:
         frame = _flatten_http_json(response.json(), json_path)
     if frame.empty:
         raise ValueError("API 响应解析后为空，无法加载数据")
+    _validate_frame_limits({"data": frame})
     source_id = db().new_id("src")
     cache_path = settings().upload_dir / f"{source_id}.json"
     frame.to_json(cache_path, orient="records", force_ascii=False)
-    vault = SecretVault(current_app.config["SECRET_KEY"])
+    vault = SecretVault(current_app.config["VAULT_KEY"])
     record = db().put(
         "sources",
         {
@@ -305,7 +370,7 @@ def register_google_sheet(config: dict, workspace_id: str) -> dict:
         raise ValueError("请输入有效的 Google Sheets 链接或 Spreadsheet ID")
     gid = str(config.get("gid") or "0")
     url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&gid={quote_plus(gid)}"
-    response = requests.get(url, timeout=30)
+    response = safe_http_request("GET", url, timeout=30)
     response.raise_for_status()
     frame = pd.read_csv(io.BytesIO(response.content))
     source_id = db().new_id("src")
@@ -351,11 +416,22 @@ def _google_frame(rows: list[list[Any]]) -> pd.DataFrame | None:
 def _register_google_service_account(config: dict, workspace_id: str, creds: dict) -> dict:
     if not isinstance(creds, dict):
         raise ValueError("服务账号 JSON 必须是对象")
+    creds = dict(creds)
     spreadsheet = str(
         config.get("spreadsheet") or config.get("spreadsheet_id") or config.get("url") or ""
     ).strip()
     if not spreadsheet:
         raise ValueError("电子表格 URL 或 ID 不能为空")
+    token_uri = str(creds.get("token_uri") or "https://oauth2.googleapis.com/token")
+    if token_uri != "https://oauth2.googleapis.com/token":
+        raise ValueError("Google 服务账号 token_uri 必须使用官方 HTTPS 端点")
+    creds["token_uri"] = token_uri
+    if spreadsheet.startswith("http"):
+        parsed = urlparse(spreadsheet)
+        if parsed.scheme != "https" or parsed.hostname != "docs.google.com" or "/spreadsheets/d/" not in parsed.path:
+            raise ValueError("Google Sheets URL 必须使用 docs.google.com 官方 HTTPS 地址")
+    elif not re.fullmatch(r"[a-zA-Z0-9_-]{12,}", spreadsheet):
+        raise ValueError("Google Spreadsheet ID 格式无效")
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -373,11 +449,23 @@ def _register_google_service_account(config: dict, workspace_id: str, creds: dic
     document = client.open_by_url(spreadsheet) if spreadsheet.startswith("http") else client.open_by_key(spreadsheet)
     frames: dict[str, pd.DataFrame] = {}
     for worksheet in document.worksheets():
+        row_limit = settings().max_ingest_rows
+        if int(getattr(worksheet, "row_count", 0) or 0) > row_limit:
+            raise ValueError(f"Google 工作表 {worksheet.title} 超过 {row_limit} 行导入上限")
+        if (
+            int(getattr(worksheet, "row_count", 0) or 0)
+            * int(getattr(worksheet, "col_count", 0) or 0) > settings().max_ingest_cells
+        ):
+            raise ValueError(
+                f"Google 工作表 {worksheet.title} 超过 "
+                f"{settings().max_ingest_cells} 个单元格导入上限",
+            )
         frame = _google_frame(worksheet.get_all_values())
         if frame is not None:
             frames[str(worksheet.title)] = frame
     if not frames:
         raise ValueError("Google Spreadsheet 中未发现有效工作表")
+    _validate_frame_limits(frames)
 
     source_id = db().new_id("src")
     path = settings().upload_dir / f"{source_id}.xlsx"
@@ -397,7 +485,7 @@ def _register_google_service_account(config: dict, workspace_id: str, creds: dic
             "id": source_id, "workspace_id": workspace_id,
             "name": str(config.get("name") or getattr(document, "title", "Google Sheets"))[:120],
             "kind": "google_sheet", "format": "xlsx", "endpoint": spreadsheet,
-            "credential": SecretVault(current_app.config["SECRET_KEY"]).seal(secret),
+            "credential": SecretVault(current_app.config["VAULT_KEY"]).seal(secret),
             "path": str(path), "tables": tables, "service_account": True,
             "status": "ready", "last_refreshed_at": utcnow(),
         },
@@ -407,7 +495,8 @@ def _register_google_service_account(config: dict, workspace_id: str, creds: dic
 
 
 def _lark_records(secret: dict) -> pd.DataFrame:
-    token_response = requests.post(
+    token_response = safe_http_request(
+        "POST",
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         json={"app_id": secret["app_id"], "app_secret": secret["app_secret"]}, timeout=20,
     )
@@ -423,17 +512,21 @@ def _lark_records(secret: dict) -> pd.DataFrame:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{secret['app_token']}/tables/{secret['table_id']}/records?page_size=500"
         if page_token:
             url += f"&page_token={quote_plus(page_token)}"
-        response = requests.get(url, headers=headers, timeout=30)
+        response = safe_http_request("GET", url, headers=headers, timeout=30)
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") not in (None, 0):
             raise ValueError(payload.get("msg") or "读取多维表格失败")
         data = payload.get("data", {})
         records.extend({"record_id": item.get("record_id"), **(item.get("fields") or {})} for item in data.get("items", []))
+        if len(records) > settings().max_ingest_rows:
+            raise ValueError(f"飞书多维表格超过 {settings().max_ingest_rows} 行导入上限")
         if not data.get("has_more"):
             break
         page_token = data.get("page_token", "")
-    return pd.json_normalize(records)
+    frame = pd.json_normalize(records)
+    _validate_frame_limits({"data": frame})
+    return frame
 
 
 def register_lark_table(config: dict, workspace_id: str) -> dict:
@@ -451,7 +544,7 @@ def register_lark_table(config: dict, workspace_id: str) -> dict:
             "id": source_id, "workspace_id": workspace_id,
             "name": str(config.get("name") or "协作表格")[:120], "kind": "lark_table", "format": "json",
             "endpoint": f"bitable:{secret['app_token']}:{secret['table_id']}",
-            "credential": SecretVault(current_app.config["SECRET_KEY"]).seal(secret), "path": str(path),
+            "credential": SecretVault(current_app.config["VAULT_KEY"]).seal(secret), "path": str(path),
             "tables": [{"name": "data", "source_name": "data", "rows": len(frame), "columns": len(frame.columns)}],
             "status": "ready", "last_refreshed_at": utcnow(),
         },
@@ -517,11 +610,12 @@ def source_frames(source: dict) -> dict[str, pd.DataFrame]:
     }:
         return _read_tabular_file(Path(source["path"]))
     if source["kind"] == "database":
-        vault = SecretVault(current_app.config["SECRET_KEY"])
+        vault = SecretVault(current_app.config["VAULT_KEY"])
         secret = vault.open(source.get("credential", ""), {})
         engine = create_engine(secret["url"], pool_pre_ping=True)
         result: dict[str, pd.DataFrame] = {}
         with engine.connect() as connection:
+            _configure_read_only(connection, settings().query_timeout_seconds)
             selected = source.get("analysis_tables")
             candidates = source.get("tables", [])
             if isinstance(selected, list):
@@ -533,12 +627,30 @@ def source_frames(source: dict) -> dict[str, pd.DataFrame]:
             for table in candidates[:50]:
                 name = table["source_name"]
                 quoted = engine.dialect.identifier_preparer.quote(name)
-                result[table["name"]] = pd.read_sql(text(f"SELECT * FROM {quoted}"), connection)
+                statement = bounded_read_only_sql(
+                    f"SELECT * FROM {quoted}", settings().source_sample_rows, _dialect_name(engine),
+                )
+                result[table["name"]] = pd.read_sql(text(statement), connection)
         return result
     raise ValueError("未知数据源类型")
 
 
 def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.DataFrame]:
+    if source.get("kind") == "database":
+        candidates = source.get("tables", [])
+        chosen = next(
+            (
+                item for item in candidates
+                if table_name and (item.get("name") == table_name or item.get("source_name") == table_name)
+            ),
+            candidates[0] if candidates and not table_name else None,
+        )
+        if not chosen:
+            raise ValueError(f"数据表不存在：{table_name}" if table_name else "数据源中没有可分析的数据表")
+        selected_source = {**source, "analysis_tables": [chosen.get("source_name") or chosen["name"]]}
+        frames = source_frames(selected_source)
+        name, frame = next(iter(frames.items()))
+        return _sanitize_table_name(name), frame
     frames = source_frames(source)
     if not frames:
         raise ValueError("数据源中没有可分析的数据表")
@@ -552,6 +664,24 @@ def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.D
 
 
 def schema_for_source(source: dict) -> dict:
+    if source.get("kind") == "database":
+        return {
+            "source_id": source["id"],
+            "tables": [
+                {
+                    "name": table["name"], "source_name": table.get("source_name", table["name"]),
+                    "rows": table.get("rows"),
+                    "columns": [
+                        {
+                            "name": column["name"], "type": column.get("type", "unknown"),
+                            "nullable": bool(column.get("nullable", True)), "distinct": None, "sample": [],
+                        }
+                        for column in table.get("schema", [])
+                    ],
+                }
+                for table in source.get("tables", [])
+            ],
+        }
     tables = []
     for name, frame in source_frames(source).items():
         columns = []
@@ -586,23 +716,30 @@ def preview_source(source: dict, table_name: str | None = None, limit: int = 100
 
 def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int = 1000) -> dict:
     statement = validate_read_only_sql(sql)
+    limit = max(1, min(int(limit), settings().max_query_rows))
     sources = [db().get("sources", source_id) for source_id in source_ids]
     if not all(sources):
         raise ValueError("一个或多个数据源不存在")
     if any(source.get("workspace_id", "default") != workspace_id for source in sources):
         raise ValueError("一个或多个数据源不属于当前工作空间")
+    if len(sources) > 1 and any(source.get("kind") == "database" for source in sources):
+        raise ValueError("数据库数据源不能与其他数据源直接联邦查询；请先生成受控快照后再关联")
     # A single database source should execute on its native engine to preserve dialect.
     if len(sources) == 1 and sources[0]["kind"] == "database":
         source = sources[0]
-        vault = SecretVault(current_app.config["SECRET_KEY"])
+        vault = SecretVault(current_app.config["VAULT_KEY"])
         url = vault.open(source.get("credential", ""), {}).get("url")
         engine = create_engine(url, pool_pre_ping=True)
         with engine.connect() as connection:
-            frame = pd.read_sql(text(statement), connection).head(limit)
+            _configure_read_only(connection, settings().query_timeout_seconds)
+            bounded = bounded_read_only_sql(statement, limit, _dialect_name(engine))
+            frame = pd.read_sql(text(bounded), connection)
     else:
         connection = duckdb.connect(database=":memory:")
         try:
             connection.execute("SET enable_external_access=false")
+            connection.execute("SET memory_limit='1GB'")
+            connection.execute("SET threads=2")
             used: set[str] = set()
             for source in sources:
                 for table_name, frame in source_frames(source).items():
@@ -612,7 +749,16 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
                         name = _sanitize_table_name(f"{source['name']}_{base}")
                     used.add(name)
                     connection.register(name, frame)
-            frame = connection.execute(statement).fetchdf().head(limit)
+            bounded = bounded_read_only_sql(statement, limit, "duckdb")
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meridian-query")
+            future = executor.submit(lambda: connection.execute(bounded).fetchdf())
+            try:
+                frame = future.result(timeout=settings().query_timeout_seconds)
+            except FutureTimeoutError as exc:
+                connection.interrupt()
+                raise ValueError("查询执行时间超过限制") from exc
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
         finally:
             connection.close()
     query_id = db().new_id("qry")
@@ -645,7 +791,7 @@ def load_result_frame(result_id: str) -> pd.DataFrame:
 
 def refresh_source(source: dict) -> dict:
     if source["kind"] == "http":
-        vault = SecretVault(current_app.config["SECRET_KEY"])
+        vault = SecretVault(current_app.config["VAULT_KEY"])
         secret = vault.open(source.get("credential", ""), {})
         response = safe_http_request("GET", source["endpoint"], headers=secret.get("headers", {}), timeout=20)
         response.raise_for_status()
@@ -655,9 +801,10 @@ def refresh_source(source: dict) -> dict:
         if isinstance(data, dict):
             data = data.get("data", data.get("items", [data]))
         frame = pd.json_normalize(data)
+        _validate_frame_limits({"data": frame})
         frame.to_json(source["path"], orient="records", force_ascii=False)
     elif source["kind"] == "google_sheet":
-        secret = SecretVault(current_app.config["SECRET_KEY"]).open(source.get("credential", ""), {})
+        secret = SecretVault(current_app.config["VAULT_KEY"]).open(source.get("credential", ""), {})
         if secret.get("creds_dict"):
             replacement = _register_google_service_account(
                 {
@@ -675,7 +822,7 @@ def refresh_source(source: dict) -> dict:
             response.raise_for_status()
             pd.read_csv(io.BytesIO(response.content)).to_csv(source["path"], index=False)
     elif source["kind"] == "lark_table":
-        vault = SecretVault(current_app.config["SECRET_KEY"])
+        vault = SecretVault(current_app.config["VAULT_KEY"])
         frame = _lark_records(vault.open(source.get("credential", ""), {}))
         frame.to_json(source["path"], orient="records", force_ascii=False)
     schema = schema_for_source(source)

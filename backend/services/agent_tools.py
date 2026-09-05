@@ -205,6 +205,17 @@ EXTRA_TOOLS = [
     ),
 ]
 
+DEFAULT_EXTRA_TOOL_NAMES = frozenset({
+    "workspace_status", "get_table_detail", "create_analysis_table", "clean_data",
+    "propose_excel_export", "propose_report_outline", "propose_ppt_outline",
+    "generate_ppt", "set_ppt_color_scheme", "propose_dashboard_outline",
+    "generate_dashboard", "ask_user", "browse_webpage", "list_feishu_bitable_tables",
+    "load_feishu_bitable", "workspace_glob", "workspace_grep", "workspace_read_file",
+    "workspace_command", "structured_output", "load_analysis_skill", "task_get", "task_list",
+    "team_list", "team_status", "workflow_list", "workflow_status", "read_tool_result",
+    "plan_complete", "display_diagram", "get_diagram", "get_shape_library",
+})
+
 
 @dataclass
 class AgentToolContext:
@@ -252,14 +263,37 @@ def _mcp_function_name(server_id: str, tool_name: str, used: set[str]) -> str:
     return candidate
 
 
+def _agent_policy(context: AgentToolContext) -> tuple[bool, bool]:
+    if current_app.config.get("TESTING"):
+        return True, True
+    session = context.database.get("sessions", context.session_id) or {}
+    return bool(session.get("agent_allow_mutations")), bool(session.get("agent_allow_mcp"))
+
+
+def _allowed_agent_tool_names(context: AgentToolContext) -> set[str]:
+    allow_mutations, allow_mcp = _agent_policy(context)
+    names = {item["function"]["name"] for item in BUILTIN_TOOLS}
+    names.update(
+        item["function"]["name"] for item in EXTRA_TOOLS
+        if allow_mutations or item["function"]["name"] in DEFAULT_EXTRA_TOOL_NAMES
+    )
+    if allow_mcp:
+        names.update(context.mcp_names)
+    return names
+
+
 def tool_schemas(context: AgentToolContext) -> list[dict]:
     schemas = [BUILTIN_TOOLS[0], *BUILTIN_TOOLS[-2:]]
     if context.source_ids:
         schemas[1:1] = BUILTIN_TOOLS[1:-2]
-    schemas.extend(EXTRA_TOOLS)
+    allow_mutations, allow_mcp = _agent_policy(context)
+    schemas.extend(
+        item for item in EXTRA_TOOLS
+        if allow_mutations or item["function"]["name"] in DEFAULT_EXTRA_TOOL_NAMES
+    )
 
     used = {item["function"]["name"] for item in schemas}
-    for server in context.database.list("mcp_servers", workspace_id=context.workspace_id):
+    for server in context.database.list("mcp_servers", workspace_id=context.workspace_id) if allow_mcp else []:
         if not server.get("enabled", True) or server.get("status") != "connected":
             continue
         for tool in server.get("tools", []):
@@ -359,7 +393,7 @@ def _feishu_credentials(context: AgentToolContext) -> dict:
         ]
     if not candidates:
         raise ValueError("请先配置飞书应用凭据或连接一个飞书多维表格数据源")
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(candidates[0]["credential"], {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(candidates[0]["credential"], {})
     if not secret.get("app_id") or not secret.get("app_secret"):
         raise ValueError("飞书应用凭据不完整")
     return secret
@@ -421,6 +455,9 @@ def _dashboard_from_tool(context: AgentToolContext, args: dict) -> dict:
             result_id = context.latest_result_id
         if not result_id:
             raise ValueError(f"看板组件 {index + 1} 缺少 SQL 或 result_id")
+        result_record = context.database.get("query_results", result_id)
+        if not result_record or result_record.get("workspace_id", "default") != context.workspace_id:
+            raise ValueError("查询结果不存在或不属于当前工作空间")
         frame = load_result_frame(result_id)
         kind = str(widget.get("type") or widget.get("chart_type") or "")
         base = {
@@ -453,6 +490,8 @@ def _dashboard_from_tool(context: AgentToolContext, args: dict) -> dict:
 
 
 def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict, list[tuple[str, dict]]]:
+    if name not in _allowed_agent_tool_names(context):
+        raise PermissionError(f"会话策略未授权 Agent 调用工具：{name}")
     events: list[tuple[str, dict]] = []
     if name == "query_knowledge":
         rows = search_knowledge(str(args.get("question") or ""), context.workspace_id, int(args.get("limit", 5)))

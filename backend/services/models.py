@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import time
+from urllib.parse import urlsplit
 
 from flask import current_app
 from openai import OpenAI
 
 from ..core.database import Database
-from .security import SecretVault, mask_secret
+from .security import SecretVault, mask_secret, validate_outbound_url
 
 
 def _db() -> Database:
@@ -16,7 +17,7 @@ def _db() -> Database:
 
 def public_provider(provider: dict) -> dict:
     value = dict(provider)
-    vault = SecretVault(current_app.config["SECRET_KEY"])
+    vault = SecretVault(current_app.config["VAULT_KEY"])
     secret = vault.open(value.pop("credential", ""), {})
     key = secret.get("api_key", "") if isinstance(secret, dict) else ""
     value["has_api_key"] = bool(key or (value.get("secret_source") == "environment" and os.getenv("OPENAI_API_KEY")))
@@ -24,20 +25,41 @@ def public_provider(provider: dict) -> dict:
     return value
 
 
-def save_provider(payload: dict, provider_id: str | None = None) -> dict:
+def _provider_url(value: str, *, allow_loopback: bool = False) -> str:
+    hostname = urlsplit(value).hostname
+    if allow_loopback and hostname in {"localhost", "127.0.0.1", "::1"}:
+        return value
+    return validate_outbound_url(value)
+
+
+def save_provider(
+    payload: dict, provider_id: str | None = None, *, allow_loopback: bool = False,
+) -> dict:
     provider_id = provider_id or _db().new_id("mdl")
     current = _db().get("providers", provider_id) or {}
     api_key = str(payload.get("api_key") or "").strip()
     credential = current.get("credential", "")
     if api_key:
-        credential = SecretVault(current_app.config["SECRET_KEY"]).seal({"api_key": api_key})
+        credential = SecretVault(current_app.config["VAULT_KEY"]).seal({"api_key": api_key})
+    base_url = str(
+        payload.get("base_url") or current.get("base_url") or "https://api.openai.com/v1",
+    ).rstrip("/")
+    if base_url:
+        base_url = _provider_url(
+            base_url,
+            allow_loopback=allow_loopback or bool(current.get("allow_loopback")),
+        )
     record = _db().put(
         "providers",
         {
             **current,
             "id": provider_id,
             "name": str(payload.get("name") or current.get("name") or "模型服务"),
-            "base_url": str(payload.get("base_url") or current.get("base_url") or "https://api.openai.com/v1").rstrip("/"),
+            "base_url": base_url,
+            "allow_loopback": bool(
+                (allow_loopback or current.get("allow_loopback"))
+                and urlsplit(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
+            ),
             "model": str(payload.get("model") or current.get("model") or "gpt-4.1-mini"),
             "temperature": float(payload.get("temperature", current.get("temperature", 0.2))),
             "context_window": int(payload.get("context_window") or current.get("context_window") or 0) or None,
@@ -57,30 +79,33 @@ def save_provider(payload: dict, provider_id: str | None = None) -> dict:
 
 
 def resolve_provider(
-    provider_id: str | None = None, workspace_id: str | None = None,
+    provider_id: str | None = None, workspace_id: str = "default",
 ) -> tuple[dict, OpenAI] | tuple[None, None]:
     provider = _db().get("providers", provider_id) if provider_id else None
-    if provider and provider["id"] != "environment-default" and workspace_id is not None:
+    if provider and provider["id"] != "environment-default":
         if provider.get("workspace_id", "default") != workspace_id:
-            provider = None
+            return None, None
+    if provider_id and not provider:
+        return None, None
     if not provider:
         providers = [
             item for item in _db().list("providers")
             if item.get("enabled", True)
             and (
-                item["id"] == "environment-default" or workspace_id is None
+                item["id"] == "environment-default"
                 or item.get("workspace_id", "default") == workspace_id
             )
         ]
         provider = providers[0] if providers else None
     if not provider:
         return None, None
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(provider.get("credential", ""), {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(provider.get("credential", ""), {})
     api_key = (secret or {}).get("api_key") or os.getenv("OPENAI_API_KEY")
     base_url = provider.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = provider.get("model") or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     if not api_key:
         return provider | {"model": model}, None
+    base_url = _provider_url(base_url, allow_loopback=bool(provider.get("allow_loopback")))
     return provider | {"model": model, "base_url": base_url}, OpenAI(api_key=api_key, base_url=base_url, timeout=60)
 
 
@@ -90,12 +115,20 @@ def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
         raise ValueError("模型配置不存在")
     if not client:
         raise ValueError("模型配置没有可用的 API Key")
+    from .usage import ensure_quota, record_usage, response_usage
+
+    effective_workspace = workspace_id or "default"
+    ensure_quota(_db(), effective_workspace)
     started = time.perf_counter()
     response = client.chat.completions.create(
         model=provider["model"],
         messages=[{"role": "user", "content": "Reply with OK only."}],
         temperature=0,
         max_tokens=8,
+    )
+    record_usage(
+        _db(), effective_workspace, response_usage(response, provider["model"]),
+        operation="provider_test",
     )
     return {
         "ok": True,

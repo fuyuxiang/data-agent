@@ -70,7 +70,7 @@ def put_feishu_bot():
             "workspace_id": wid, "name": str(payload.get("name") or (current or {}).get("name") or "飞书应用机器人")[:100],
             "type": "lark_app", "purpose": "feishu_bot", "enabled": enabled,
             "status": "configured", "inbound_transport": transport,
-            "credential": SecretVault(current_app.config["SECRET_KEY"]).seal(secret),
+            "credential": SecretVault(current_app.config["VAULT_KEY"]).seal(secret),
         },
         workspace_id=wid,
     )

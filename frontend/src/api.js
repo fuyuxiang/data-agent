@@ -1,6 +1,7 @@
 const defaultHeaders = () => {
   const workspaceId = localStorage.getItem('meridian-workspace') || 'default';
-  return { 'X-Workspace-Id': workspaceId };
+  const csrfToken = sessionStorage.getItem('meridian-csrf') || '';
+  return { 'X-Workspace-Id': workspaceId, ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) };
 };
 
 export class ApiError extends Error {
@@ -25,6 +26,7 @@ export async function api(path, options = {}) {
   if (!response.ok || (payload && payload.ok === false)) {
     throw new ApiError(payload?.error || `请求失败 (${response.status})`, response.status, payload);
   }
+  if (payload?.csrf_token) sessionStorage.setItem('meridian-csrf', payload.csrf_token);
   return payload;
 }
 
@@ -70,4 +72,3 @@ export function withWorkspace(path, workspaceId) {
   url.searchParams.set('workspace_id', workspaceId || localStorage.getItem('meridian-workspace') || 'default');
   return `${url.pathname}${url.search}`;
 }
-

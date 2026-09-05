@@ -61,7 +61,11 @@ def chat(session_id: str):
     question = str(payload.get("message") or "").strip()
     if not question:
         raise ValueError("消息不能为空")
+    if len(question) > 50_000:
+        raise ValueError("单条消息不能超过 50000 个字符")
     source_ids = payload.get("source_ids") or session.get("source_ids") or []
+    if not isinstance(source_ids, list) or len(source_ids) > 50:
+        raise ValueError("单次分析最多关联 50 个数据源")
     provider_id = payload.get("provider_id") or session.get("provider_id")
     wid = session.get("workspace_id", workspace_id())
     for source_id in source_ids:

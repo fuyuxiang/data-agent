@@ -10,6 +10,7 @@ from flask import Flask, current_app
 from ..core.database import Database, utcnow
 from .jobs import get_job_manager
 from .models import resolve_provider
+from .usage import ensure_quota, record_usage
 
 
 EXTRACTION_SYSTEM = """你负责提取数据分析助手的长期记忆。仅返回 JSON 对象 {"ops": [...]}。
@@ -176,10 +177,11 @@ def schedule_memory_extraction(
         if cancel.is_set():
             return {"cancelled": True}
         operations = _deterministic_ops(user_message)
-        provider, client = resolve_provider(provider_id)
+        provider, client = resolve_provider(provider_id, workspace_id)
         if app.config.get("TESTING") and not app.config.get("MEMORY_EXTRACTION_IN_TESTS"):
             client = None
         if client:
+            quota = ensure_quota(_db(), workspace_id)
             summaries = [
                 {key: item.get(key) for key in ("name", "type", "title")}
                 for item in _db().list("memories", workspace_id=workspace_id, limit=200)
@@ -197,8 +199,15 @@ def schedule_memory_extraction(
                     },
                 ],
                 temperature=0,
-                max_tokens=1600,
+                max_tokens=max(1, min(1600, quota["remaining"])),
             )
+            usage = getattr(response, "usage", None)
+            record_usage(_db(), workspace_id, {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                "model": provider["model"],
+            }, session_id=session_id, operation="memory_extraction")
             parsed = _json_object(_content(response))
             if isinstance(parsed.get("ops"), list):
                 operations = parsed["ops"]

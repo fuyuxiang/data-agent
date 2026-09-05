@@ -67,7 +67,10 @@ class WorkflowScheduler:
                         continue
                     executable = {**workflow, "definition": workflow.get("published_definition") or workflow.get("definition", {})}
                     try:
-                        run = start_workflow(executable, schedule.get("inputs", {}))
+                        run = start_workflow(
+                            executable, schedule.get("inputs", {}),
+                            idempotency_key=f"schedule:{schedule['id']}:{minute_key}",
+                        )
                         schedule.update({"last_run_at": utcnow(), "last_run_id": run["id"], "last_minute_key": minute_key, "last_error": None})
                     except Exception as exc:
                         schedule.update({"last_run_at": utcnow(), "last_minute_key": minute_key, "last_error": str(exc)})
@@ -79,4 +82,3 @@ def start_scheduler(app: Flask) -> WorkflowScheduler:
     scheduler.start()
     app.extensions["meridian_scheduler"] = scheduler
     return scheduler
-

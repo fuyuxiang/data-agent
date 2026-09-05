@@ -55,7 +55,7 @@ def test_iterative_agent_executes_tools_and_preserves_history(client, source, mo
     fake = FakeClient()
     monkeypatch.setattr(
         "backend.services.agent_runtime.resolve_provider",
-        lambda _provider_id=None: ({"model": "fake-model", "temperature": 0}, fake),
+        lambda _provider_id=None, _workspace_id="default": ({"model": "fake-model", "temperature": 0}, fake),
     )
     session = client.post(
         "/api/sessions",

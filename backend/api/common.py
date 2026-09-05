@@ -67,6 +67,16 @@ def current_user_id() -> str:
     return str(session.get("user_id") or "local-default")
 
 
+def require_system_owner() -> dict:
+    users = db().list("users", include_archived=True)
+    if not users and current_user_id() == "local-default":
+        return {"id": "local-default", "role": "owner"}
+    user = db().get("users", current_user_id())
+    if not user or not user.get("enabled", True) or user.get("role") != "owner":
+        raise PermissionError("该操作仅限系统所有者")
+    return user
+
+
 def workspace_membership(wid: str, user_id: str | None = None) -> dict | None:
     user_id = user_id or current_user_id()
     if user_id == "local-default" and not db().list("users", include_archived=True):

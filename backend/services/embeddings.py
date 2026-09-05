@@ -43,7 +43,7 @@ def local_installed() -> bool:
 def get_config(workspace_id: str) -> dict:
     record = _database().get("embedding_settings", _record_id(workspace_id)) or {}
     public = dict(record.get("config") or {})
-    token = SecretVault(current_app.config["SECRET_KEY"]).open(record.get("credential", ""), {}).get("token", "")
+    token = SecretVault(current_app.config["VAULT_KEY"]).open(record.get("credential", ""), {}).get("token", "")
     return {
         "mode": str(public.get("mode") or os.getenv("MERIDIAN_EMBED_MODE") or "auto"),
         "url": str(public.get("url") or os.getenv("MERIDIAN_EMBED_URL") or ""),
@@ -86,7 +86,7 @@ def configure_cloud(
 
 def _save_config(workspace_id: str, config: dict) -> None:
     public = {key: config.get(key) for key in ("mode", "url", "model")}
-    credential = SecretVault(current_app.config["SECRET_KEY"]).seal({"token": config.get("token", "")})
+    credential = SecretVault(current_app.config["VAULT_KEY"]).seal({"token": config.get("token", "")})
     _database().put(
         "embedding_settings",
         {

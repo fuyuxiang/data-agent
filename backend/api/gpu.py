@@ -114,7 +114,7 @@ def gpu_connection_connect(connection_id: str):
         if connection.get("connection_type") == "direct":
             models_at(connection)
             return jsonify({"ok": True, "connected": True, "local_url": connection["base_url"]})
-        secret = SecretVault(current_app.config["SECRET_KEY"]).open(
+        secret = SecretVault(current_app.config["VAULT_KEY"]).open(
             connection.get("credential", ""), {},
         )
         trusted = db().get("ssh_host_keys", f"hostkey_{connection_id}")
@@ -195,7 +195,7 @@ def gpu_model_register(connection_id: str):
     item = save_provider({
         "workspace_id": connection["workspace_id"], "name": f"{connection['name']} · {model}",
         "base_url": base_url.rstrip("/") + "/v1", "model": model, "api_key": "no-key",
-    })
+    }, allow_loopback=True)
     return jsonify({"ok": True, "message": "远端模型已注册", "provider": item})
 
 

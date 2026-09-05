@@ -326,12 +326,20 @@ def temp_prompt_set(session_id: str):
             warning = "未能调用模型整理（已按原文保存）：没有可用模型"
         else:
             try:
+                from ..services.usage import ensure_quota, record_usage, response_usage
+
+                quota = ensure_quota(db(), session["workspace_id"])
                 response = client.chat.completions.create(
-                    model=provider["model"], temperature=0, max_tokens=1024,
+                    model=provider["model"], temperature=0,
+                    max_tokens=max(1, min(1024, quota["remaining"])),
                     messages=[
                         {"role": "system", "content": "将用户的临时分析指令整理为精炼中文祈使句；不新增意图，不输出标题、解释或思考标签。"},
                         {"role": "user", "content": raw_text},
                     ],
+                )
+                record_usage(
+                    db(), session["workspace_id"], response_usage(response, provider["model"]),
+                    session_id=session_id, operation="prompt_refinement",
                 )
                 refined = strip_temp_prompt_thinking(response.choices[0].message.content)
                 if refined:

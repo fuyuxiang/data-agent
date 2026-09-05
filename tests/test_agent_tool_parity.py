@@ -134,7 +134,7 @@ def test_ask_user_stops_agent_until_next_user_turn(client, monkeypatch):
     fake = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(
         "backend.services.agent_runtime.resolve_provider",
-        lambda _provider_id=None: ({"model": "fake", "temperature": 0}, fake),
+        lambda _provider_id=None, _workspace_id="default": ({"model": "fake", "temperature": 0}, fake),
     )
     session = client.post("/api/sessions", json={"name": "澄清会话"}).get_json()["item"]
     response = client.post(f"/api/sessions/{session['id']}/messages", json={"message": "做趋势分析"})

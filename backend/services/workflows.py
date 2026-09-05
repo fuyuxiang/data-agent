@@ -331,17 +331,15 @@ def start_workflow(workflow: dict, payload: dict, *, idempotency_key: str | None
     if not validation["valid"]:
         raise ValueError("；".join(validation["errors"]))
     workspace_id = workflow.get("workspace_id", "default")
-    if idempotency_key:
-        for previous in _db().list("workflow_runs", workspace_id=workspace_id, limit=5000):
-            if previous.get("idempotency_key") == idempotency_key:
-                if previous.get("workflow_id") != workflow.get("id") or previous.get("inputs") != payload:
-                    raise ValueError("幂等键已被不同的工作流请求占用")
-                return previous
     normalized = validation["definition"]
-    run = _db().put(
-        "workflow_runs",
-        {
-            "id": _db().new_id("run"), "workspace_id": workspace_id,
+    run_id = _db().new_id("run")
+    if idempotency_key:
+        digest = hashlib.sha256(
+            f"{workspace_id}\0{workflow.get('id')}\0{idempotency_key}".encode("utf-8"),
+        ).hexdigest()[:24]
+        run_id = f"run_{digest}"
+    run_payload = {
+            "id": run_id, "workspace_id": workspace_id,
             "workflow_id": workflow["id"], "workflow_version": workflow.get("version", 1),
             "workflow_version_id": workflow.get("current_version_id"),
             "definition_snapshot": normalized, "status": "queued", "inputs": payload,
@@ -352,9 +350,15 @@ def start_workflow(workflow: dict, payload: dict, *, idempotency_key: str | None
             },
             "order": validation["order"], "idempotency_key": idempotency_key,
             "pause_requested": False, "cancel_requested": False,
-        },
-        workspace_id=workspace_id,
-    )
+        }
+    if idempotency_key:
+        run, created = _db().put_if_absent("workflow_runs", run_payload, workspace_id=workspace_id)
+        if not created:
+            if run.get("workflow_id") != workflow.get("id") or run.get("inputs") != payload:
+                raise ValueError("幂等键已被不同的工作流请求占用")
+            return run
+    else:
+        run = _db().put("workflow_runs", run_payload, workspace_id=workspace_id)
     _record_event(run, "workflow_created")
     dispatch_hooks(
         "workflow.started", {**run, "hook_depth": int(payload.get("hook_depth", 0))},
@@ -434,6 +438,9 @@ def _execute_step(step: dict, config: dict, context: dict, workspace_id: str) ->
     if step_type == "analysis":
         result_id = config.get("result_id") or context.get("result_id")
         if result_id:
+            result = _db().get("query_results", str(result_id))
+            if not result or result.get("workspace_id", "default") != workspace_id:
+                raise ValueError("分析步骤的查询结果不存在或不属于当前工作空间")
             frame = load_result_frame(str(result_id))
         else:
             source_id = config.get("source_id") or context["inputs"].get("source_id")

@@ -12,6 +12,7 @@ from ..core.database import Database, utcnow
 from .agent_tools import AgentToolContext, execute_tool, model_text, tool_schemas
 from .jobs import get_job_manager
 from .models import resolve_provider
+from .usage import ensure_quota, record_usage
 
 
 DEFAULT_MEMBER_TOOLS = {
@@ -46,12 +47,14 @@ def _message_value(message: Any, key: str, default=None):
 def _usage(response: Any, model: str) -> dict:
     usage = getattr(response, "usage", None)
     getter = usage.get if isinstance(usage, dict) else lambda key, default=0: getattr(usage, key, default)
-    return {
+    result = {
         "model": model,
         "prompt_tokens": int(getter("prompt_tokens", 0) or 0),
         "completion_tokens": int(getter("completion_tokens", 0) or 0),
         "total_tokens": int(getter("total_tokens", 0) or 0),
     }
+    result["total_tokens"] = result["total_tokens"] or result["prompt_tokens"] + result["completion_tokens"]
+    return result
 
 
 def _consume_mailbox(team: dict, member_name: str) -> list[dict]:
@@ -107,7 +110,7 @@ def run_team_member(
 ) -> dict:
     profile = _db().get("agent_profiles", str(member.get("profile_id") or ""))
     effective = {**(profile or {}), **member}
-    provider, client = resolve_provider(effective.get("provider_id"))
+    provider, client = resolve_provider(effective.get("provider_id"), team["workspace_id"])
     context = AgentToolContext(
         database=_db(), workspace_id=team["workspace_id"], session_id=session_id,
         source_ids=source_ids,
@@ -143,11 +146,20 @@ def run_team_member(
     for _turn in range(12):
         if cancel.is_set():
             raise RuntimeError("团队任务已取消")
+        quota = ensure_quota(_db(), team["workspace_id"])
+        max_tokens = min(
+            int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
+            quota["remaining"],
+        )
         response = client.chat.completions.create(
             model=provider["model"], messages=messages, tools=schemas, tool_choice="auto",
-            temperature=float(provider.get("temperature", 0.2)),
+            temperature=float(provider.get("temperature", 0.2)), max_tokens=max(1, max_tokens),
         )
         current_usage = _usage(response, provider["model"])
+        record_usage(
+            _db(), team["workspace_id"], current_usage,
+            session_id=session_id, operation="team_member",
+        )
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             usage_total[key] += current_usage[key]
         message = response.choices[0].message
@@ -313,17 +325,26 @@ def _synthesize(team: dict, task: str, responses: list[dict]) -> str:
         (item for item in team["members"] if item.get("profile_id") == team.get("lead_profile_id")),
         team["members"][0],
     )
-    provider, client = resolve_provider(lead.get("provider_id"))
+    provider, client = resolve_provider(lead.get("provider_id"), team["workspace_id"])
     material = "\n\n".join(f"### {item['member']}\n{item.get('content') or item.get('error')}" for item in responses)
     if not client:
         return material
+    quota = ensure_quota(_db(), team["workspace_id"])
+    max_tokens = min(
+        int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
+        quota["remaining"],
+    )
     response = client.chat.completions.create(
         model=provider["model"],
         messages=[
             {"role": "system", "content": "你是团队负责人。综合成员结论，保留证据差异，禁止新增未经验证的数字。"},
             {"role": "user", "content": f"总任务：{task}\n成员结果：\n{material[:30000]}"},
         ],
-        temperature=float(provider.get("temperature", 0.2)),
+        temperature=float(provider.get("temperature", 0.2)), max_tokens=max(1, max_tokens),
+    )
+    record_usage(
+        _db(), team["workspace_id"], _usage(response, provider["model"]),
+        operation="team_synthesis",
     )
     return str(response.choices[0].message.content or material)
 

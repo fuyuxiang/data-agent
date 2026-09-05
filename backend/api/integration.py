@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import platform
 import re
@@ -15,7 +17,10 @@ from ..core.database import utcnow
 from ..services.mcp import get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
-from .common import api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, current_user_id, db, ok, require_system_owner,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("integration", __name__)
@@ -104,11 +109,15 @@ def create_mcp_server():
         raise ValueError("HTTP MCP 服务需要有效 URL")
     if transport == "stdio" and not payload.get("command"):
         raise ValueError("stdio MCP 服务需要 command")
+    if transport == "stdio":
+        require_system_owner()
+        if not current_app.config.get("TESTING") and os.getenv("MERIDIAN_ENABLE_STDIO_MCP", "0") != "1":
+            raise PermissionError("stdio MCP 未在服务端启用")
     if transport != "stdio":
         payload["url"] = validate_outbound_url(str(payload["url"]))
     wid = workspace_id()
     secrets = {"headers": payload.get("headers", {}), "env": payload.get("env", {})}
-    credential = SecretVault(current_app.config["SECRET_KEY"]).seal(secrets) if any(secrets.values()) else ""
+    credential = SecretVault(current_app.config["VAULT_KEY"]).seal(secrets) if any(secrets.values()) else ""
     requested_id = str(payload.get("server_id") or "").strip()
     if requested_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", requested_id):
         raise ValueError("server_id 只能包含字母、数字、点、下划线和连字符")
@@ -133,13 +142,16 @@ def create_mcp_server():
 def update_mcp_server(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
     payload = body()
+    resulting_transport = str(payload.get("transport") or server.get("transport") or "streamable-http")
+    if resulting_transport == "stdio":
+        require_system_owner()
     headers = payload.pop("headers", None)
     environment = payload.pop("env", None)
     if payload.get("url"):
         payload["url"] = validate_outbound_url(str(payload["url"]))
     if headers is not None or environment is not None:
-        current_secret = SecretVault(current_app.config["SECRET_KEY"]).open(server.get("credential", ""), {})
-        payload["credential"] = SecretVault(current_app.config["SECRET_KEY"]).seal({
+        current_secret = SecretVault(current_app.config["VAULT_KEY"]).open(server.get("credential", ""), {})
+        payload["credential"] = SecretVault(current_app.config["VAULT_KEY"]).seal({
             "headers": headers if headers is not None else current_secret.get("headers", {}),
             "env": environment if environment is not None else current_secret.get("env", {}),
         })
@@ -163,6 +175,8 @@ def delete_mcp_server(server_id: str):
 @api_errors
 def test_mcp(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
+    if server.get("transport") == "stdio":
+        require_system_owner()
     started = time.perf_counter()
     status = get_mcp_manager().connect_server(server)
     if status["status"] != "connected":
@@ -186,6 +200,8 @@ def mcp_tools(server_id: str):
 @api_errors
 def call_mcp_tool(server_id: str, tool_name: str):
     server = require_workspace_record("mcp_servers", server_id)
+    if server.get("transport") == "stdio":
+        require_system_owner()
     if not server.get("enabled", True):
         raise PermissionError("MCP 服务已禁用")
     arguments = body().get("arguments", {})
@@ -227,7 +243,7 @@ def create_connector():
     ):
         raise ValueError("飞书应用连接需要 app_id、app_secret 和 receive_id")
     wid = workspace_id()
-    credential = SecretVault(current_app.config["SECRET_KEY"]).seal({
+    credential = SecretVault(current_app.config["VAULT_KEY"]).seal({
         "url": url, "token": payload.get("token", ""),
         "host": payload.get("host", ""), "port": int(payload.get("port", 587)),
         "username": payload.get("username", ""), "password": payload.get("password", ""),
@@ -250,7 +266,7 @@ def create_connector():
 
 
 def _send_connector(connector: dict, message: str, extra: dict | None = None) -> dict:
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(connector.get("credential", ""), {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(connector.get("credential", ""), {})
     connector_type = connector.get("type")
     if connector_type == "email":
         mail = EmailMessage()
@@ -328,21 +344,43 @@ def delete_connector(connector_id: str):
 @api_errors
 def receive_integration_event():
     payload = body()
+    wid = str(payload.get("workspace_id") or "default")[:128]
+    if not db().get("workspaces", wid):
+        raise FileNotFoundError("工作空间不存在")
     token = str(payload.get("token") or request.headers.get("X-Integration-Token") or "")
-    expected = os.getenv("MERIDIAN_INTEGRATION_TOKEN", "")
+    integration = db().get("integration_credentials", f"integration_{wid}")
+    expected = ""
+    if integration and integration.get("workspace_id") == wid:
+        expected = str(
+            SecretVault(current_app.config["VAULT_KEY"])
+            .open(integration.get("credential", ""), {}).get("token") or ""
+        )
+    if not expected and (
+        current_app.config.get("TESTING") or os.getenv("MERIDIAN_ALLOW_GLOBAL_INTEGRATION_TOKEN", "0") == "1"
+    ):
+        expected = os.getenv("MERIDIAN_INTEGRATION_TOKEN", "")
     if not expected:
         return {"ok": False, "error": "未配置入站集成令牌"}, 503
-    if token != expected:
+    if not token or not hmac.compare_digest(token, expected):
         return ok(challenge=payload.get("challenge")) if payload.get("challenge") else ({"ok": False, "error": "invalid token"}, 401)
     if payload.get("challenge"):
         return {"challenge": payload["challenge"]}
-    wid = str(payload.get("workspace_id") or "default")
-    event = db().put(
+    sanitized = {key: value for key, value in payload.items() if key != "token"}
+    external_id = str(payload.get("event_id") or "")[:256]
+    event_id = (
+        "evt_" + hashlib.sha256(f"{wid}\0{external_id}".encode()).hexdigest()[:24]
+        if external_id else db().new_id("evt")
+    )
+    event, created = db().put_if_absent(
         "integration_events",
-        {"id": db().new_id("evt"), "workspace_id": wid, "source": str(payload.get("source") or "external"), "payload": payload, "status": "received"},
+        {
+            "id": event_id, "workspace_id": wid,
+            "source": str(payload.get("source") or "external")[:100],
+            "external_id": external_id, "payload": sanitized, "status": "received",
+        },
         workspace_id=wid,
     )
-    return ok(event_id=event["id"]), 202
+    return ok(event_id=event["id"], duplicate=not created), 202
 
 
 def _local_compute() -> dict:
@@ -389,7 +427,7 @@ def create_compute_node():
         raise ValueError("远程计算节点需要 host 和 username")
     validate_outbound_url(f"https://{payload['host']}:{int(payload.get('port', 22))}")
     wid = workspace_id()
-    credential = SecretVault(current_app.config["SECRET_KEY"]).seal({"password": payload.get("password", ""), "private_key": payload.get("private_key", "")})
+    credential = SecretVault(current_app.config["VAULT_KEY"]).seal({"password": payload.get("password", ""), "private_key": payload.get("private_key", "")})
     item = db().put(
         "compute_nodes",
         {
@@ -408,7 +446,7 @@ def test_compute_node(node_id: str):
     node = require_workspace_record("compute_nodes", node_id)
     import paramiko
 
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(node.get("credential", ""), {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(node.get("credential", ""), {})
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
     kwargs = {"hostname": node["host"], "port": node["port"], "username": node["username"], "timeout": 10, "look_for_keys": True}

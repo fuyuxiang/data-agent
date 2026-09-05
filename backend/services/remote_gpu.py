@@ -120,7 +120,7 @@ def create_connection(database: Database, workspace_id: str, payload: dict) -> d
             password = str(payload.get("password") or "")
             if not password:
                 raise ValueError("密码认证必须提供 password")
-            record["credential"] = SecretVault(current_app.config["SECRET_KEY"]).seal({"password": password})
+            record["credential"] = SecretVault(current_app.config["VAULT_KEY"]).seal({"password": password})
         elif auth_method == "key_file":
             key_file = str(payload.get("key_file") or "").strip()
             if not key_file:

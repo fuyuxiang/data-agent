@@ -89,7 +89,7 @@ def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(clien
     fake = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(
         "backend.services.agent_runtime.resolve_provider",
-        lambda _provider_id=None: ({"model": "fake", "temperature": 0}, fake),
+        lambda _provider_id=None, _workspace_id="default": ({"model": "fake", "temperature": 0}, fake),
     )
     response = client.post(f"/api/sessions/{session['id']}/messages", json={"message": "汇报"})
     assert response.status_code == 200

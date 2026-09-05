@@ -215,6 +215,7 @@ def _structured_frame(frame: pd.DataFrame) -> tuple[str, list[dict]] | None:
 
 def _records_from_llm(text: str, provider_id: str, workspace_id: str) -> list[dict]:
     from .models import resolve_provider
+    from .usage import ensure_quota, record_usage, response_usage
 
     provider, client = resolve_provider(provider_id or None, workspace_id)
     if not provider or not client:
@@ -224,10 +225,16 @@ def _records_from_llm(text: str, provider_id: str, workspace_id: str) -> list[di
 无法提取的字段留空，不得编造。
 文本：
 """ + text[:48_000]
+    quota = ensure_quota(_db(), workspace_id)
+    max_tokens = min(
+        int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
+        quota["remaining"], 8192,
+    )
     response = client.chat.completions.create(
         model=provider["model"], messages=[{"role": "user", "content": prompt}],
-        temperature=0, max_tokens=8192,
+        temperature=0, max_tokens=max(1, max_tokens),
     )
+    record_usage(_db(), workspace_id, response_usage(response, provider["model"]), operation="knowledge_extraction")
     raw = str(response.choices[0].message.content or "")
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
     try:

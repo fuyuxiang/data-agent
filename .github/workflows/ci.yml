@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+      - name: Install Python dependencies
+        run: python -m pip install --requirement requirements-dev.txt
+      - name: Verify Python
+        run: |
+          ruff check backend tests app.py
+          python -m compileall -q backend app.py
+          pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verify production frontend
+        run: |
+          npm run check
+          npm run build
+          node --check frontend/dist/src/app.js
+          node --check frontend/dist/src/api.js

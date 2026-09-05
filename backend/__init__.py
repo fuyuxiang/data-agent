@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import hmac
+import re
+import time
+import uuid
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -21,24 +26,67 @@ def create_app(test_config: dict | None = None) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config.update(
         SECRET_KEY=settings.secret_key,
+        VAULT_KEY=settings.encryption_key,
         MAX_CONTENT_LENGTH=settings.max_upload_bytes,
         JSON_SORT_KEYS=False,
         SETTINGS=settings,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
-        SESSION_COOKIE_SECURE=os.getenv("MERIDIAN_COOKIE_SECURE", "0") == "1",
+        SESSION_COOKIE_SECURE=os.getenv(
+            "MERIDIAN_COOKIE_SECURE", "1" if settings.environment == "production" else "0",
+        ) == "1",
+        PERMANENT_SESSION_LIFETIME=timedelta(
+            hours=max(1, int(os.getenv("MERIDIAN_SESSION_HOURS", "12"))),
+        ),
+        TRUSTED_HOSTS=settings.trusted_hosts or None,
     )
     if test_config:
         app.config.update(test_config)
         settings = Settings.for_tests(root, test_config)
         app.config["SETTINGS"] = settings
 
+    if not app.config.get("TESTING") and settings.environment == "production":
+        configured_secret = os.getenv("MERIDIAN_SECRET_KEY", "").strip()
+        if len(configured_secret) < 32 or configured_secret in {"change-this-in-production", "replace-before-production"}:
+            raise RuntimeError("生产环境必须配置至少 32 字符的随机 MERIDIAN_SECRET_KEY")
+        configured_encryption = os.getenv("MERIDIAN_ENCRYPTION_KEY", "").strip()
+        if len(configured_encryption) < 32:
+            raise RuntimeError("生产环境必须配置至少 32 字符且独立持久化的 MERIDIAN_ENCRYPTION_KEY")
+        if not settings.trusted_hosts:
+            raise RuntimeError("生产环境必须配置 MERIDIAN_TRUSTED_HOSTS")
+        if not os.getenv("MERIDIAN_OUTBOUND_HOST_ALLOWLIST", "").strip():
+            raise RuntimeError("生产环境必须配置 MERIDIAN_OUTBOUND_HOST_ALLOWLIST")
+        required_frontend_files = (
+            settings.frontend_dir / "index.html",
+            settings.frontend_dir / "src" / "renders.js",
+            settings.frontend_dir / "vendor" / "vue.global.prod.js",
+            settings.frontend_dir / "drawio" / "index.html",
+        )
+        if not all(path.is_file() for path in required_frontend_files):
+            raise RuntimeError(
+                "生产前端产物不完整：请先执行 npm run build，并将 "
+                "MERIDIAN_FRONTEND_DIR 指向 frontend/dist",
+            )
+        from .core.observability import configure_logging
+
+        configure_logging(os.getenv("MERIDIAN_LOG_LEVEL", "INFO"))
+
     settings.ensure_directories()
+    if not app.config.get("TESTING") and settings.environment == "production":
+        from .core.instance_lock import acquire_instance_lock
+
+        app.extensions["meridian_instance_lock"] = acquire_instance_lock(
+            settings.storage_dir / ".instance.lock",
+        )
     database = Database(settings.database_path)
     database.initialize()
     app.extensions["meridian_db"] = database
 
-    CORS(app, resources={r"/api/*": {"origins": settings.allowed_origins}})
+    CORS(
+        app,
+        resources={r"/api/*": {"origins": settings.allowed_origins}},
+        supports_credentials=True,
+    )
 
     from .api import register_blueprints
 
@@ -55,6 +103,21 @@ def create_app(test_config: dict | None = None) -> Flask:
         start_scheduler(app)
 
     @app.before_request
+    def establish_request_context():
+        supplied = str(request.headers.get("X-Request-ID") or "")
+        g.request_id = supplied if re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", supplied) else uuid.uuid4().hex
+        g.request_started = time.perf_counter()
+
+    @app.before_request
+    def reject_oversized_json():
+        if (
+            request.is_json and request.content_length is not None
+            and request.content_length > settings.max_json_bytes
+        ):
+            return jsonify({"ok": False, "error": "JSON 请求体超过大小限制"}), 413
+        return None
+
+    @app.before_request
     def reject_cross_origin_writes():
         if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
             return None
@@ -64,28 +127,47 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             parsed = urlsplit(origin)
             same_origin = parsed.netloc.lower() == request.host.lower()
-            allowed_local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+            allowed_origin = origin in settings.allowed_origins
         except ValueError:
-            same_origin = allowed_local = False
-        if not same_origin and not allowed_local:
+            same_origin = allowed_origin = False
+        if not same_origin and not allowed_origin:
             return jsonify({"ok": False, "error": "跨站写入已拒绝"}), 403
         return None
 
     @app.before_request
+    def verify_csrf_token():
+        if app.config.get("TESTING") or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if request.path in {"/api/auth/register", "/api/auth/login", "/api/auth/send-code", "/api/auth/reset-password"} or request.path in {"/api/integrations/events", "/api/feishu-bot/events"}:
+            return None
+        if not session.get("user_id"):
+            return None
+        expected = str(session.get("csrf_token") or "")
+        supplied = str(request.headers.get("X-CSRF-Token") or "")
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            return jsonify({"ok": False, "error": "CSRF 校验失败，请刷新页面后重试"}), 403
+        return None
+
+    @app.before_request
     def require_authenticated_workspace():
-        if not request.path.startswith("/api/") or request.path in {"/api/health"}:
+        if not request.path.startswith("/api/") or request.path in {"/api/health", "/api/ready"}:
             return None
         if request.path.startswith("/api/auth/") or request.path in {"/api/integrations/events", "/api/feishu-bot/events"}:
             return None
         users = database.list("users", include_archived=True, limit=1)
         if not users:
-            return None
+            if settings.environment != "production":
+                return None
+            return jsonify({"ok": False, "error": "生产实例尚未创建系统所有者"}), 401
         # Flask's signed session is authoritative; the unusual local mode is disabled once a user exists.
-        from flask import session
-
         user_id = session.get("user_id")
         user = database.get("users", str(user_id)) if user_id else None
-        if not user or not user.get("enabled", True):
+        session_version = int(session.get("session_version") or 0)
+        if (
+            not user or not user.get("enabled", True)
+            or session_version != int(user.get("session_version") or 0)
+        ):
+            session.clear()
             return jsonify({"ok": False, "error": "请先登录"}), 401
         if request.path == "/api/workspaces" and request.method in {"GET", "POST"}:
             return None
@@ -106,6 +188,16 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"ok": False, "error": "无权访问该工作空间"}), 403
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and membership.get("role") == "viewer":
             return jsonify({"ok": False, "error": "当前成员只有只读权限"}), 403
+        owner_only_prefixes = (
+            "/api/providers", "/api/models", "/api/mcp", "/api/connectors",
+            "/api/compute", "/api/gpu", "/api/system/", "/api/hooks", "/api/feishu-bot",
+        )
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and request.path.startswith(owner_only_prefixes)
+            and membership.get("role") != "owner"
+        ):
+            return jsonify({"ok": False, "error": "该敏感配置操作仅限工作空间所有者"}), 403
         return None
 
     @app.get("/")
@@ -137,6 +229,16 @@ def create_app(test_config: dict | None = None) -> Flask:
             "database": database.ping(),
         })
 
+    @app.get("/api/ready")
+    def ready():
+        database_status = database.ping()
+        storage_ready = settings.storage_dir.is_dir() and os.access(settings.storage_dir, os.W_OK)
+        status = 200 if storage_ready and database_status == "ready" else 503
+        return jsonify({
+            "ok": status == 200, "database": database_status, "storage_writable": storage_ready,
+            "scheduler": "disabled" if os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") == "1" else "enabled",
+        }), status
+
     @app.errorhandler(413)
     def too_large(_error):
         return jsonify({"ok": False, "error": "上传文件超过大小限制"}), 413
@@ -155,14 +257,27 @@ def create_app(test_config: dict | None = None) -> Flask:
             raise error
         logging.getLogger(__name__).exception("Unhandled request error")
         if request.path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "服务暂时无法完成该操作，请查看服务日志"}), 500
+            return jsonify({
+                "ok": False, "error": "服务暂时无法完成该操作，请查看服务日志",
+                "request_id": getattr(g, "request_id", ""),
+            }), 500
         return "Internal Server Error", 500
 
     @app.after_request
     def security_headers(response):
+        request_id = getattr(g, "request_id", uuid.uuid4().hex)
+        response.headers.setdefault("X-Request-ID", request_id)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        )
+        if settings.environment == "production" and app.config["SESSION_COOKIE_SECURE"]:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains",
+            )
         if request.path.startswith("/static/drawio/"):
             # The vendored draw.io runtime requires inline/evaluated plugin code. Keep that
             # exception isolated to its same-origin iframe instead of weakening the workbench CSP.
@@ -174,14 +289,27 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "base-uri 'self'; frame-ancestors 'self'",
             )
         else:
+            script_policy = "'self'" if settings.environment == "production" or app.config.get("TESTING") else "'self' 'unsafe-eval'"
             response.headers.setdefault(
                 "Content-Security-Policy",
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                f"default-src 'self'; script-src {script_policy}; style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; "
                 "frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
             )
-        if response.mimetype == "text/html":
+        if response.mimetype == "text/html" or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        if request.path.startswith("/api/"):
+            logging.getLogger("meridian.request").info(
+                "request_completed",
+                extra={"request_detail": {
+                    "request_id": request_id, "method": request.method, "path": request.path,
+                    "status": response.status_code,
+                    "duration_ms": round(
+                        (time.perf_counter() - getattr(g, "request_started", time.perf_counter())) * 1000, 2,
+                    ),
+                    "user_id": str(session.get("user_id") or "anonymous"),
+                }},
+            )
         return response
 
     return app

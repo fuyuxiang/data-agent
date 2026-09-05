@@ -21,7 +21,7 @@ _TURN_LOCKS_GUARD = threading.RLock()
 
 
 def connector_secret(connector: dict) -> dict:
-    return SecretVault(current_app.config["SECRET_KEY"]).open(connector.get("credential", ""), {})
+    return SecretVault(current_app.config["VAULT_KEY"]).open(connector.get("credential", ""), {})
 
 
 def bot_connector(database: Database, workspace_id: str) -> dict | None:
@@ -171,13 +171,13 @@ def dispatch_inbound_event(app: Flask, connector: dict, event: Mapping[str, Any]
     database: Database = app.extensions["meridian_db"]
     if event_id:
         receipt_id = "fs_" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:40]
-        if database.get("feishu_event_receipts", receipt_id, include_archived=True):
-            return False
-        database.put(
+        _receipt, created = database.put_if_absent(
             "feishu_event_receipts",
             {"id": receipt_id, "workspace_id": connector["workspace_id"], "event_id_hash": receipt_id},
             workspace_id=connector["workspace_id"],
         )
+        if not created:
+            return False
     chat_id, question = parsed
     session = next(
         (

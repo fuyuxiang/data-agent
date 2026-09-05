@@ -101,7 +101,7 @@ def _save_config(wid: str, ds_type: str, config: dict) -> None:
         {
             "id": _config_id(wid, ds_type), "workspace_id": wid, "type": ds_type,
             "config": public,
-            "credential": SecretVault(current_app.config["SECRET_KEY"]).seal(secret),
+            "credential": SecretVault(current_app.config["VAULT_KEY"]).seal(secret),
         },
         workspace_id=wid,
     )
@@ -109,7 +109,7 @@ def _save_config(wid: str, ds_type: str, config: dict) -> None:
 
 def _load_config(wid: str, ds_type: str) -> dict:
     record = db().get("datasource_configs", _config_id(wid, ds_type)) or {}
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(record.get("credential", ""), {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(record.get("credential", ""), {})
     return {**(record.get("config") or {}), **secret}
 
 
@@ -119,7 +119,7 @@ def _public_configs(wid: str) -> dict:
     for record in db().list("datasource_configs", workspace_id=wid):
         ds_type = record.get("type")
         value = dict(record.get("config") or {})
-        secret = SecretVault(current_app.config["SECRET_KEY"]).open(record.get("credential", ""), {})
+        secret = SecretVault(current_app.config["VAULT_KEY"]).open(record.get("credential", ""), {})
         key = sensitive.get(ds_type)
         if key:
             value[f"has_{key}"] = bool(secret.get(key))

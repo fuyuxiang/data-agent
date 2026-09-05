@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
 import smtplib
 import threading
+import time
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -409,9 +411,13 @@ def put_mcp(server_id: str):
     transport = str(payload.get("transport") or server.get("transport") or "streamable-http")
     if transport not in {"http", "streamable-http", "sse", "stdio"}:
         raise ValueError("不支持的 MCP 传输类型")
+    if transport == "stdio":
+        from .common import require_system_owner
+
+        require_system_owner()
     if transport != "stdio" and payload.get("url"):
         payload["url"] = validate_outbound_url(str(payload["url"]))
-    secret = SecretVault(current_app.config["SECRET_KEY"]).open(server.get("credential", ""), {})
+    secret = SecretVault(current_app.config["VAULT_KEY"]).open(server.get("credential", ""), {})
     headers = payload.get("headers", secret.get("headers", {}))
     environment = payload.get("env", secret.get("env", {}))
     changes = {
@@ -420,7 +426,7 @@ def put_mcp(server_id: str):
         "command": str(payload.get("command", server.get("command", ""))),
         "args": payload.get("args", server.get("args", [])),
         "enabled": bool(payload.get("enabled", server.get("enabled", True))),
-        "credential": SecretVault(current_app.config["SECRET_KEY"]).seal({"headers": headers, "env": environment}),
+        "credential": SecretVault(current_app.config["VAULT_KEY"]).seal({"headers": headers, "env": environment}),
     }
     updated = db().patch("mcp_servers", server_id, changes)
     get_mcp_manager().remove_server(server_id)
@@ -451,6 +457,10 @@ def disable_mcp(server_id: str):
 @api_errors
 def connect_mcp(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
+    if server.get("transport") == "stdio":
+        from .common import require_system_owner
+
+        require_system_owner()
     if not server.get("enabled", True):
         raise ValueError("MCP 服务已停用")
     app = current_app._get_current_object()
@@ -555,6 +565,17 @@ def send_code():
     email = str(payload.get("email") or "").strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise ValueError("请输入有效邮箱")
+    address = request.remote_addr or "unknown"
+    rate_id = "mailrate:" + hashlib.sha256(address.encode()).hexdigest()
+    rate = db().get("email_delivery_limits", rate_id) or {
+        "id": rate_id, "count": 0, "window_started": time.time(),
+    }
+    if time.time() - float(rate.get("window_started") or 0) > 900:
+        rate = {"id": rate_id, "count": 0, "window_started": time.time()}
+    if int(rate.get("count") or 0) >= 10:
+        return jsonify({"error": "验证码发送次数过多，请稍后再试"}), 429
+    rate["count"] = int(rate.get("count") or 0) + 1
+    db().put("email_delivery_limits", rate, workspace_id="default")
     existing = next((item for item in db().list("email_codes", limit=5000) if item.get("email") == email), None)
     if existing:
         from datetime import datetime, timezone
@@ -577,7 +598,7 @@ def send_code():
         "email_codes",
         {
             "id": record_id, "email": email,
-            "code": SecretVault(current_app.config["SECRET_KEY"]).seal({"value": code}),
+            "code": SecretVault(current_app.config["VAULT_KEY"]).seal({"value": code}),
             "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds"),
             "attempts": 0,

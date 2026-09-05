@@ -5,12 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="经纬分析工作台——数据接入、智能分析、流程编排与成果交付的一体化工作空间。" />
     <title>经纬分析工作台</title>
-    <script>
-      (() => {
-        const saved = localStorage.getItem('meridian-theme');
-        document.documentElement.dataset.theme = saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-      })();
-    </script>
+    <script src="/src/theme.js"></script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
@@ -22,4 +17,3 @@
     <script type="module" src="/src/app.js"></script>
   </body>
 </html>
-

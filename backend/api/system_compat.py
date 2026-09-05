@@ -4,9 +4,7 @@ import os
 import platform
 import re
 import subprocess
-import tempfile
 import threading
-import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,21 +20,15 @@ from ..services.embeddings import (
     save_mode,
 )
 from ..services.security import safe_http_request
-from .common import api_errors, body, workspace_id
+from .common import api_errors, body, require_system_owner, workspace_id
 
 
 bp = Blueprint("system_compat", __name__)
 CURRENT_VERSION = "v1.0.0"
 RELEASES_API = "https://api.github.com/repos/Zafer-Liu/Data-Analysis-Agent/releases/latest"
 RELEASES_PAGE = "https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest"
-ARCHIVE_URL = "https://github.com/Zafer-Liu/Data-Analysis-Agent/archive/refs/heads/main.zip"
 _directory_lock = threading.Lock()
 _download_lock = threading.Lock()
-_update_lock = threading.Lock()
-_PROTECTED = {
-    ".git", ".env", "storage", "uploads", "outputs", "data/datasource_config.json",
-    "LLM/llm_config.json", "LLM/mcp_config.json", "LLM/embedding_config.json",
-}
 
 
 def _version(value: str) -> tuple[int, int, int]:
@@ -53,7 +45,9 @@ def _is_local_request() -> bool:
 
 
 @bp.post("/api/system/select-directory")
+@api_errors
 def select_directory():
+    require_system_owner()
     if os.getenv("VERCEL") or not _is_local_request():
         return jsonify({"ok": False, "error": "原生目录选择仅允许从运行服务的本机页面调用。"}), 403
     if not _directory_lock.acquire(blocking=False):
@@ -119,71 +113,15 @@ def check_update():
         }), 502
 
 
-def _protected(relative: Path) -> bool:
-    if any(part in {"__pycache__", ".idea", ".vscode"} or part.endswith(".pyc") for part in relative.parts):
-        return True
-    return any(relative.parts[:len(Path(item).parts)] == Path(item).parts for item in _PROTECTED)
-
-
 @bp.post("/api/system/update")
 def update_system():
-    if current_app.config.get("TESTING") or os.getenv("MERIDIAN_DISABLE_SELF_UPDATE", "0") == "1":
-        return jsonify({
-            "ok": False, "error": "当前运行模式已禁用自更新", "output": "当前运行模式已禁用自更新",
-            "already_up_to_date": False, "updated": [], "added": [], "skipped": [],
-        }), 409
-    if not _update_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "error": "更新正在进行"}), 409
-    try:
-        root = current_app.config["SETTINGS"].root.resolve()
-        with tempfile.TemporaryDirectory(prefix="meridian-update-") as temporary:
-            archive = Path(temporary) / "update.zip"
-            response = safe_http_request("GET", ARCHIVE_URL, timeout=90, stream=True)
-            response.raise_for_status()
-            with archive.open("wb") as output:
-                for chunk in response.iter_content(1024 * 1024):
-                    output.write(chunk)
-            extracted = Path(temporary) / "extracted"
-            with zipfile.ZipFile(archive) as value:
-                for member in value.infolist():
-                    target = (extracted / member.filename).resolve()
-                    if extracted.resolve() not in target.parents and target != extracted.resolve():
-                        raise ValueError("更新包包含越界路径")
-                value.extractall(extracted)
-            roots = [item for item in extracted.iterdir() if item.is_dir()]
-            if len(roots) != 1:
-                raise ValueError("更新包结构无效")
-            updated, added, skipped = [], [], []
-            for source in roots[0].rglob("*"):
-                if not source.is_file():
-                    continue
-                relative = source.relative_to(roots[0])
-                if _protected(relative):
-                    skipped.append(str(relative))
-                    continue
-                target = root / relative
-                content = source.read_bytes()
-                if target.is_file() and target.read_bytes() == content:
-                    continue
-                existed = target.exists()
-                target.parent.mkdir(parents=True, exist_ok=True)
-                temporary_target = target.with_suffix(target.suffix + ".update")
-                temporary_target.write_bytes(content)
-                temporary_target.replace(target)
-                (updated if existed else added).append(str(relative))
-        already = not updated and not added
-        output = "已是最新版本" if already else f"更新完成：{len(updated)} 个文件更新，{len(added)} 个文件新增"
-        return jsonify({
-            "ok": True, "output": output, "already_up_to_date": already,
-            "updated": updated, "added": added, "skipped": skipped,
-        })
-    except Exception as exc:
-        return jsonify({
-            "ok": False, "error": str(exc), "output": str(exc), "already_up_to_date": False,
-            "updated": [], "added": [], "skipped": [],
-        }), 500
-    finally:
-        _update_lock.release()
+    return jsonify({
+        "ok": False,
+        "error": "生产版本不允许通过 Web 请求覆盖应用文件，请使用经过签名验证的发布流水线部署。",
+        "output": "在线自更新已永久禁用",
+        "already_up_to_date": False,
+        "updated": [], "added": [], "skipped": [],
+    }), 410
 
 
 @bp.get("/api/proxy-image")
@@ -226,7 +164,9 @@ def bge_status():
 
 
 @bp.post("/api/system/bge-model/download")
+@api_errors
 def bge_download():
+    require_system_owner()
     if not _download_lock.acquire(blocking=False):
         return jsonify({"ok": False, "error": "Download already in progress."}), 409
     try:

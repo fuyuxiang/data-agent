@@ -31,6 +31,28 @@ EXTERNAL_FUNCTIONS = frozenset({
     "read_xlsx",
     "sqlite_scan",
     "st_read",
+    "benchmark",
+    "dblink",
+    "dblink_connect",
+    "get_lock",
+    "load_extension",
+    "lo_export",
+    "nextval",
+    "opendatasource",
+    "openrowset",
+    "pg_advisory_lock",
+    "pg_advisory_xact_lock",
+    "pg_cancel_backend",
+    "pg_logical_emit_message",
+    "pg_sleep",
+    "pg_terminate_backend",
+    "readfile",
+    "release_lock",
+    "set_config",
+    "setval",
+    "sleep",
+    "writefile",
+    "xp_cmdshell",
 })
 
 BLOCKED_NODE_TYPES = (
@@ -72,12 +94,12 @@ def _looks_external_table(name: str) -> bool:
     return PurePath(value).suffix in FILE_SUFFIXES
 
 
-def validate_read_only_sql(sql: str) -> str:
+def validate_read_only_sql(sql: str, dialect: str | None = None) -> str:
     statement = str(sql or "").strip().rstrip(";").strip()
     if not statement:
         raise ValueError("查询不能为空")
     try:
-        parsed = [item for item in sqlglot.parse(statement) if item is not None]
+        parsed = [item for item in sqlglot.parse(statement, read=dialect) if item is not None]
     except sqlglot.errors.ParseError as exc:
         raise ValueError(f"SQL 语法无法解析：{exc}") from exc
     if len(parsed) != 1:
@@ -94,3 +116,19 @@ def validate_read_only_sql(sql: str) -> str:
         if isinstance(node, exp.Table) and _looks_external_table(node.name):
             raise ValueError("查询禁止把文件路径或网络地址作为数据表")
     return statement
+
+
+def bounded_read_only_sql(sql: str, limit: int, dialect: str | None = None) -> str:
+    """Validate a query and enforce a server-side outer row limit."""
+    statement = validate_read_only_sql(sql, dialect)
+    root = sqlglot.parse_one(statement, read=dialect)
+    existing = root.args.get("limit")
+    existing_value = None
+    if existing and isinstance(existing.expression, exp.Literal) and not existing.expression.is_string:
+        try:
+            existing_value = int(existing.expression.this)
+        except (TypeError, ValueError):
+            existing_value = None
+    if existing_value is None or existing_value > limit:
+        root = root.limit(limit, copy=False)
+    return root.sql(dialect=dialect)

@@ -48,6 +48,14 @@ def validate_outbound_url(url: str) -> str:
         raise ValueError("只允许有效的 HTTP/HTTPS 地址")
     if parsed.username or parsed.password:
         raise ValueError("外部地址不能包含用户名或密码")
+    configured_hosts = {
+        item.strip().lower().rstrip(".")
+        for item in os.getenv("MERIDIAN_OUTBOUND_HOST_ALLOWLIST", "").split(",")
+        if item.strip()
+    }
+    hostname = parsed.hostname.lower().rstrip(".")
+    if configured_hosts and not any(hostname == item or hostname.endswith(f".{item}") for item in configured_hosts):
+        raise ValueError("外部地址不在服务端域名白名单中")
     if os.getenv("MERIDIAN_ALLOW_PRIVATE_NETWORK", "0") == "1":
         return parsed.geturl()
     addresses = []
@@ -69,17 +77,37 @@ def validate_outbound_url(url: str) -> str:
 
 
 def safe_http_request(
-    method: str, url: str, *, timeout: int = 20, max_redirects: int = 3, **kwargs,
+    method: str, url: str, *, timeout: int = 20, max_redirects: int = 3,
+    max_response_bytes: int = 20 * 1024 * 1024, **kwargs,
 ) -> requests.Response:
     current = validate_outbound_url(url)
+    caller_stream = bool(kwargs.pop("stream", False))
     for redirect in range(max_redirects + 1):
-        response = requests.request(method, current, timeout=timeout, allow_redirects=False, **kwargs)
+        response = requests.request(
+            method, current, timeout=timeout, allow_redirects=False, stream=True, **kwargs,
+        )
         if response.status_code not in {301, 302, 303, 307, 308}:
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared > max_response_bytes:
+                response.close()
+                raise ValueError("外部响应超过大小限制")
+            if not caller_stream:
+                chunks, size = [], 0
+                for chunk in response.iter_content(256 * 1024):
+                    size += len(chunk)
+                    if size > max_response_bytes:
+                        response.close()
+                        raise ValueError("外部响应超过大小限制")
+                    chunks.append(chunk)
+                response._content = b"".join(chunks)
+                response._content_consumed = True
             return response
         if redirect >= max_redirects:
+            response.close()
             raise ValueError("外部请求重定向次数过多")
         location = response.headers.get("Location")
         if not location:
             return response
+        response.close()
         current = validate_outbound_url(urljoin(current, location))
     raise ValueError("外部请求无法完成")

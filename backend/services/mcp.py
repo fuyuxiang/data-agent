@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-from flask import Flask, current_app
+from flask import Flask, current_app, has_app_context
 
 from ..core.database import Database, utcnow
 from .security import SecretVault, validate_outbound_url
@@ -22,6 +22,9 @@ PROTOCOL_VERSION = "2025-06-18"
 
 
 def _safe_command(command: str) -> str:
+    testing = has_app_context() and bool(current_app.config.get("TESTING"))
+    if not testing and os.getenv("MERIDIAN_ENABLE_STDIO_MCP", "0") != "1":
+        raise PermissionError("stdio MCP 默认禁用；仅可由系统所有者在受信主机上显式启用")
     basename = Path(command).stem.lower()
     if basename not in ALLOWED_STDIO_COMMANDS:
         raise ValueError(f"MCP stdio 命令不在白名单中：{command}")
@@ -79,6 +82,8 @@ class StdioTransport(Transport):
     def __init__(self, command: str, arguments: list[str], environment: dict[str, str]):
         self.command = _safe_command(command)
         self.arguments = [str(item) for item in arguments]
+        if any(item in {"-c", "-e", "--eval", "--print"} for item in self.arguments):
+            raise ValueError("stdio MCP 禁止解释器内联执行参数")
         self.environment = {**os.environ, **{str(key): str(value) for key, value in environment.items()}}
         self.process: asyncio.subprocess.Process | None = None
         self.request_id = 0
@@ -335,7 +340,7 @@ class MCPManager:
     def __init__(self, app: Flask):
         self.app = app
         self.database: Database = app.extensions["meridian_db"]
-        self.secret_key = app.config["SECRET_KEY"]
+        self.secret_key = app.config["VAULT_KEY"]
         self.connections: dict[str, MCPConnection] = {}
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, name="meridian-mcp", daemon=True)

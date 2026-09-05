@@ -13,7 +13,7 @@ python app.py
 
 浏览器访问 `http://127.0.0.1:5001`。
 
-如果当前 Python 环境已经包含依赖，也可以直接运行 `python app.py`。生产环境会优先使用 Waitress；未安装 Waitress 时自动回退到 Flask 本地服务。
+如果当前 Python 环境已经包含依赖，也可以直接运行 `python app.py`。生产环境使用已锁定的 `requirements.lock` 和 Waitress，完整配置、备份和容量边界见 [生产运行手册](docs/PRODUCTION.md)。
 
 ## 前端
 
@@ -42,4 +42,4 @@ npm run build
 - 工作流审批不会自动放行。
 - 归档记录可恢复；永久删除要求显式确认。
 
-参考工程审阅见 [docs/REFERENCE_REVIEW.md](docs/REFERENCE_REVIEW.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，功能覆盖见 [docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md)。
+参考工程审阅见 [docs/REFERENCE_REVIEW.md](docs/REFERENCE_REVIEW.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，功能覆盖见 [docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md)。当前支持单节点生产运行，不代表已具备多副本高可用能力。

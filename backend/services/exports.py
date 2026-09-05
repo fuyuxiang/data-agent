@@ -35,6 +35,24 @@ def _frame_from_payload(payload: dict, workspace_id: str) -> tuple[pd.DataFrame,
     return pd.DataFrame(rows), str(payload.get("sql", ""))
 
 
+def _safe_spreadsheet_text(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped.startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def _safe_spreadsheet_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    safe = frame.copy()
+    safe.columns = [_safe_spreadsheet_text(str(column)) for column in safe.columns]
+    for column in safe.columns:
+        if pd.api.types.is_object_dtype(safe[column]) or pd.api.types.is_string_dtype(safe[column]):
+            safe[column] = safe[column].map(_safe_spreadsheet_text)
+    return safe
+
+
 COLOR_SCHEMES = {
     "mckinsey": ["#003B71", "#005CAB", "#0083CA", "#00A3E0", "#7FBA00", "#FFC000"],
     "bcg": ["#006C5B", "#009879", "#00B398", "#CDECE5", "#A6192E", "#999999"],
@@ -182,7 +200,7 @@ def export_data(payload: dict, workspace_id: str) -> dict:
     artifact_id = _db().new_id("export")
     if kind == "csv":
         path = current_app.config["SETTINGS"].export_dir / f"{artifact_id}.csv"
-        frame.to_csv(path, index=False, encoding="utf-8-sig")
+        _safe_spreadsheet_frame(frame).to_csv(path, index=False, encoding="utf-8-sig")
     elif kind == "xlsx":
         path = current_app.config["SETTINGS"].export_dir / f"{artifact_id}.xlsx"
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -196,7 +214,7 @@ def export_data(payload: dict, workspace_id: str) -> dict:
                     sheet_name = base[:31 - len(tail)] + tail
                     suffix += 1
                 used_names.add(sheet_name)
-                current.to_excel(writer, sheet_name=sheet_name, index=False)
+                _safe_spreadsheet_frame(current).to_excel(writer, sheet_name=sheet_name, index=False)
                 sheet = writer.book[sheet_name]
                 header_fill = PatternFill("solid", fgColor="14213D")
                 for cell in sheet[1]:

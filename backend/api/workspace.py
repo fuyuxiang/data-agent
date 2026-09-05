@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import secrets
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Blueprint, current_app, request, session as flask_session
@@ -9,6 +12,7 @@ from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
 from ..services.memory import consolidate_memories, search_memories
+from ..services.security import SecretVault
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
     api_errors,
@@ -38,7 +42,10 @@ def bootstrap():
         sessions=sessions,
         active_session=active_session,
         sources=[_public_source(item) for item in db().list("sources", workspace_id=wid)],
-        providers=[_public_provider(item) for item in db().list("providers")],
+        providers=[
+            _public_provider(item) for item in db().list("providers")
+            if item["id"] == "environment-default" or item.get("workspace_id", "default") == wid
+        ],
         capabilities={
             "ingestion": ["csv", "tsv", "xlsx", "xls", "json", "parquet", "sql", "http"],
             "analysis": True,
@@ -164,6 +171,63 @@ def add_workspace_member(record_id: str):
         workspace_id=record_id,
     )
     return ok(item=item), 201
+
+
+@bp.post("/api/workspaces/<record_id>/invitations")
+@api_errors
+def create_workspace_invitation(record_id: str):
+    require_workspace_access(record_id, owner=True)
+    payload = body()
+    email = str(payload.get("email") or "").strip().lower()
+    role = str(payload.get("role") or "viewer")
+    if "@" not in email:
+        raise ValueError("请输入有效邮箱")
+    if role not in {"owner", "editor", "viewer"}:
+        raise ValueError("成员角色必须是 owner、editor 或 viewer")
+    if any(item.get("email") == email for item in db().list("users", include_archived=True)):
+        raise ValueError("该邮箱已注册，请直接添加为工作空间成员")
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds")
+    invite = db().put(
+        "invitations",
+        {
+            "id": f"invite_{token_hash}", "workspace_id": record_id, "email": email,
+            "role": role, "status": "pending", "expires_at": expires_at,
+            "invited_by": current_user_id(),
+        },
+        workspace_id=record_id,
+    )
+    db().audit(
+        "workspace.invitation_created", workspace_id=record_id,
+        object_type="invitation", object_id=invite["id"], detail={"email": email, "role": role},
+    )
+    return ok(
+        item={key: value for key, value in invite.items() if key != "id"},
+        invitation_token=token,
+        registration_url=f"/?invite={token}",
+    ), 201
+
+
+@bp.post("/api/workspaces/<record_id>/integration-token")
+@api_errors
+def rotate_workspace_integration_token(record_id: str):
+    require_workspace_access(record_id, owner=True)
+    token = secrets.token_urlsafe(48)
+    credential = db().put(
+        "integration_credentials",
+        {
+            "id": f"integration_{record_id}", "workspace_id": record_id,
+            "credential": SecretVault(current_app.config["VAULT_KEY"]).seal({"token": token}),
+            "rotated_by": current_user_id(), "rotated_at": utcnow(),
+        },
+        workspace_id=record_id,
+    )
+    db().audit(
+        "workspace.integration_token_rotated", workspace_id=record_id,
+        object_type="integration_credential", object_id=credential["id"],
+    )
+    return ok(token=token)
 
 
 @bp.patch("/api/workspaces/<record_id>/members/<user_id>")
@@ -452,14 +516,31 @@ def get_session(session_id: str):
 @api_errors
 def update_session(session_id: str):
     current = require_workspace_record("sessions", session_id)
-    allowed = {key: value for key, value in body().items() if key in {"name", "status", "source_ids", "provider_id", "temporary_instruction", "temp_prompt_enabled"}}
+    allowed = {
+        key: value for key, value in body().items()
+        if key in {
+            "name", "status", "source_ids", "provider_id", "temporary_instruction",
+            "temp_prompt_enabled", "agent_allow_mutations", "agent_allow_mcp",
+        }
+    }
+    for flag in {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
+        allowed[flag] = bool(allowed[flag])
+    if {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
+        require_workspace_access(current["workspace_id"], owner=True)
     if "source_ids" in allowed:
         allowed["source_ids"] = [str(value) for value in allowed["source_ids"]]
         for source_id in allowed["source_ids"]:
             require_workspace_record("sources", source_id, current["workspace_id"])
     if allowed.get("provider_id") and allowed["provider_id"] != "environment-default":
         require_workspace_record("providers", str(allowed["provider_id"]), current["workspace_id"])
-    return ok(item=db().patch("sessions", session_id, allowed))
+    item = db().patch("sessions", session_id, allowed)
+    if {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
+        db().audit(
+            "session.agent_policy_updated", workspace_id=current["workspace_id"],
+            object_type="session", object_id=session_id,
+            detail={key: allowed[key] for key in {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys()},
+        )
+    return ok(item=item)
 
 
 @bp.delete("/api/sessions/<session_id>")

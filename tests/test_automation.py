@@ -168,7 +168,7 @@ def test_team_members_use_bounded_tools_mailbox_and_quality_review(client, sourc
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(
         "backend.services.teams.resolve_provider",
-        lambda _provider_id=None: ({"model": "team-model", "temperature": 0}, fake_client),
+        lambda _provider_id=None, _workspace_id="default": ({"model": "team-model", "temperature": 0}, fake_client),
     )
     team = client.post(
         "/api/teams",

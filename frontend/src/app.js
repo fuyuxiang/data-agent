@@ -20,7 +20,9 @@ const Root = {
   components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, GpuPanel, Icon, KnowledgePanel, MapsPanel, Modal, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
   setup() {
     const state = reactive({
-      ready: false, route: location.hash.slice(1) || 'chat', sidebarOpen: false,
+      ready: false, authChecking: true, authRequired: false, registrationOpen: false,
+      authMode: 'login', authError: '', auth: { email:'', password:'', name:'', invitation_token:new URLSearchParams(location.search).get('invite') || '' }, user: null,
+      route: location.hash.slice(1) || 'chat', sidebarOpen: false,
       workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [],
       sessions: [], activeSessionId: '', sources: [], providers: [], skills: [], analysisMethods: [], agentProfiles: [],
       messages: [], chatRunning: false, chatStages: [], chatDraft: null, abortController: null,
@@ -56,6 +58,16 @@ const Root = {
     const bootstrap = async () => {
       state.busy = true; state.busyLabel = '正在准备工作空间';
       try {
+        const identity = await api('/api/auth/me');
+        state.user = identity.user; state.registrationOpen = !!identity.registration_open || !!state.auth.invitation_token;
+        if (identity.csrf_token) sessionStorage.setItem('meridian-csrf', identity.csrf_token);
+        if (!identity.authenticated && !identity.local_mode) {
+          state.authRequired = true;
+          state.authMode = state.auth.invitation_token ? 'register' : (state.registrationOpen ? 'register' : 'login');
+          state.ready = true;
+          return;
+        }
+        state.authRequired = false;
         const [data, skills, methods, profiles, commands] = await Promise.all([
           api(withWorkspace('/api/bootstrap', state.workspaceId)), api(withWorkspace('/api/skills', state.workspaceId)),
           api('/api/analysis/methods'), api(withWorkspace('/api/agent-profiles', state.workspaceId)), api('/api/commands'),
@@ -66,8 +78,33 @@ const Root = {
         state.skills = skills.items; state.analysisMethods = methods.items; state.agentProfiles = profiles.items; state.commands = commands.items;
         localStorage.setItem('meridian-workspace', state.workspaceId);
         await loadMessages(); await loadJobs(); state.ready = true;
-      } catch (error) { fail(error); }
-      finally { state.busy = false; state.busyLabel = ''; }
+      } catch (error) {
+        if (error?.status === 401) state.authRequired = true; else fail(error);
+      }
+      finally { state.busy = false; state.busyLabel = ''; state.authChecking = false; }
+    };
+    const submitAuth = async () => {
+      state.authError = '';
+      try {
+        const path = state.authMode === 'register' ? '/api/auth/register' : state.authMode === 'reset' ? '/api/auth/reset-password' : '/api/auth/login';
+        await api(path, { method:'POST', body:state.auth });
+        if (state.authMode === 'reset') {
+          state.authMode = 'login'; state.auth.password = ''; state.auth.code = '';
+          return;
+        }
+        state.authRequired = false; state.authChecking = true;
+        await bootstrap();
+      } catch (error) { state.authError = error?.message || '认证失败'; }
+    };
+    const sendAuthCode = async () => {
+      state.authError = '';
+      try { await api('/api/auth/send-code', { method:'POST', body:{ email:state.auth.email } }); }
+      catch (error) { state.authError = error?.message || '验证码发送失败'; }
+    };
+    const logout = async () => {
+      await api('/api/auth/logout', { method:'POST' });
+      sessionStorage.removeItem('meridian-csrf');
+      state.user = null; state.authRequired = true; state.authMode = 'login';
     };
     const go = (route) => { state.route = route; location.hash = route; state.sidebarOpen = false; };
     const switchWorkspace = async () => { localStorage.setItem('meridian-workspace', state.workspaceId); await bootstrap(); };
@@ -142,16 +179,31 @@ const Root = {
     onMounted(()=>{bootstrap();window.addEventListener('keydown',keydown);window.addEventListener('hashchange',()=>{state.route=location.hash.slice(1)||'chat'});jobTimer=setInterval(loadJobs,4000);});
     onBeforeUnmount(()=>{clearInterval(jobTimer);window.removeEventListener('keydown',keydown);});
     const filteredCommands=computed(()=>state.commands.filter(item=>(item.name+' '+item.description).toLowerCase().includes(state.commandQuery.toLowerCase())));
-    return { state, routes, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, loadJobs, toggleTheme, command };
+    return { state, routes, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, loadJobs, toggleTheme, command, submitAuth, sendAuthCode, logout };
   },
   template: `
-    <div class="app-shell" :class="{ 'sidebar-visible': state.sidebarOpen }">
+    <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark">经纬</span><p>正在验证会话…</p></div>
+    <main v-else-if="state.authRequired" class="auth-screen">
+      <form class="auth-panel" @submit.prevent="submitAuth">
+        <header><span class="brand__mark"><i></i><i></i><i></i></span><div><h1>经纬</h1><p>企业数据分析工作台</p></div></header>
+        <div class="segmented" v-if="state.registrationOpen"><button type="button" :class="{active:state.authMode==='login'}" @click="state.authMode='login';state.authError=''">登录</button><button type="button" :class="{active:state.authMode==='register'}" @click="state.authMode='register';state.authError=''">创建所有者</button></div>
+        <label v-if="state.authMode==='register'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" required maxlength="80"></label>
+        <label><span>邮箱</span><input v-model.trim="state.auth.email" type="email" autocomplete="email" required></label>
+        <label v-if="state.authMode!=='login'"><span>邮箱验证码</span><span class="auth-code"><input v-model.trim="state.auth.code" inputmode="numeric" maxlength="6"><button class="button button--small" type="button" @click="sendAuthCode">发送验证码</button></span></label>
+        <label><span>密码</span><input v-model="state.auth.password" type="password" :autocomplete="state.authMode==='login'?'current-password':'new-password'" required minlength="8"></label>
+        <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
+        <button class="button button--primary" type="submit">{{ state.authMode==='register' ? '创建并进入' : state.authMode==='reset' ? '重置密码' : '登录' }}</button>
+        <button v-if="state.authMode==='login'" class="text-button" type="button" @click="state.authMode='reset';state.authError=''">忘记密码</button>
+        <button v-else-if="state.authMode==='reset'" class="text-button" type="button" @click="state.authMode='login';state.authError=''">返回登录</button>
+      </form>
+    </main>
+    <div v-else class="app-shell" :class="{ 'sidebar-visible': state.sidebarOpen }">
       <aside class="app-sidebar">
         <header class="brand"><span class="brand__mark"><i></i><i></i><i></i></span><div><b>经纬</b><small>ANALYTICS WORKBENCH</small></div><button class="sidebar-close" @click="state.sidebarOpen=false"><Icon name="close"/></button></header>
         <div class="workspace-switcher"><label>分析空间</label><select v-model="state.workspaceId" @change="switchWorkspace"><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }}</option></select></div>
         <nav class="main-nav"><button v-for="item in routes" :key="item.id" :class="{active:state.route===item.id}" @click="go(item.id)"><Icon :name="item.icon"/><span>{{ item.label }}</span><b v-if="item.id==='automation'&&state.activeJobs">{{ state.activeJobs }}</b></button></nav>
         <section class="sidebar-sessions"><header><span>最近会话</span><button @click="newSession()" title="新会话"><Icon name="plus"/></button></header><button v-for="session in state.sessions.slice(0,6)" :key="session.id" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button></section>
-        <footer class="sidebar-footer"><button @click="state.commandOpen=true"><span>⌘K</span>命令面板</button><div><i :class="{on:state.sources.length}"></i>{{ state.sources.length }} 个数据源已登记</div></footer>
+        <footer class="sidebar-footer"><button @click="state.commandOpen=true"><span>⌘K</span>命令面板</button><button v-if="state.user" @click="logout"><span>{{ state.user.name }}</span>退出</button><div><i :class="{on:state.sources.length}"></i>{{ state.sources.length }} 个数据源已登记</div></footer>
       </aside>
       <main class="app-main">
         <div class="mobile-bar"><button class="icon-button" @click="state.sidebarOpen=true" aria-label="打开导航">☰</button><b>经纬分析工作台</b><button class="icon-button" @click="toggleTheme"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button></div>

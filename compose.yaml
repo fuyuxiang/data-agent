@@ -2,16 +2,38 @@ services:
   analytics-workbench:
     build: .
     ports:
-      - "5001:5001"
+      - "127.0.0.1:${MERIDIAN_PORT:-5001}:5001"
     environment:
-      MERIDIAN_SECRET_KEY: ${MERIDIAN_SECRET_KEY:-replace-before-production}
+      MERIDIAN_ENV: production
+      MERIDIAN_SECRET_KEY: ${MERIDIAN_SECRET_KEY:?MERIDIAN_SECRET_KEY must be set}
+      MERIDIAN_ENCRYPTION_KEY: ${MERIDIAN_ENCRYPTION_KEY:?MERIDIAN_ENCRYPTION_KEY must be set}
+      MERIDIAN_COOKIE_SECURE: ${MERIDIAN_COOKIE_SECURE:-1}
+      MERIDIAN_ALLOWED_ORIGINS: ${MERIDIAN_ALLOWED_ORIGINS:-}
+      MERIDIAN_TRUSTED_HOSTS: ${MERIDIAN_TRUSTED_HOSTS:?MERIDIAN_TRUSTED_HOSTS must be set}
+      MERIDIAN_OUTBOUND_HOST_ALLOWLIST: ${MERIDIAN_OUTBOUND_HOST_ALLOWLIST:?MERIDIAN_OUTBOUND_HOST_ALLOWLIST must be set}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
     volumes:
       - meridian-data:/app/storage
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${MERIDIAN_MEMORY_LIMIT:-4g}
+    cpus: ${MERIDIAN_CPU_LIMIT:-4.0}
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
 
 volumes:
   meridian-data:
-
