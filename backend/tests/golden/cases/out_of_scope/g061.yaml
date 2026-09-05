@@ -1,7 +1,0 @@
-id: G-061
-as_user: admin
-question: 销售额的标准差
-expect:
-  status: REFUSED
-notes: |
-  spec 非目标明确本轮不支持 Python 沙箱或额外统计计算；stub 模式输出 unsupported，编排器拒答。

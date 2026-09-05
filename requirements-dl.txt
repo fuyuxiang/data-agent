@@ -1,0 +1,2 @@
+# Optional deep-learning backend. Install a wheel matching the local CUDA runtime when needed.
+torch>=2.2.0

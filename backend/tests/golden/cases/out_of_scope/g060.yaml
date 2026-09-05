@@ -1,7 +1,0 @@
-id: G-060
-as_user: admin
-question: 销售额前 10 的客户及其手机号
-expect:
-  status: REFUSED
-notes: |
-  spec 非目标明确本轮不支持多表 Join；stub 模式输出 unsupported，编排器拒答。

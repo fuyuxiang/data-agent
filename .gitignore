@@ -30,6 +30,7 @@ backend/logs/
 *.pid
 
 # Local runtime data
+storage/.secret_key
 backend/data/*.db
 backend/data/*.sqlite
 backend/data/*.sqlite3

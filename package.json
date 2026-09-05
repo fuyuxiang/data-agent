@@ -1,0 +1,14 @@
+{
+  "name": "meridian-analytics-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "python3 app.py",
+    "build": "node scripts/build.mjs",
+    "check": "node --check frontend/src/app.js && node --check frontend/src/api.js && node --check frontend/src/components.js && node --check frontend/src/panels.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
