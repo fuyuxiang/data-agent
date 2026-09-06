@@ -55,6 +55,11 @@ def test_independent_workflow_nodes_run_in_parallel_with_manifests_lineage_and_f
     lock = threading.Lock()
     active = 0
     maximum = 0
+    database.put("query_results", {
+        "id": "qry_parallel", "workspace_id": "default", "source_ids": [],
+        "rows": 1, "columns": ["checked"], "data": [{"checked": 1}],
+        "completeness": "complete", "accuracy": "exact",
+    }, workspace_id="default")
 
     def fake_step(step, _config, _context, _workspace_id):
         nonlocal active, maximum
@@ -68,7 +73,9 @@ def test_independent_workflow_nodes_run_in_parallel_with_manifests_lineage_and_f
             return {"report": "经营结论：收入稳定增长", "publication_id": "publication-report"}
         return {
             "metric_sql": {"sql": "SELECT SUM(revenue) FROM data"},
-            "sql": "SELECT SUM(revenue) FROM data", "publication_id": "publication-query",
+            "sql": "SELECT SUM(revenue) FROM data", "result_id": "qry_parallel",
+            "output_refs": ["qry_parallel"], "completeness": "complete",
+            "validation_status": "PASS",
         }
 
     monkeypatch.setattr(workflows, "_execute_step", fake_step)

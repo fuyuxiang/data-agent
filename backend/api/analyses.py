@@ -10,12 +10,14 @@ from flask import Blueprint, Response, current_app, request, stream_with_context
 from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
 from ..services.advanced_agent import available_formal_tools
+from ..services.authorization import require_sources_access
 from ..services.jobs import get_job_manager
 from ..services.knowledge import add_document
 from ..services.results.manifests import ResultService
 from ..services.validation.engine import ValidationEngine
 from .common import (
-    api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id,
+    api_errors, body, current_user_id, db, ok, require_session_access,
+    require_source_access, require_workspace_record, workspace_id,
 )
 
 
@@ -31,6 +33,10 @@ def _require_run(run_id: str, *, write: bool = False) -> dict[str, Any]:
     if not run or run.get("actor_id") != current_user_id():
         # Analysis runs are private even between users in one workspace.
         raise FileNotFoundError("分析任务不存在")
+    require_sources_access(
+        db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
+        actor_id=current_user_id(), action="analyze" if write else "read",
+    )
     if write and run["execution_status"] in {"finished", "cancelled"}:
         raise ValueError("已结束任务不可就地修改，请发起追问、刷新或重新分析")
     return run
@@ -49,11 +55,7 @@ def _snapshot(run: dict[str, Any]) -> dict[str, Any]:
 def _session(payload: dict[str, Any], wid: str) -> dict[str, Any]:
     session_id = str(payload.get("session_id") or "")
     if session_id:
-        session = require_workspace_record("sessions", session_id, wid)
-        owner_id = str(session.get("owner_id") or current_user_id())
-        if owner_id != current_user_id():
-            raise FileNotFoundError("分析会话不存在")
-        return session
+        return require_session_access(session_id, wid)
     session = db().put("sessions", {
         "id": db().new_id("ses"), "workspace_id": wid,
         "name": str(payload.get("title") or payload.get("objective") or payload.get("message") or "新分析")[:100],
@@ -84,10 +86,7 @@ def create_analysis():
     if len(source_ids) > 100:
         raise ValueError("单次分析最多选择 100 个来源")
     for source_id in source_ids:
-        source = require_workspace_record("sources", source_id, wid)
-        allowed_users = source.get("authorized_user_ids")
-        if isinstance(allowed_users, list) and current_user_id() not in allowed_users:
-            raise PermissionError("当前用户无权使用选中来源")
+        require_source_access(source_id, wid, action="analyze")
     provider_id = str(payload.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id, wid)
@@ -406,10 +405,7 @@ def branch_analysis(run_id: str):
     # Reuse the same validated endpoint implementation without issuing an internal HTTP request.
     source_ids = branch_payload["source_ids"]
     for source_id in source_ids:
-        source = require_workspace_record("sources", str(source_id), run["workspace_id"])
-        allowed_users = source.get("authorized_user_ids")
-        if isinstance(allowed_users, list) and current_user_id() not in allowed_users:
-            raise PermissionError("历史任务的来源授权已变化，不能继续分支")
+        require_source_access(str(source_id), run["workspace_id"], action="analyze")
     contract = TaskContract.from_payload(branch_payload["contract"] | {"source_scope": source_ids})
     child, _ = _store().create_run(
         workspace_id=run["workspace_id"], session_id=run["session_id"], actor_id=current_user_id(),

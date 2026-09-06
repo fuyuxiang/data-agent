@@ -18,15 +18,18 @@ export const SourcesPanel = {
     sql: '', queryResult: null, chart: null, analysisMethod: 'profile', analysisParams: '{}', analysisResult: null,
     cleanOps: { drop_duplicates: true, trim_text: true, fill_missing: false, winsorize: false },
     sourceSets: [], selectedSet: '',
+    members: [], governance: { name: '', description: '', classification: 'internal', sensitivity: 'internal', retention_policy: '', restricted: false, authorized_user_ids: [] },
   }),
   computed: {
     state() { return this.ctx.state; },
     active() { return this.state.sources.find(item => item.id === this.activeId) || null; },
+    isWorkspaceOwner() { return !this.state.user || this.state.workspaceRole === 'owner'; },
   },
   watch: { 'state.sources': { handler(items) { if (!this.activeId && items.length) this.select(items[0].id); }, immediate: true } },
-  mounted() { this.loadSets(); },
+  mounted() { this.loadSets(); this.loadMembers(); },
   methods: {
     async loadSets() { this.sourceSets = (await api(withWorkspace('/api/source-sets', this.state.workspaceId))).items; },
+    async loadMembers() { this.members = (await api(`/api/workspaces/${this.state.workspaceId}/members`)).items; },
     async saveSet() { const ids=this.ctx.activeSession()?.source_ids||[];if(!ids.length)return this.ctx.fail(new Error('请先为当前会话选择数据源'));const name=prompt('数据组合名称：','常用分析数据')||'';if(!name)return;await api('/api/source-sets',{method:'POST',body:{name,source_ids:ids,workspace_id:this.state.workspaceId}});await this.loadSets();this.ctx.toast('当前数据源组合已保存','保存成功'); },
     async applySet() { if(!this.selectedSet)return;const session=this.ctx.activeSession();if(!session)return;const result=await api(`/api/source-sets/${this.selectedSet}/apply`,{method:'POST',body:{session_id:session.id}});Object.assign(session,result.session);this.ctx.toast('当前会话的数据源已切换','组合已应用'); },
     async upload(event) {
@@ -52,6 +55,9 @@ export const SourcesPanel = {
     async select(id) {
       this.activeId = id; this.preview = this.profile = this.queryResult = this.chart = this.analysisResult = null;
       await this.ctx.run('', async () => {
+        const source = (await api(`/api/sources/${id}`)).item;
+        const index = this.state.sources.findIndex(item => item.id === id); if (index >= 0) this.state.sources[index] = source;
+        this.governance = { name: source.name || '', description: source.description || '', classification: source.classification || 'internal', sensitivity: source.sensitivity || source.classification || 'internal', retention_policy: source.retention_policy || '', restricted: Array.isArray(source.authorized_user_ids), authorized_user_ids: [...(source.authorized_user_ids || [])] };
         const result = await api(`/api/sources/${id}/preview?limit=100`); this.preview = result.preview;
         this.sql = `SELECT * FROM "${this.preview.table}" LIMIT 200`;
       }, false);
@@ -87,6 +93,13 @@ export const SourcesPanel = {
         this.state.sources.unshift(result.item); this.ctx.toast('已保留原始数据并生成清洗版', '数据处理完成');
       });
     },
+    async saveGovernance() {
+      const payload = { name: this.governance.name, description: this.governance.description, classification: this.governance.classification, sensitivity: this.governance.sensitivity, retention_policy: this.governance.retention_policy };
+      if (this.isWorkspaceOwner) payload.authorized_user_ids = this.governance.restricted ? this.governance.authorized_user_ids : null;
+      const result = await api(`/api/sources/${this.activeId}`, { method: 'PATCH', body: payload });
+      const index = this.state.sources.findIndex(item => item.id === this.activeId); if (index >= 0) this.state.sources[index] = result.item;
+      this.ctx.toast('权限变更会立即作用于查询、Agent、结果和导出','治理策略已保存');
+    },
     async remove(source) {
       if (!confirm(`归档数据源“${source.name}”？原始记录可从回收站恢复。`)) return;
       await api(`/api/sources/${source.id}`, { method: 'DELETE' }); this.state.sources = this.state.sources.filter(item => item.id !== source.id); if (this.activeId === source.id) this.activeId = '';
@@ -105,12 +118,13 @@ export const SourcesPanel = {
         </aside>
         <main v-if="active" class="detail-pane">
           <div class="detail-title"><div><span class="eyebrow">{{ active.kind }} source</span><h2>{{ active.name }}</h2><p>{{ active.filename || active.endpoint || '派生数据集' }}</p></div><div class="header-cluster"><label class="check-control"><input type="checkbox" :checked="ctx.activeSession()?.source_ids?.includes(active.id)" @change="toggleUse(active)">用于当前会话</label><button class="icon-button danger" @click="remove(active)" title="归档"><Icon name="close"/></button></div></div>
-          <nav class="tab-bar"><button :class="{active:detailTab==='preview'}" @click="detailTab='preview'">数据预览</button><button :class="{active:detailTab==='profile'}" @click="loadProfile">质量画像</button><button :class="{active:detailTab==='query'}" @click="detailTab='query'">SQL 控制台</button><button :class="{active:detailTab==='analysis'}" @click="detailTab='analysis'">分析实验室</button><button :class="{active:detailTab==='clean'}" @click="detailTab='clean'">数据处理</button></nav>
+          <nav class="tab-bar"><button :class="{active:detailTab==='preview'}" @click="detailTab='preview'">数据预览</button><button :class="{active:detailTab==='profile'}" @click="loadProfile">质量画像</button><button :class="{active:detailTab==='query'}" @click="detailTab='query'">SQL 控制台</button><button :class="{active:detailTab==='analysis'}" @click="detailTab='analysis'">分析实验室</button><button :class="{active:detailTab==='clean'}" @click="detailTab='clean'">数据处理</button><button :class="{active:detailTab==='governance'}" @click="detailTab='governance'">安全与治理</button></nav>
           <div v-if="detailTab==='preview' && preview" class="panel-stack"><div class="metric-strip"><div><small>记录数</small><b>{{ ctx.number(preview.rows) }}</b></div><div><small>字段数</small><b>{{ preview.columns.length }}</b></div><div><small>数据表</small><b>{{ preview.table }}</b></div></div><DataTable :rows="preview.data" :columns="preview.columns"/></div>
           <div v-if="detailTab==='profile'" class="panel-stack"><div v-if="profile" class="metric-strip"><div class="score"><small>质量评分</small><b>{{ profile.quality_score }}</b><em>/100</em></div><div><small>缺失单元格</small><b>{{ ctx.number(profile.missing_cells) }}</b></div><div><small>重复记录</small><b>{{ ctx.number(profile.duplicate_rows) }}</b></div><div><small>数值字段</small><b>{{ profile.numeric_columns.length }}</b></div></div><DataTable v-if="profile" :rows="profile.columns"/><EmptyState v-else icon="chart" title="尚未生成画像" text="点击“质量画像”即可检查缺失、重复、分布和异常值。"/></div>
           <div v-if="detailTab==='query'" class="panel-stack"><div class="sql-editor"><header><span>只读 SQL</span><button class="button button--small button--primary" @click="runQuery"><Icon name="play"/>运行</button></header><textarea v-model="sql" spellcheck="false"></textarea></div><div v-if="queryResult" class="result-block"><div class="block-heading"><div><b>查询结果</b><small>{{ queryResult.rows }} 行 · {{ queryResult.columns.length }} 列</small></div><button class="button button--small" @click="createChart"><Icon name="chart"/>生成图表</button></div><DataTable :rows="queryResult.data" :columns="queryResult.columns"/><ChartView v-if="chart" :spec="chart"/></div></div>
           <div v-if="detailTab==='analysis'" class="panel-stack"><div class="form-grid form-grid--inline"><label><span>分析方法</span><select v-model="analysisMethod"><option v-for="method in state.analysisMethods" :key="method.id" :value="method.id">{{ method.name }}</option></select></label><label class="grow"><span>参数 JSON</span><input v-model="analysisParams" placeholder='{"columns":["sales"]}'></label><button class="button button--primary align-end" @click="runAnalysis"><Icon name="play"/>执行分析</button></div><pre v-if="analysisResult" class="json-result">{{ JSON.stringify(analysisResult, null, 2) }}</pre><EmptyState v-else icon="brain" title="选择方法开始分析" text="支持质量画像、相关性、分层、聚类、显著性检验、回归、随机森林、预测和异常检测。"/></div>
           <div v-if="detailTab==='clean'" class="panel-stack"><div class="settings-card"><h3>非破坏性数据处理</h3><p>处理结果会保存为新的派生数据集，原始数据保持不变。</p><div class="option-grid"><label><input v-model="cleanOps.drop_duplicates" type="checkbox">删除重复记录</label><label><input v-model="cleanOps.trim_text" type="checkbox">清理文本空白</label><label><input v-model="cleanOps.fill_missing" type="checkbox">用中位数/众数填补缺失</label><label><input v-model="cleanOps.winsorize" type="checkbox">1%–99% 缩尾处理</label></div><button class="button button--primary" @click="applyClean">生成派生数据集</button></div></div>
+          <div v-if="detailTab==='governance'" class="panel-stack"><div class="settings-card"><h3>数据资产信息</h3><p>这些策略会贯穿预览、查询、Agent、派生表、看板与导出。</p><div class="form-grid"><label><span>名称</span><input v-model.trim="governance.name"></label><label><span>分类</span><select v-model="governance.classification"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>敏感级别</span><select v-model="governance.sensitivity"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>保留策略</span><input v-model="governance.retention_policy" placeholder="例如：financial-7y"></label><label class="span-2"><span>资产说明</span><textarea v-model="governance.description"></textarea></label></div></div><div class="settings-card"><h3>细粒度访问范围</h3><p v-if="isWorkspaceOwner">留空表示工作空间成员按角色访问；开启后只有勾选成员可看到并使用。当前所有者必须保留访问权。</p><p v-else>仅工作空间所有者可修改成员白名单；你仍可维护非权限类资产信息。</p><label class="check-control"><input type="checkbox" v-model="governance.restricted" :disabled="!isWorkspaceOwner">启用数据源成员白名单</label><div v-if="governance.restricted" class="option-grid governance-members"><label v-for="member in members" :key="member.user_id"><input type="checkbox" :value="member.user_id" v-model="governance.authorized_user_ids" :disabled="!isWorkspaceOwner">{{ member.name || member.email }} <small>{{ member.role }}</small></label></div><button class="button button--primary" @click="saveGovernance">保存治理策略</button></div></div>
         </main>
         <main v-else class="detail-pane detail-pane--empty"><EmptyState icon="database" title="选择一个数据源" text="查看结构、执行只读查询或进入分析实验室。"/></main>
       </div>
@@ -224,6 +238,103 @@ export const KnowledgePanel = {
     <div v-else class="knowledge-grid"><section class="content-card"><div class="card-heading"><div><h2>检索验收</h2><p>检查 Agent 能否召回正确口径</p></div></div><div class="search-box"><Icon name="search"/><input v-model="query" @keyup.enter="search" placeholder="例如：GMV 的计算口径是什么？"><button @click="search">检索</button></div><div class="search-results"><article v-for="item in results" :key="item.document_id+'-'+item.chunk"><div><b>{{ item.document_name }}</b><span>相关度 {{ Math.round(item.score*100) }}%</span></div><p>{{ item.text }}</p></article><EmptyState v-if="!results.length" icon="search" title="输入问题测试召回" text="结果会显示来源、相关度与原始片段。"/></div></section></div></section>`,
 };
 
+export const SemanticPanel = {
+  components: { DataTable, EmptyState, Icon, Modal, StatusPill }, props: { ctx: Object },
+  data: () => ({
+    models: [], metrics: [], schema: null, open: false, editor: 'model', saving: false,
+    modelForm: { name: '', description: '', source_id: '', table: '', grain: '', default_time_dimension: '', dimensionsText: '[]', measuresText: '[]' },
+    metricForm: { name: '', label: '', description: '', model_id: '', measure: '', aliases: '', unit: '', format: '', status: 'draft' },
+    test: { metric: '', group_by: '', filtersText: '[]', limit: 100 }, testResult: null, testPlan: null,
+  }),
+  computed: {
+    selectedSource() { return this.ctx.state.sources.find(item => item.id === this.modelForm.source_id); },
+    selectedModel() { return this.models.find(item => item.id === this.metricForm.model_id); },
+    modelMeasures() { return this.selectedModel?.measures || []; },
+    approvedMetrics() { return this.metrics.filter(item => item.status === 'approved'); },
+    isWorkspaceOwner() { return !this.ctx.state.user || this.ctx.state.workspaceRole === 'owner'; },
+  },
+  mounted() { this.load(); },
+  methods: {
+    async load() {
+      const wid = this.ctx.state.workspaceId;
+      const [models, metrics] = await Promise.all([
+        api(withWorkspace('/api/semantic/models', wid)), api(withWorkspace('/api/semantic/metrics', wid)),
+      ]);
+      this.models = models.items; this.metrics = metrics.items;
+      if (!this.test.metric && this.approvedMetrics.length) this.test.metric = this.approvedMetrics[0].id;
+    },
+    async openModel() {
+      const source = this.ctx.selectedSources()[0] || this.ctx.state.sources[0];
+      this.modelForm = { name: '', description: '', source_id: source?.id || '', table: '', grain: '', default_time_dimension: '', dimensionsText: '[]', measuresText: '[]' };
+      this.editor = 'model'; this.open = true;
+      if (source) await this.loadSchema();
+    },
+    async loadSchema() {
+      if (!this.modelForm.source_id) { this.schema = null; return; }
+      this.schema = (await api(`/api/sources/${this.modelForm.source_id}/schema`)).schema;
+      const first = this.schema.tables?.[0];
+      if (!first) return;
+      this.modelForm.table = first.name;
+      const dimensions = [], measures = [];
+      for (const column of first.columns || []) {
+        const type = String(column.type || '').toLowerCase();
+        if (/int|decimal|numeric|double|float|real/.test(type)) measures.push({ name: column.name, column: column.name, aggregation: 'sum', label: column.name });
+        else dimensions.push({ name: column.name, column: column.name, type: /date|time/.test(type) ? 'time' : 'categorical', label: column.name });
+      }
+      this.modelForm.dimensionsText = JSON.stringify(dimensions, null, 2);
+      this.modelForm.measuresText = JSON.stringify(measures, null, 2);
+    },
+    useTable() {
+      const table = this.schema?.tables?.find(item => item.name === this.modelForm.table);
+      if (!table) return;
+      const dimensions = [], measures = [];
+      for (const column of table.columns || []) {
+        const type = String(column.type || '').toLowerCase();
+        (/int|decimal|numeric|double|float|real/.test(type) ? measures : dimensions).push(
+          /int|decimal|numeric|double|float|real/.test(type)
+            ? { name: column.name, column: column.name, aggregation: 'sum', label: column.name }
+            : { name: column.name, column: column.name, type: /date|time/.test(type) ? 'time' : 'categorical', label: column.name },
+        );
+      }
+      this.modelForm.dimensionsText = JSON.stringify(dimensions, null, 2); this.modelForm.measuresText = JSON.stringify(measures, null, 2);
+    },
+    openMetric() {
+      this.metricForm = { name: '', label: '', description: '', model_id: this.models[0]?.id || '', measure: '', aliases: '', unit: '', format: '', status: 'draft' };
+      this.metricForm.measure = this.modelMeasures[0]?.name || ''; this.editor = 'metric'; this.open = true;
+    },
+    syncMeasure() { this.metricForm.measure = this.modelMeasures[0]?.name || ''; },
+    async save() {
+      this.saving = true;
+      try {
+        if (this.editor === 'model') {
+          let dimensions, measures;
+          try { dimensions = JSON.parse(this.modelForm.dimensionsText); measures = JSON.parse(this.modelForm.measuresText); }
+          catch { throw new Error('维度和度量必须是合法 JSON 数组'); }
+          await api('/api/semantic/models', { method: 'POST', body: { ...this.modelForm, dimensions, measures, workspace_id: this.ctx.state.workspaceId } });
+        } else {
+          if (!this.isWorkspaceOwner && this.metricForm.status === 'approved') throw new Error('只有工作空间所有者可以直接审批指标，请先保存为草稿');
+          await api('/api/semantic/metrics', { method: 'POST', body: { ...this.metricForm, aliases: this.metricForm.aliases.split(/[,，\n]/).map(value => value.trim()).filter(Boolean), workspace_id: this.ctx.state.workspaceId } });
+        }
+        this.open = false; await this.load(); this.ctx.toast('', this.editor === 'model' ? '语义模型已保存' : '指标已保存');
+      } catch (error) { this.ctx.fail(error); } finally { this.saving = false; }
+    },
+    async approve(metric) { if (!this.isWorkspaceOwner) return this.ctx.fail(new Error('仅工作空间所有者可审批正式指标')); await this.ctx.run('正在审批指标',async()=>{await api(`/api/semantic/metrics/${metric.id}`, { method: 'PATCH', body: { status: 'approved' } }); await this.load();}); },
+    async remove(kind, item) { if(kind==='metrics'&&!this.isWorkspaceOwner)return this.ctx.fail(new Error('仅工作空间所有者可删除指标'));if (!confirm(`删除“${item.label || item.name}”？`)) return; await this.ctx.run('正在删除语义对象',async()=>{await api(`/api/semantic/${kind}/${item.id}`, { method: 'DELETE' }); await this.load();}); },
+    async testMetric() {
+      let filters; try { filters = JSON.parse(this.test.filtersText || '[]'); } catch { return this.ctx.fail(new Error('过滤条件必须是合法 JSON 数组')); }
+      await this.ctx.run('正在执行受治理指标查询', async () => {
+        const result = await api('/api/semantic/query', { method: 'POST', body: { metric: this.test.metric, group_by: this.test.group_by.split(/[,，\n]/).map(value => value.trim()).filter(Boolean), filters, limit: this.test.limit, workspace_id: this.ctx.state.workspaceId } });
+        this.testResult = result.result; this.testPlan = result.plan;
+      });
+    },
+  },
+  template: `<section class="workspace-page"><header class="surface-header"><div><span class="eyebrow">Governed semantic layer</span><h1>指标中心</h1><p>把业务口径绑定到真实字段，由确定性编译器生成 SQL；只有审批后的指标可用于正式问数。</p></div><div class="header-cluster"><button class="button" :disabled="!models.length" @click="openMetric"><Icon name="plus"/>新建指标</button><button class="button button--primary" :disabled="!ctx.state.sources.length" @click="openModel"><Icon name="database"/>新建语义模型</button></div></header>
+    <div class="semantic-studio"><section class="content-card"><div class="card-heading"><div><h2>语义模型</h2><p>{{ models.length }} 个已校验模型</p></div></div><div class="document-list"><article v-for="item in models" :key="item.id"><span class="record-icon"><Icon name="database"/></span><div><b>{{ item.name }} <small>v{{ item.version }}</small></b><small>{{ item.source_table }} · {{ item.dimensions?.length || 0 }} 维度 · {{ item.measures?.length || 0 }} 度量</small></div><StatusPill :status="item.enabled?'ready':'disabled'"/><button class="icon-button danger" @click="remove('models',item)"><Icon name="close"/></button></article><EmptyState v-if="!models.length" icon="database" title="尚未建立语义模型" text="选择数据源和事实表，系统会按字段类型生成可编辑的维度、度量草稿。"/></div></section>
+      <section class="content-card"><div class="card-heading"><div><h2>业务指标</h2><p>{{ approvedMetrics.length }} 个已审批 · {{ metrics.length }} 个版本</p></div></div><div class="document-list"><article v-for="item in metrics" :key="item.id"><span class="record-icon"><Icon name="chart"/></span><div><b>{{ item.label || item.name }}</b><small>{{ item.measure }} · {{ item.unit || '无单位' }} · v{{ item.version }}</small><div class="tag-row"><span v-for="alias in item.aliases" :key="alias">{{ alias }}</span></div></div><StatusPill :status="item.status"/><button v-if="item.status==='draft'" class="button button--small" @click="approve(item)">审批</button><button class="icon-button danger" @click="remove('metrics',item)"><Icon name="close"/></button></article><EmptyState v-if="!metrics.length" icon="chart" title="尚未定义正式指标" text="指标引用语义模型中的一个度量，审批后 Agent 才能执行。"/></div></section>
+      <section class="content-card semantic-test"><div class="card-heading"><div><h2>口径验收</h2><p>用结构化维度和过滤条件验证指标结果</p></div></div><div class="form-grid"><label><span>已审批指标</span><select v-model="test.metric"><option value="">请选择</option><option v-for="item in approvedMetrics" :key="item.id" :value="item.id">{{ item.label || item.name }}</option></select></label><label><span>分组维度（逗号分隔）</span><input v-model="test.group_by" placeholder="region, month"></label><label class="span-2"><span>过滤条件 JSON</span><textarea v-model="test.filtersText" placeholder='[{"dimension":"region","op":"=","value":"华东"}]'></textarea></label><label><span>结果上限</span><input type="number" min="1" max="5000" v-model.number="test.limit"></label><button class="button button--primary align-end" :disabled="!test.metric" @click="testMetric"><Icon name="play"/>执行验收</button></div><div v-if="testResult" class="result-block"><div class="block-heading"><div><b>结果可追溯</b><small>{{ testResult.rows }} 行 · metric@version 已写入证据</small></div></div><DataTable :rows="testResult.data" :columns="testResult.columns"/><details><summary>查看编译计划与 SQL</summary><pre class="json-result">{{ JSON.stringify(testPlan, null, 2) }}</pre></details></div></section></div>
+    <Modal :open="open" :title="editor==='model'?'新建语义模型':'新建业务指标'" wide @close="open=false"><div v-if="editor==='model'" class="form-grid"><label><span>模型名称</span><input v-model.trim="modelForm.name" placeholder="订单事实模型"></label><label><span>数据源</span><select v-model="modelForm.source_id" @change="loadSchema"><option value="">请选择</option><option v-for="item in ctx.state.sources" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label><span>事实表</span><select v-model="modelForm.table" @change="useTable"><option v-for="item in schema?.tables || []" :key="item.name" :value="item.name">{{ item.name }}</option></select></label><label><span>数据粒度</span><input v-model="modelForm.grain" placeholder="一行一笔订单"></label><label class="span-2"><span>说明</span><input v-model="modelForm.description"></label><label class="span-2"><span>维度 JSON</span><textarea class="code-input semantic-code" v-model="modelForm.dimensionsText"></textarea></label><label class="span-2"><span>度量 JSON（至少一项）</span><textarea class="code-input semantic-code" v-model="modelForm.measuresText"></textarea></label><label><span>默认时间维度</span><input v-model="modelForm.default_time_dimension" placeholder="可选"></label></div><div v-else class="form-grid"><label><span>技术名称</span><input v-model.trim="metricForm.name" placeholder="net_revenue"></label><label><span>显示名称</span><input v-model.trim="metricForm.label" placeholder="净收入"></label><label><span>语义模型</span><select v-model="metricForm.model_id" @change="syncMeasure"><option v-for="item in models" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label><span>度量</span><select v-model="metricForm.measure"><option v-for="item in modelMeasures" :key="item.name" :value="item.name">{{ item.label || item.name }}</option></select></label><label><span>别名</span><input v-model="metricForm.aliases" placeholder="营收, 收入"></label><label><span>单位</span><input v-model="metricForm.unit" placeholder="元"></label><label><span>格式</span><input v-model="metricForm.format" placeholder=",.2f"></label><label><span>初始状态</span><select v-model="metricForm.status"><option value="draft">草稿</option><option value="approved">直接审批（所有者）</option></select></label><label class="span-2"><span>口径说明</span><textarea v-model="metricForm.description"></textarea></label></div><template #footer><button class="button" @click="open=false">取消</button><button class="button button--primary" :disabled="saving" @click="save">{{ saving?'保存中…':'保存并校验' }}</button></template></Modal></section>`,
+};
+
 export const AutomationPanel = {
   components: { DataTable, EmptyState, Icon, Modal, StatusPill }, props: { ctx: Object },
   data: () => ({ tab:localStorage.getItem('meridian-automation-tab')||'workflows', workflows:[], runs:[], teams:[], teamRuns:[], hooks:[], schedules:[], jobs:[], open:false, editorMode:'workflow', form:{name:'月度经营复盘',description:'查询核心数据，经审批后交付结果'}, teamForm:{name:'经营诊断小组',objective:'从数据、统计、业务与证据四个角度完成诊断'}, hookForm:{name:'分析完成通知',event:'analysis.completed',actionType:'webhook',url:''}, scheduleForm:{name:'每日分析',workflow_id:'',cron:'0 9 * * *',timezone:'Asia/Shanghai'}, definitionText:'' }),
@@ -231,8 +342,10 @@ export const AutomationPanel = {
   methods: {
     async load() {
       const wid=this.ctx.state.workspaceId;
+      const hooksRequest=this.ctx.state.workspaceRole==='owner'
+        ? api(withWorkspace('/api/hooks',wid)) : Promise.resolve({items:[]});
       const [flows,runs,teams,teamRuns,hooks,schedules,jobs]=await Promise.all([
-        api(withWorkspace('/api/workflows',wid)),api(withWorkspace('/api/workflow-runs',wid)),api(withWorkspace('/api/teams',wid)),api(withWorkspace('/api/team-runs',wid)),api(withWorkspace('/api/hooks',wid)),api(withWorkspace('/api/schedules',wid)),api(withWorkspace('/api/jobs',wid))]);
+        api(withWorkspace('/api/workflows',wid)),api(withWorkspace('/api/workflow-runs',wid)),api(withWorkspace('/api/teams',wid)),api(withWorkspace('/api/team-runs',wid)),hooksRequest,api(withWorkspace('/api/schedules',wid)),api(withWorkspace('/api/jobs',wid))]);
       this.workflows=flows.items;this.runs=runs.items;this.teams=teams.items;this.teamRuns=teamRuns.items;this.hooks=hooks.items;this.schedules=schedules.items;this.jobs=jobs.items;
     },
     newWorkflow(){const source=this.ctx.selectedSources()[0];const table=source?.tables?.[0]?.name||'data';this.definitionText=JSON.stringify({steps:[{id:'query',name:'获取分析数据',type:'query',depends_on:[],config:{source_ids:source?[source.id]:[],sql:source?`SELECT * FROM "${table}" LIMIT 500`:'SELECT 1 AS value'}},{id:'review',name:'人工复核',type:'approval',depends_on:['query'],config:{}},{id:'deliver',name:'交付数据',type:'export_data',depends_on:['review'],config:{format:'xlsx'}}]},null,2);this.editorMode='workflow';this.open=true;},

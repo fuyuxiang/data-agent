@@ -14,25 +14,33 @@ from pptx.dml.color import RGBColor
 from pptx.util import Inches as PptInches, Pt
 
 from ..core.database import Database, utcnow
+from .authorization import require_result_access, require_sources_access
 
 
 def _db() -> Database:
     return current_app.extensions["meridian_db"]
 
 
-def _frame_from_payload(payload: dict, workspace_id: str) -> tuple[pd.DataFrame, str]:
+def _frame_from_payload(
+    payload: dict, workspace_id: str, actor_id: str,
+) -> tuple[pd.DataFrame, str, list[str]]:
     result_id = payload.get("result_id")
     if result_id:
-        result = _db().get("query_results", str(result_id))
-        if not result or result.get("workspace_id", "default") != workspace_id:
-            raise ValueError("查询结果不存在或不属于当前工作空间")
-        return pd.read_csv(result["path"]), str(result.get("sql", ""))
+        result = require_result_access(
+            _db(), _db().get("query_results", str(result_id)), workspace_id=workspace_id,
+            actor_id=actor_id, action="export",
+        )
+        return pd.read_csv(result["path"]), str(result.get("sql", "")), list(result.get("source_ids") or [])
     rows = payload.get("rows")
     if rows is None and (payload.get("sections") or payload.get("slides")):
-        return pd.DataFrame(), str(payload.get("sql", ""))
+        return pd.DataFrame(), str(payload.get("sql", "")), []
     if not isinstance(rows, list):
         raise ValueError("需要 result_id 或 rows")
-    return pd.DataFrame(rows), str(payload.get("sql", ""))
+    source_ids = [str(value) for value in payload.get("source_ids") or []]
+    require_sources_access(
+        _db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="export",
+    )
+    return pd.DataFrame(rows), str(payload.get("sql", "")), source_ids
 
 
 def _safe_spreadsheet_text(value):
@@ -165,6 +173,7 @@ def _render_ppt_outline(payload: dict, path: Path) -> int:
 
 
 def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: dict | None = None) -> dict:
+    metadata = metadata or {}
     return _db().put(
         "artifacts",
         {
@@ -175,7 +184,8 @@ def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: di
             "filename": path.name,
             "path": str(path),
             "size": path.stat().st_size,
-            "metadata": metadata or {},
+            "metadata": metadata,
+            "source_ids": [str(value) for value in metadata.get("source_ids") or []],
             "verification_status": "unverified",
             "status": "ready",
             "created_at": utcnow(),
@@ -184,7 +194,7 @@ def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: di
     )
 
 
-def export_data(payload: dict, workspace_id: str) -> dict:
+def export_data(payload: dict, workspace_id: str, actor_id: str = "local-default") -> dict:
     frames = payload.get("frames") if isinstance(payload.get("frames"), dict) else None
     if frames:
         normalized_frames = {
@@ -193,8 +203,12 @@ def export_data(payload: dict, workspace_id: str) -> dict:
         }
         frame = next(iter(normalized_frames.values()))
         sql = str(payload.get("sql") or "")
+        source_ids = [str(value) for value in payload.get("source_ids") or []]
+        require_sources_access(
+            _db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="export",
+        )
     else:
-        frame, sql = _frame_from_payload(payload, workspace_id)
+        frame, sql, source_ids = _frame_from_payload(payload, workspace_id, actor_id)
         normalized_frames = {"分析结果": frame}
     kind = str(payload.get("format", "xlsx")).lower()
     title = str(payload.get("title") or "分析结果")[:100]
@@ -238,11 +252,12 @@ def export_data(payload: dict, workspace_id: str) -> dict:
     return _artifact(path, kind, workspace_id, title, {
         "rows": sum(len(value) for value in normalized_frames.values()),
         "tables": list(normalized_frames), "columns": list(frame.columns), "sql": sql,
+        "source_ids": source_ids,
     })
 
 
-def export_report(payload: dict, workspace_id: str) -> dict:
-    frame, sql = _frame_from_payload(payload, workspace_id)
+def export_report(payload: dict, workspace_id: str, actor_id: str = "local-default") -> dict:
+    frame, sql, source_ids = _frame_from_payload(payload, workspace_id, actor_id)
     kind = str(payload.get("format", "docx")).lower()
     title = str(payload.get("title") or "数据分析报告")[:100]
     summary = str(payload.get("summary") or "本报告由经纬分析工作台根据已执行的只读查询生成。")
@@ -302,6 +317,7 @@ def export_report(payload: dict, workspace_id: str) -> dict:
             return _artifact(path, kind, workspace_id, title, {
                 "rows": len(frame), "sql": sql, "slides": slide_count,
                 "color_scheme": payload.get("color_scheme") or "mckinsey",
+                "source_ids": source_ids,
             })
         deck = Presentation()
         slide = deck.slides.add_slide(deck.slide_layouts[0])
@@ -337,7 +353,7 @@ def export_report(payload: dict, workspace_id: str) -> dict:
     else:
         raise ValueError("报告格式必须是 docx 或 pptx")
     return _artifact(path, kind, workspace_id, title, {
-        "rows": len(frame), "sql": sql, "sections": len(sections),
+        "rows": len(frame), "sql": sql, "sections": len(sections), "source_ids": source_ids,
     })
 
 
@@ -389,4 +405,8 @@ widgets.forEach((widget,index)=>{{
 addEventListener('resize',()=>document.querySelectorAll('.chart').forEach(root=>echarts.getInstanceByDom(root)?.resize()));
 }})();</script></html>"""
     path.write_text(content, encoding="utf-8")
-    return _artifact(path, "html", workspace_id, dashboard.get("name", "分析看板"), {"dashboard_id": dashboard.get("id")})
+    source_ids = [str(value) for value in dashboard.get("source_ids") or []]
+    return _artifact(
+        path, "html", workspace_id, dashboard.get("name", "分析看板"),
+        {"dashboard_id": dashboard.get("id"), "source_ids": source_ids},
+    )

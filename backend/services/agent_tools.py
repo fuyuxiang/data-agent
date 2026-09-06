@@ -10,6 +10,7 @@ from flask import current_app
 
 from ..core.database import Database
 from .analytics import ANALYSIS_METHODS, clean_frame, profile, run_analysis_with_frames
+from .authorization import require_result_access, require_sources_access
 from .charts import catalog as chart_catalog
 from .charts import make_spec, normalize_chart_type, select_charts
 from .datasets import (
@@ -24,6 +25,7 @@ from .exports import export_data, export_report
 from .knowledge import search as search_knowledge
 from .memory import search_memories
 from .security import SecretVault, safe_http_request
+from .semantic import execute_metric_query, visible_metrics
 from .workspace_tools import WorkspaceFiles
 
 
@@ -45,6 +47,26 @@ BUILTIN_TOOLS = [
         ["question"],
     ),
     _function("get_schema", "Return schemas for every selected data source and the exact table aliases usable in SQL."),
+    _function(
+        "list_semantic_metrics",
+        "List approved governed business metrics. Prefer these metrics over writing raw SQL for official KPIs.",
+    ),
+    _function(
+        "query_metric",
+        "Query one approved business metric through the deterministic semantic SQL compiler.",
+        {
+            "metric": {"type": "string"},
+            "group_by": {
+                "type": "array",
+                "items": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+            },
+            "filters": {"type": "array", "items": {"type": "object"}},
+            "time_range": {"type": "object"},
+            "order_by": {"type": "array", "items": {"type": "object"}},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+        },
+        ["metric"],
+    ),
     _function(
         "query_data",
         "Execute one read-only SQL query over the selected sources and return a bounded result table.",
@@ -208,14 +230,10 @@ class AgentToolContext:
     actor_id: str = ""
 
     def sources(self) -> list[dict]:
-        sources = [self.database.get("sources", source_id) for source_id in self.source_ids]
-        missing = [source_id for source_id, source in zip(self.source_ids, sources) if not source]
-        if missing:
-            raise ValueError(f"数据源不存在或已移除：{', '.join(missing)}")
-        foreign = [source["id"] for source in sources if source.get("workspace_id", "default") != self.workspace_id]
-        if foreign:
-            raise PermissionError(f"数据源不属于当前工作空间：{', '.join(foreign)}")
-        return [source for source in sources if source]
+        return require_sources_access(
+            self.database, self.source_ids, workspace_id=self.workspace_id,
+            actor_id=self.actor_id or "local-default", action="analyze",
+        )
 
 
 def _public_record(value: dict) -> dict:
@@ -301,20 +319,28 @@ def _combined_schema(context: AgentToolContext) -> dict:
                 alias = re.sub(r"[^\w\u4e00-\u9fff]+", "_", f"{source['name']}_{alias}").strip("_")[:80]
             tables.append({**table, "query_name": alias})
         combined.append({"source_id": source["id"], "source_name": source.get("name"), "tables": tables})
-    return {"sources": combined}
+    semantic_metrics = [
+        item for item in visible_metrics(
+            context.database, context.workspace_id, context.actor_id or "local-default",
+        )
+        if item.get("status") == "approved" and item.get("source_id") in context.source_ids
+    ]
+    return {"sources": combined, "semantic_metrics": semantic_metrics}
 
 
 def _frame(context: AgentToolContext, args: dict):
     result_id = str(args.get("result_id") or context.latest_result_id or "")
     if result_id:
-        record = context.database.get("query_results", result_id)
-        if not record or record.get("workspace_id", "default") != context.workspace_id:
-            raise ValueError("查询结果不存在或不属于当前工作空间")
+        require_result_access(
+            context.database, context.database.get("query_results", result_id),
+            workspace_id=context.workspace_id, actor_id=context.actor_id or "local-default",
+        )
         return load_result_frame(result_id), result_id
     source_id = str(args.get("source_id") or (context.source_ids[0] if context.source_ids else ""))
-    source = context.database.get("sources", source_id)
-    if not source or source.get("workspace_id", "default") != context.workspace_id:
-        raise ValueError("请选择当前工作空间中的数据源或查询结果")
+    source = require_sources_access(
+        context.database, [source_id], workspace_id=context.workspace_id,
+        actor_id=context.actor_id or "local-default", action="analyze",
+    )[0]
     return source_table(source, args.get("table") or args.get("table_name"))[1], ""
 
 
@@ -419,16 +445,17 @@ def _dashboard_from_tool(context: AgentToolContext, args: dict) -> dict:
         if widget.get("sql"):
             query = execute_query(
                 context.source_ids, str(widget["sql"]), context.workspace_id,
-                int(widget.get("limit", 1000)),
+                int(widget.get("limit", 1000)), actor_id=context.actor_id or "local-default",
             )
             result_id = query["id"]
         if not result_id:
             result_id = context.latest_result_id
         if not result_id:
             raise ValueError(f"看板组件 {index + 1} 缺少 SQL 或 result_id")
-        result_record = context.database.get("query_results", result_id)
-        if not result_record or result_record.get("workspace_id", "default") != context.workspace_id:
-            raise ValueError("查询结果不存在或不属于当前工作空间")
+        require_result_access(
+            context.database, context.database.get("query_results", result_id),
+            workspace_id=context.workspace_id, actor_id=context.actor_id or "local-default",
+        )
         frame = load_result_frame(result_id)
         kind = str(widget.get("type") or widget.get("chart_type") or "")
         base = {
@@ -475,8 +502,32 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         return {"items": rows}, events
     if name == "get_schema":
         return _combined_schema(context), events
+    if name == "list_semantic_metrics":
+        items = [
+            item for item in visible_metrics(
+                context.database, context.workspace_id, context.actor_id or "local-default",
+            )
+            if item.get("status") == "approved" and item.get("source_id") in context.source_ids
+        ]
+        return {"items": items}, events
+    if name == "query_metric":
+        output = execute_metric_query(
+            context.database, args, context.workspace_id, context.actor_id or "local-default",
+            allowed_source_ids=context.source_ids,
+        )
+        result = output["result"]
+        context.latest_result_id = result["id"]
+        public = _public_record(result)
+        events.extend([
+            ("plan", {"semantic_plan": output["plan"], "sql": result["sql"], "assumptions": []}),
+            ("table", public),
+        ])
+        return {"plan": output["plan"], "result": public}, events
     if name == "query_data":
-        result = execute_query(context.source_ids, str(args.get("sql") or ""), context.workspace_id, int(args.get("limit", 1000)))
+        result = execute_query(
+            context.source_ids, str(args.get("sql") or ""), context.workspace_id,
+            int(args.get("limit", 1000)), actor_id=context.actor_id or "local-default",
+        )
         context.latest_result_id = result["id"]
         public = _public_record(result)
         events.extend([("plan", {"sql": result["sql"], "assumptions": []}), ("table", public)])
@@ -503,7 +554,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
     if name == "run_analysis":
         if args.get("sql") and not args.get("result_id"):
             queried = execute_query(
-                context.source_ids, str(args["sql"]), context.workspace_id, int(args.get("limit", 5000)),
+                context.source_ids, str(args["sql"]), context.workspace_id,
+                int(args.get("limit", 5000)), actor_id=context.actor_id or "local-default",
             )
             context.latest_result_id = queried["id"]
         frame, result_id = _frame(context, args)
@@ -520,6 +572,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         if frames:
             derived = register_derived_tables(
                 frames, context.workspace_id, name=f"{method} 分析结果",
+                source_ids=context.source_ids, actor_id=context.actor_id or "local-default",
             )
             if context.analysis_source_id in context.source_ids:
                 context.source_ids.remove(context.analysis_source_id)
@@ -528,7 +581,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             for table in derived.get("tables", []):
                 safe_table = str(table["name"]).replace('"', '""')
                 query = execute_query(
-                    [derived["id"]], f'SELECT * FROM "{safe_table}"', context.workspace_id, 5000,  # noqa: S608
+                    [derived["id"]], f'SELECT * FROM "{safe_table}"',  # noqa: S608
+                    context.workspace_id, 5000, actor_id=context.actor_id or "local-default",
                 )
                 result_ids[table["name"]] = query["id"]
             if result_ids:
@@ -537,6 +591,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             "analysis_runs",
             {
                 "id": context.database.new_id("ana"), "workspace_id": context.workspace_id,
+                "actor_id": context.actor_id or "local-default",
+                "source_ids": list(context.source_ids),
                 "session_id": context.session_id, "method": analysis["method"],
                 "inputs": {"result_id": result_id or None, "source_id": args.get("source_id"), "params": params},
                 "result": analysis["result"], "status": "completed",
@@ -561,7 +617,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         if args.get("sql") and not args.get("result_id"):
             query = execute_query(
                 context.source_ids, str(args["sql"]), context.workspace_id,
-                int(args.get("limit", 5000)),
+                int(args.get("limit", 5000)), actor_id=context.actor_id or "local-default",
             )
             context.latest_result_id = query["id"]
         frame, result_id = _frame(context, args)
@@ -668,7 +724,12 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             payload["title"] = args.get("title") or args.get("filename") or "数据导出"
         elif not payload["result_id"] and not payload.get("sections"):
             raise ValueError("导出前必须先获得查询结果或提供报告章节")
-        artifact = export_data(payload, context.workspace_id) if name == "export_excel" else export_report(payload, context.workspace_id)
+        payload.setdefault("source_ids", context.source_ids)
+        artifact = (
+            export_data(payload, context.workspace_id, context.actor_id or "local-default")
+            if name == "export_excel"
+            else export_report(payload, context.workspace_id, context.actor_id or "local-default")
+        )
         context.artifact_ids.append(artifact["id"])
         public = _public_record(artifact)
         public["download_url"] = f"/api/artifacts/{artifact['id']}/download"
@@ -694,9 +755,10 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         ).status(), events
     if name == "get_table_detail":
         source_id = str(args.get("source_id") or (context.source_ids[0] if context.source_ids else ""))
-        source = context.database.get("sources", source_id)
-        if not source or source.get("workspace_id", "default") != context.workspace_id:
-            raise ValueError("数据源不存在或不属于当前工作空间")
+        source = require_sources_access(
+            context.database, [source_id], workspace_id=context.workspace_id,
+            actor_id=context.actor_id or "local-default", action="read",
+        )[0]
         schema = schema_for_source(source)
         table_name = args.get("table") or args.get("table_name")
         if not table_name:
@@ -709,11 +771,15 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             raise ValueError(f"数据表不存在：{table_name}")
         return {"source_id": source_id, "table": table}, events
     if name == "create_analysis_table":
-        query = execute_query(context.source_ids, str(args.get("sql") or ""), context.workspace_id, 5000)
+        query = execute_query(
+            context.source_ids, str(args.get("sql") or ""), context.workspace_id, 5000,
+            actor_id=context.actor_id or "local-default",
+        )
         frame = load_result_frame(query["id"])
         derived = register_derived_tables(
             {str(args.get("table_name") or "analysis_data"): frame},
             context.workspace_id, name=str(args.get("table_name") or "分析表"),
+            source_ids=context.source_ids, actor_id=context.actor_id or "local-default",
         )
         context.source_ids.append(derived["id"])
         context.analysis_source_id = derived["id"]
@@ -725,6 +791,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         if args.get("table_names"):
             result = delete_derived_tables(
                 [str(value) for value in args.get("table_names") or []], context.workspace_id,
+                actor_id=context.actor_id or "local-default",
             )
             for source_id in result["archived_sources"]:
                 if source_id in context.source_ids:
@@ -732,9 +799,10 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             return result, events
         archived = []
         for source_id in args.get("source_ids") or []:
-            source = context.database.get("sources", str(source_id))
-            if not source or source.get("workspace_id", "default") != context.workspace_id:
-                raise ValueError("分析表数据源不存在")
+            source = require_sources_access(
+                context.database, [str(source_id)], workspace_id=context.workspace_id,
+                actor_id=context.actor_id or "local-default", action="delete",
+            )[0]
             if source.get("kind") != "derived":
                 raise PermissionError("原始数据源受保护，不能通过分析表工具删除")
             context.database.archive("sources", source["id"])
@@ -778,12 +846,14 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         derived = register_derived_tables(
             {str(args.get("output_table") or "data"): cleaned}, context.workspace_id,
             name=str(args.get("name") or args.get("output_table") or "清洗结果"),
+            source_ids=context.source_ids, actor_id=context.actor_id or "local-default",
         )
         context.source_ids.append(derived["id"])
         table_name = str(args.get("output_table") or "data")
         safe_table = table_name.replace('"', '""')
         query = execute_query(  # The table identifier is escaped immediately above.
-            [derived["id"]], f'SELECT * FROM "{safe_table}"', context.workspace_id, 5000,  # noqa: S608
+            [derived["id"]], f'SELECT * FROM "{safe_table}"',  # noqa: S608
+            context.workspace_id, 5000, actor_id=context.actor_id or "local-default",
         )
         context.latest_result_id = query["id"]
         return {"source": _public_record(derived), "result_id": query["id"], "operations": operation_log}, events
@@ -803,7 +873,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         }
         if not payload.get("result_id") and not payload.get("slides"):
             raise ValueError("PPT 生成需要 slides 大纲或查询结果")
-        artifact = export_report(payload, context.workspace_id)
+        payload.setdefault("source_ids", context.source_ids)
+        artifact = export_report(payload, context.workspace_id, context.actor_id or "local-default")
         context.artifact_ids.append(artifact["id"])
         public = _public_record(artifact) | {"download_url": f"/api/artifacts/{artifact['id']}/download"}
         events.append(("artifact", public))
@@ -878,6 +949,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             source = register_derived_tables(
                 {"data": frame}, context.workspace_id,
                 name=str(args.get("source_name") or "飞书多维表格快照"),
+                actor_id=context.actor_id or "local-default",
             )
             source = context.database.patch("sources", source["id"], {
                 "kind": "lark_table_snapshot", "endpoint": loaded["url"],

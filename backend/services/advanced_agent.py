@@ -18,6 +18,7 @@ from ..agent.store import RunStore
 from ..agent.tools import ToolExecutor, ToolRegistry
 from ..core.database import Database, utcnow
 from .agent_tools import AgentToolContext, execute_tool, tool_schemas
+from .authorization import require_sources_access
 from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefStore
 from .data_plane.factory import livy_adapter, sandbox_client, trino_adapter
 from .datasets import frame_records
@@ -31,7 +32,8 @@ from .validation.engine import Rule, ValidationEngine, outcome
 
 
 FORMAL_AGENT_TOOLS = frozenset({
-    "query_knowledge", "get_schema", "get_table_detail", "query_data", "profile_data",
+    "query_knowledge", "get_schema", "get_table_detail", "list_semantic_metrics",
+    "query_metric", "query_data", "profile_data",
     "run_analysis", "select_chart", "generate_chart", "memory_read", "ask_user",
     "structured_output", "load_analysis_skill", "read_tool_result", "validate_result",
     "update_plan",
@@ -40,21 +42,13 @@ FORMAL_AGENT_TOOLS = frozenset({
 
 
 def _source_authorized(database: Database, run: dict[str, Any]) -> bool:
-    users_exist = bool(database.list("users", include_archived=True, limit=1))
-    if users_exist:
-        membership = next((
-            item for item in database.list("workspace_members", workspace_id=run["workspace_id"], limit=5000)
-            if item.get("user_id") == run["actor_id"] and item.get("enabled", True)
-        ), None)
-        if not membership:
-            return False
-    for source_id in run["source_scope"]:
-        source = database.get("sources", source_id, workspace_id=run["workspace_id"])
-        if not source:
-            return False
-        allowed_users = source.get("authorized_user_ids")
-        if isinstance(allowed_users, list) and run["actor_id"] not in allowed_users:
-            return False
+    try:
+        require_sources_access(
+            database, run["source_scope"], workspace_id=run["workspace_id"],
+            actor_id=run["actor_id"], action="analyze",
+        )
+    except (FileNotFoundError, PermissionError):
+        return False
     return True
 
 
@@ -322,6 +316,7 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     DatasetRefStore(database).put(derived_ref, workspace_id=run["workspace_id"], run_id=run["id"])
     analysis = database.put("analysis_runs", {
         "id": database.new_id("ana"), "workspace_id": run["workspace_id"],
+        "actor_id": run["actor_id"], "source_ids": list(ref.source_refs),
         "session_id": run["session_id"], "agent_run_id": run["id"],
         "method": method or "generated_python", "code": code or None,
         "inputs": {"dataset_ref_id": ref.ref_id, "params": dict(args.get("params") or {})},
@@ -372,8 +367,14 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
                 reason = next((item.get("output") for item in before if item.get("rejected")), "策略拒绝")
                 raise PermissionError(str(reason or "Hook 策略拒绝本次工具调用"))
             value, events = execute_tool(tool_name, arguments, context)
-            if tool_name == "query_data":
-                result = database.get("query_results", str(value.get("id") or ""), workspace_id=run["workspace_id"])
+            if tool_name in {"query_data", "query_metric"}:
+                result_id = (
+                    value.get("id") if tool_name == "query_data"
+                    else (value.get("result") or {}).get("id")
+                )
+                result = database.get(
+                    "query_results", str(result_id or ""), workspace_id=run["workspace_id"],
+                )
                 if result:
                     ref = _dataset_ref(database, run, result)
                     DatasetRefStore(database).put(ref, workspace_id=run["workspace_id"], run_id=run["id"])

@@ -100,6 +100,8 @@ def root_compose_config() -> list[Result]:
             "MERIDIAN_SECRET_KEY": "verifier-session-key-at-least-32-characters",
             "MERIDIAN_ENCRYPTION_KEY": "verifier-encryption-key-at-least-32-characters",
             "MERIDIAN_BACKUP_KEY": "verifier-backup-key-at-least-32-characters",
+            "MERIDIAN_BOOTSTRAP_TOKEN": "verifier-bootstrap-token-at-least-32-characters",
+            "MERIDIAN_METRICS_TOKEN": "verifier-metrics-token-at-least-32-characters",
             "MERIDIAN_TRUSTED_HOSTS": "localhost",
             "MERIDIAN_OUTBOUND_HOST_ALLOWLIST": "api.openai.com",
             "MERIDIAN_SANDBOX_PROXY_TOKEN": "verifier-sandbox-token-at-least-32-characters",
@@ -123,6 +125,7 @@ def probe(check_id: str, url: str, validator=None) -> Result:
 def ci() -> list[Result]:
     test_environment = (
         "MERIDIAN_ENV", "MERIDIAN_SECRET_KEY", "MERIDIAN_ENCRYPTION_KEY", "MERIDIAN_BACKUP_KEY",
+        "MERIDIAN_BOOTSTRAP_TOKEN", "MERIDIAN_METRICS_TOKEN",
         "MERIDIAN_TRUSTED_HOSTS", "MERIDIAN_ALLOWED_ORIGINS", "MERIDIAN_OUTBOUND_HOST_ALLOWLIST",
         "MERIDIAN_ALLOW_PRIVATE_NETWORK", "MERIDIAN_DATABASE_HOST_ALLOWLIST",
         "MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", "MERIDIAN_TEST_POSTGRES_URL", "MERIDIAN_TEST_MYSQL_URL",

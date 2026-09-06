@@ -14,7 +14,9 @@ def _workspace_record(database: Database, collection: str, record_id: str, works
     return record
 
 
-def _fresh_result(database: Database, widget: dict, workspace_id: str) -> dict | None:
+def _fresh_result(
+    database: Database, widget: dict, workspace_id: str, actor_id: str,
+) -> dict | None:
     stored = None
     if widget.get("result_id"):
         stored = _workspace_record(database, "query_results", str(widget["result_id"]), workspace_id)
@@ -27,11 +29,13 @@ def _fresh_result(database: Database, widget: dict, workspace_id: str) -> dict |
         return stored
     for source_id in source_ids:
         _workspace_record(database, "sources", source_id, workspace_id)
-    return execute_query(source_ids, sql, workspace_id)
+    return execute_query(source_ids, sql, workspace_id, actor_id=actor_id)
 
 
-def refresh_widget(database: Database, widget: dict, workspace_id: str) -> dict:
-    result = _fresh_result(database, widget, workspace_id)
+def refresh_widget(
+    database: Database, widget: dict, workspace_id: str, actor_id: str = "local-default",
+) -> dict:
+    result = _fresh_result(database, widget, workspace_id, actor_id)
     refreshed_at = utcnow()
     if not result:
         return {**widget, "refresh_status": "static", "refreshed_at": refreshed_at}
@@ -73,12 +77,15 @@ def refresh_widget(database: Database, widget: dict, workspace_id: str) -> dict:
     return {**base, "chart": chart}
 
 
-def refresh_dashboard(database: Database, dashboard: dict) -> dict:
+def refresh_dashboard(
+    database: Database, dashboard: dict, actor_id: str | None = None,
+) -> dict:
     workspace_id = str(dashboard.get("workspace_id") or "default")
+    actor_id = str(actor_id or dashboard.get("owner_id") or "local-default")
     widgets = []
     for widget in dashboard.get("widgets") or []:
         try:
-            widgets.append(refresh_widget(database, widget, workspace_id))
+            widgets.append(refresh_widget(database, widget, workspace_id, actor_id))
         except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
             widgets.append({
                 **widget, "refresh_status": "error", "refresh_error": str(exc), "refreshed_at": utcnow(),

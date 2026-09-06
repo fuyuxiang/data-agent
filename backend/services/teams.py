@@ -13,6 +13,7 @@ from ..agent.model import build_model_adapter
 from ..agent.store import RunStore
 from ..core.database import Database, utcnow
 from .advanced_agent import _source_authorized, available_formal_tools, build_executor
+from .authorization import require_session_access, require_sources_access
 from .jobs import get_job_manager, register_job_handler
 from .models import resolve_provider
 from .results.manifests import ResultService
@@ -84,6 +85,10 @@ def run_team_member(
     database = _db()
     session = database.get("sessions", session_id) or {}
     actor_id = str(actor_id or session.get("owner_id") or "local-default")
+    if session:
+        session = require_session_access(
+            database, session_id, workspace_id=team["workspace_id"], actor_id=actor_id,
+        )
     requested = _allowed_tools(effective, profile) | {"validate_result", "update_plan"}
     available = set(available_formal_tools(database, team["workspace_id"], session_id, source_ids))
     allowed = sorted(requested & available)
@@ -311,10 +316,20 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
     if not task:
         raise ValueError("协作任务不能为空")
     source_ids = [str(item) for item in payload.get("source_ids") or (existing_run or {}).get("source_ids") or []]
-    for source_id in source_ids:
-        source = _db().get("sources", source_id, workspace_id=team["workspace_id"])
-        if not source:
-            raise PermissionError("团队任务引用的数据源不属于当前工作空间")
+    requested_actor = str((existing_run or {}).get("actor_id") or payload.get("actor_id") or "")
+    if not requested_actor:
+        requested_session = _db().get("sessions", str(payload.get("session_id") or "")) or {}
+        requested_actor = str(requested_session.get("owner_id") or "local-default")
+    requested_session_id = str(payload.get("session_id") or (existing_run or {}).get("session_id") or "")
+    if requested_session_id:
+        require_session_access(
+            _db(), requested_session_id, workspace_id=team["workspace_id"],
+            actor_id=requested_actor,
+        )
+    require_sources_access(
+        _db(), source_ids, workspace_id=team["workspace_id"], actor_id=requested_actor,
+        action="analyze",
+    )
     if existing_run:
         run = _db().patch(
             "team_runs", existing_run["id"],

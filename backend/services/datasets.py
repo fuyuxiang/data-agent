@@ -25,7 +25,8 @@ from werkzeug.utils import secure_filename
 
 from ..core.database import Database, utcnow
 from .security import SecretVault, safe_http_request, validate_outbound_host, validate_outbound_url
-from .sql_security import bounded_read_only_sql, validate_read_only_sql
+from .authorization import require_sources_access
+from .sql_security import bounded_read_only_sql, validate_query_tables, validate_read_only_sql
 
 
 SUPPORTED_FILE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}
@@ -772,9 +773,16 @@ def public_source(source: dict) -> dict:
 
 def register_derived_tables(
     frames: dict[str, pd.DataFrame], workspace_id: str, *, name: str = "分析结果",
+    source_ids: list[str] | None = None, actor_id: str = "local-default",
 ) -> dict:
     if not frames:
         raise ValueError("没有可保存的分析结果表")
+    from .authorization import inherited_sources_policy, require_sources_access
+
+    parent_ids = list(dict.fromkeys(str(value) for value in source_ids or [] if value))
+    parents = require_sources_access(
+        db(), parent_ids, workspace_id=workspace_id, actor_id=actor_id, action="analyze",
+    )
     source_id = db().new_id("src")
     path = settings().upload_dir / f"{source_id}.xlsx"
     used: set[str] = set()
@@ -803,18 +811,23 @@ def register_derived_tables(
             "id": source_id, "workspace_id": workspace_id, "name": str(name)[:120],
             "kind": "derived", "format": "xlsx", "path": str(path), "tables": tables,
             "status": "ready", "last_refreshed_at": utcnow(),
+            "lineage": {"operation": "derived_analysis", "source_ids": parent_ids},
+            **inherited_sources_policy(parents),
         },
         workspace_id=workspace_id,
     )
     db().audit(
         "analysis.tables_created", workspace_id=workspace_id,
         object_type="source", object_id=source_id,
-        detail={"tables": [table["name"] for table in tables]},
+        actor=actor_id,
+        detail={"tables": [table["name"] for table in tables], "source_ids": parent_ids},
     )
     return record
 
 
-def delete_derived_tables(table_names: list[str], workspace_id: str) -> dict:
+def delete_derived_tables(
+    table_names: list[str], workspace_id: str, *, actor_id: str = "local-default",
+) -> dict:
     """Remove exact tables from derived workbooks while protecting raw sources."""
     requested = {str(value).strip() for value in table_names if str(value).strip()}
     if not requested:
@@ -824,6 +837,13 @@ def delete_derived_tables(table_names: list[str], workspace_id: str) -> dict:
     updated_sources: list[str] = []
     for source in db().list("sources", workspace_id=workspace_id, limit=5000):
         if source.get("kind") != "derived":
+            continue
+        try:
+            require_sources_access(
+                db(), [source["id"]], workspace_id=workspace_id,
+                actor_id=actor_id, action="delete",
+            )
+        except PermissionError:
             continue
         tables = list(source.get("tables") or [])
         matched = [
@@ -958,17 +978,71 @@ def preview_source(source: dict, table_name: str | None = None, limit: int = 100
     }
 
 
-def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int = 1000) -> dict:
-    statement = validate_read_only_sql(sql)
-    limit = max(1, min(int(limit), settings().max_query_rows))
-    sources = [db().get("sources", source_id) for source_id in source_ids]
-    if not all(sources):
-        raise ValueError("一个或多个数据源不存在")
-    if any(source.get("workspace_id", "default") != workspace_id for source in sources):
-        raise ValueError("一个或多个数据源不属于当前工作空间")
+def _query_table_scope(sources: list[dict]) -> set[str]:
+    allowed: set[str] = set()
+    if len(sources) == 1 and sources[0].get("kind") == "database":
+        source = sources[0]
+        selected = {str(value) for value in source.get("analysis_tables") or [] if str(value)}
+        for table in source.get("tables") or []:
+            name = str(table.get("source_name") or table.get("name") or "").strip()
+            if selected and name not in selected and str(table.get("name") or "") not in selected:
+                continue
+            schema_name = str(table.get("schema_name") or source.get("schema_name") or "").strip()
+            if name:
+                allowed.add(name.lower())
+                if schema_name:
+                    allowed.add(f"{schema_name}.{name}".lower())
+        return allowed
+    used: set[str] = set()
+    for source in sources:
+        for table_name in source_frames(source):
+            base = _sanitize_table_name(table_name)
+            name = base if base not in used else _sanitize_table_name(f"{source['name']}_{base}")
+            used.add(name)
+            allowed.add(name.lower())
+    return allowed
+
+
+def _enforce_result_size(frame: pd.DataFrame) -> None:
+    max_cell = settings().max_query_cell_bytes
+    for column in frame.select_dtypes(include=["object", "string"]).columns:
+        oversized = frame[column].dropna().map(
+            lambda value: len(str(value).encode("utf-8", errors="replace")) > max_cell,
+        )
+        if bool(oversized.any()):
+            raise ValueError("查询结果包含超过单元格安全上限的内容")
+    if int(frame.memory_usage(index=True, deep=True).sum()) > settings().max_query_bytes:
+        raise ValueError("查询结果超过服务端字节上限，请先聚合或缩小范围")
+
+
+def execute_query(
+    source_ids: list[str], sql: str, workspace_id: str, limit: int = 1000, *,
+    actor_id: str = "local-default",
+) -> dict:
+    source_ids = list(dict.fromkeys(str(value) for value in source_ids if str(value)))
+    if not source_ids:
+        raise ValueError("请选择数据源")
+    sources = require_sources_access(
+        db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="query",
+    )
     if len(sources) > 1 and any(source.get("kind") == "database" for source in sources):
         raise ValueError("数据库数据源不能与其他数据源直接联邦查询；请先生成受控快照后再关联")
-    parsed = sqlglot.parse_one(statement)
+    limit = max(1, min(int(limit), settings().max_query_rows))
+    dialect = None
+    engine = None
+    if len(sources) == 1 and sources[0]["kind"] == "database":
+        vault = SecretVault(current_app.config["VAULT_KEY"])
+        url = vault.open(sources[0].get("credential", ""), {}).get("url")
+        engine = _database_engine(url)
+        dialect = _dialect_name(engine)
+    try:
+        statement = validate_read_only_sql(sql, dialect)
+        referenced_tables = validate_query_tables(statement, _query_table_scope(sources), dialect)
+    except Exception:
+        if engine is not None:
+            engine.dispose()
+        raise
+    parsed = sqlglot.parse_one(statement, read=dialect)
     raw_limit = parsed.args.get("limit")
     requested_top_n = None
     if raw_limit and isinstance(raw_limit.expression, sql_exp.Literal) and not raw_limit.expression.is_string:
@@ -980,9 +1054,8 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
     # A single database source executes on its native engine to preserve dialect.
     if len(sources) == 1 and sources[0]["kind"] == "database":
         source = sources[0]
-        vault = SecretVault(current_app.config["VAULT_KEY"])
-        url = vault.open(source.get("credential", ""), {}).get("url")
-        engine = _database_engine(url)
+        if engine is None:
+            raise RuntimeError("数据库查询引擎未初始化")
         try:
             with engine.connect() as connection:
                 _configure_read_only(connection, settings().query_timeout_seconds)
@@ -1022,18 +1095,25 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
     system_truncated = len(frame) > limit
     if system_truncated:
         frame = frame.head(limit).copy()
+    _enforce_result_size(frame)
     source_partial = any(source.get("ingestion_completeness") == "partial" for source in sources)
     completeness = "system_truncated" if system_truncated else "source_partial" if source_partial else "complete"
     query_id = db().new_id("qry")
     result_path = settings().export_dir / f"{query_id}.csv"
     frame.to_csv(result_path, index=False)
+    if result_path.stat().st_size > settings().max_query_bytes:
+        result_path.unlink(missing_ok=True)
+        raise ValueError("查询结果超过服务端字节上限，请先聚合或缩小范围")
     result = db().put(
         "query_results",
         {
             "id": query_id,
             "workspace_id": workspace_id,
             "source_ids": source_ids,
+            "actor_id": actor_id,
             "sql": statement,
+            "referenced_tables": referenced_tables,
+            "encoded_bytes": result_path.stat().st_size,
             "rows": int(len(frame)),
             "returned_rows": int(len(frame)),
             "total_rows": int(len(frame)) if completeness == "complete" else None,
@@ -1046,7 +1126,11 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
         },
         workspace_id=workspace_id,
     )
-    db().audit("query.executed", workspace_id=workspace_id, object_type="query", object_id=query_id, detail={"sql": statement, "rows": len(frame)})
+    db().audit(
+        "query.executed", workspace_id=workspace_id, actor=actor_id,
+        object_type="query", object_id=query_id,
+        detail={"sql": statement, "rows": len(frame), "tables": referenced_tables},
+    )
     return result
 
 

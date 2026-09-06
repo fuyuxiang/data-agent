@@ -27,6 +27,7 @@
 | 正式自主分析 | 四段任务契约确认、唯一 AgentLoop、Chat Completions/Responses 协议、滚动计划、持久化 Action/预算/事件；通过 JSON/SSE 展示真实状态 |
 | 数据目录 | 上传 CSV、TSV、Excel、JSON/JSON Lines、Parquet；连接 SQLite、PostgreSQL、MySQL、SQL Server、HTTP JSON、Google Sheets 和飞书多维表格 |
 | 数据处理 | 数据预览、质量画像、缺失/重复/异常检查、文本规整、缺失填充、缩尾和派生数据集；清洗不覆盖原始数据 |
+| 语义指标 | 版本化语义模型、维度/度量绑定、固定口径过滤、owner 审批、确定性 SQL 编译与 `metric@version` 证据回放 |
 | 统计与建模 | 相关分析、十分位分层、K-Means、A/B 检验、线性/逻辑回归、决策树、随机森林、梯度提升、特征筛选、异常检测以及 ARIMA、SARIMA、VAR、Prophet 风格和神经网络预测 |
 | 知识与记忆 | 导入 TXT、Markdown、HTML、CSV、JSON、PDF、Word 和 Excel 知识文档；管理指标口径、业务规则、背景知识、会话临时指令和长期记忆 |
 | 自动化与协作 | 版本化工作流、依赖图、并行 Agent 节点、人工审批、重试、调度、生命周期 Hook、后台任务、多顾问团队和证据复核 |
@@ -192,6 +193,8 @@ flowchart LR
 | `MERIDIAN_SECRET_KEY` | 开发环境自动生成 | 会话签名密钥；生产环境至少 32 字符 |
 | `MERIDIAN_ENCRYPTION_KEY` | 开发环境复用会话密钥 | 外部凭据静态加密密钥；生产必须独立持久化 |
 | `MERIDIAN_BACKUP_KEY` | 空 | 备份加密密钥；生产必须与前两个密钥不同 |
+| `MERIDIAN_BOOTSTRAP_TOKEN` | 空 | 生产首位系统所有者的一次性初始化令牌，至少 32 字符 |
+| `MERIDIAN_METRICS_TOKEN` | 空 | Prometheus `/api/metrics` Bearer Token；生产必须至少 32 字符 |
 | `MERIDIAN_TRUSTED_HOSTS` | 空 | 允许访问应用的 Host；生产必填 |
 | `MERIDIAN_ALLOWED_ORIGINS` | 本机开发地址 | 允许携带凭据调用 API 的 Origin |
 | `MERIDIAN_OUTBOUND_HOST_ALLOWLIST` | 空 | 模型、MCP、HTTP 数据源、Webhook 等出站目标域名；生产必填 |
@@ -201,6 +204,8 @@ flowchart LR
 | `MERIDIAN_COOKIE_SECURE` | 生产为 `1` | 仅允许在 HTTPS 上发送会话 Cookie |
 | `MERIDIAN_MAX_UPLOAD_MB` | `100` | 单次上传大小上限 |
 | `MERIDIAN_MAX_QUERY_ROWS` | `10000` | 服务端查询结果行上限 |
+| `MERIDIAN_MAX_QUERY_MB` | `20` | 单次查询物化结果的编码/内存字节上限（MB） |
+| `MERIDIAN_MAX_QUERY_CELL_KB` | `1024` | 单个字符串或二进制结果单元格上限（KB） |
 | `MERIDIAN_QUERY_TIMEOUT_SECONDS` | `30` | 外部数据库查询超时 |
 | `MERIDIAN_DAILY_TOKEN_LIMIT` | `1000000` | 每工作空间每日模型 token 配额 |
 | `MERIDIAN_SANDBOX_IMAGE` | `meridian-sandbox:py311-20260906` | 固定的有界 Python 执行镜像；禁止 `latest` |
@@ -220,6 +225,8 @@ flowchart LR
 export MERIDIAN_SECRET_KEY="$(openssl rand -hex 32)"
 export MERIDIAN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 export MERIDIAN_BACKUP_KEY="$(openssl rand -hex 32)"
+export MERIDIAN_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)"
+export MERIDIAN_METRICS_TOKEN="$(openssl rand -hex 32)"
 export MERIDIAN_TRUSTED_HOSTS="analytics.example.com"
 export MERIDIAN_ALLOWED_ORIGINS="https://analytics.example.com"
 export MERIDIAN_OUTBOUND_HOST_ALLOWLIST="api.openai.com"
@@ -229,10 +236,10 @@ export MERIDIAN_SANDBOX_PROXY_TOKEN="$(openssl rand -hex 32)"
 docker compose --profile sandbox-build build
 docker compose up -d analytics-workbench sandbox-proxy
 docker compose ps
-curl --fail http://127.0.0.1:5001/api/ready
+curl --fail http://127.0.0.1:5001/api/health
 ```
 
-Compose 默认只将服务映射到主机 `127.0.0.1`。Web/Agent 容器不挂载 Docker socket；只有 `sandbox-proxy` 持有 socket，且其鉴权 API 仅接收固定镜像、固定挂载根和固定资源边界的 JobSpec。生成代码容器使用非 root 用户、无网络、只读根和输入；代理或镜像不可用时必须 fail closed。请在前方配置 HTTPS 反向代理，并将对外域名精确写入 `MERIDIAN_TRUSTED_HOSTS` 和 `MERIDIAN_ALLOWED_ORIGINS`。所有实际使用的模型、MCP、HTTP 数据源和通知服务域名都应纳入出站白名单。
+Compose 默认只将服务映射到主机 `127.0.0.1`。首次打开页面时还必须输入部署时生成的 `MERIDIAN_BOOTSTRAP_TOKEN`；创建首位所有者后注册入口自动关闭。Web/Agent 容器不挂载 Docker socket；只有 `sandbox-proxy` 持有 socket，且其鉴权 API 仅接收固定镜像、固定挂载根和固定资源边界的 JobSpec。生成代码容器使用非 root 用户、无网络、只读根和输入；代理或镜像不可用时必须 fail closed。请在前方配置 HTTPS 反向代理，并将对外域名精确写入 `MERIDIAN_TRUSTED_HOSTS` 和 `MERIDIAN_ALLOWED_ORIGINS`。所有实际使用的模型、MCP、HTTP 数据源和通知服务域名都应纳入出站白名单。
 
 ### 主机部署
 
@@ -262,7 +269,7 @@ python app.py
 ### 健康检查
 
 - `GET /api/health`：进程与数据库基础健康状态。
-- `GET /api/ready`：数据库可用性、存储可写性、调度器和 sandbox 能力；无 sandbox 不阻断只读浏览，但能力会明确标记为 unavailable。
+- `GET /api/ready`：业务就绪检查；生产环境在所有者、模型和 sandbox 任一未就绪时返回 503，但响应会精确列出缺失项。
 - `GET /api/compute/status`：分别返回本地 sandbox 代理与远程数据面能力。
 
 ## 备份与恢复
@@ -367,7 +374,7 @@ python scripts/verify_advanced_agent.py --profile release
 - **数据不覆盖：** 清洗结果作为新派生数据集保存；常规删除进入可恢复的归档/回收站，永久删除需显式确认。
 - **秘密保护：** 模型、数据源、MCP 和通知凭据使用应用主密钥加密落库，API 只返回脱敏状态。
 - **出站防护：** 外部 HTTP 请求校验 scheme、域名白名单和解析后 IP，默认禁止本机、内网、链路本地与保留地址，并限制重定向和响应体大小。
-- **身份与隔离：** 生产环境强制登录，工作空间成员和敏感配置操作按角色授权；写请求受 Origin 和 CSRF 校验保护。
+- **身份与隔离：** 生产环境强制登录，首位所有者需初始化令牌；工作空间角色、数据源成员白名单和私有会话所有权同时生效，且结果、看板、任务、快照与导出会重新检查当前数据授权；写请求受 Origin 和 CSRF 校验保护。
 - **受控执行：** stdio MCP 默认关闭；Agent 不具备宿主写改删、Shell/Git、自改 Hook 或任意远程代码能力；Docker sandbox 缺失时 fail closed。
 - **可追溯：** 查询、分析、工具调用、工作流、快照恢复和交付动作保留审计证据。
 

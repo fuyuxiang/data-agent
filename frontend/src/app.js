@@ -1,6 +1,6 @@
 import { api, withWorkspace } from './api.js';
 import { Icon, Modal, StatusPill, ToastStack } from './components.js';
-import { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, KnowledgePanel, SettingsPanel, SourcesPanel } from './panels.js';
+import { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, KnowledgePanel, SemanticPanel, SettingsPanel, SourcesPanel } from './panels.js';
 
 const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
@@ -8,6 +8,7 @@ const routes = [
   { id: 'chat', label: '分析会话', icon: 'chat' },
   { id: 'sources', label: '数据目录', icon: 'database' },
   { id: 'knowledge', label: '业务知识', icon: 'book' },
+  { id: 'semantic', label: '指标中心', icon: 'chart' },
   { id: 'automation', label: '自动化中心', icon: 'workflow' },
   { id: 'dashboards', label: '分析看板', icon: 'dashboard' },
   { id: 'feishu', label: '飞书机器人', icon: 'workflow' },
@@ -15,13 +16,13 @@ const routes = [
 ];
 
 const Root = {
-  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, Icon, KnowledgePanel, Modal, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
+  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, Icon, KnowledgePanel, Modal, SemanticPanel, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
   setup() {
     const state = reactive({
       ready: false, authChecking: true, authRequired: false, registrationOpen: false,
-      authMode: 'login', authError: '', auth: { email:'', password:'', name:'', invitation_token:new URLSearchParams(location.search).get('invite') || '' }, user: null,
+      authMode: 'login', authError: '', bootstrapRequired: false, auth: { email:'', password:'', name:'', invitation_token:new URLSearchParams(location.search).get('invite') || '', bootstrap_token:'' }, user: null,
       route: location.hash.slice(1) || 'chat', sidebarOpen: false,
-      workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [],
+      workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [], workspaceRole: '',
       sessions: [], activeSessionId: '', sources: [], providers: [], skills: [], analysisMethods: [], agentProfiles: [],
       busy: false, busyLabel: '', toasts: [], jobsOpen: false, jobs: [], activeJobs: 0,
       commandOpen: false, commands: [], commandQuery: '', theme: document.documentElement.dataset.theme || 'light',
@@ -50,7 +51,7 @@ const Root = {
       state.busy = true; state.busyLabel = '正在准备工作空间';
       try {
         const identity = await api('/api/auth/me');
-        state.user = identity.user; state.registrationOpen = !!identity.registration_open || !!state.auth.invitation_token;
+        state.user = identity.user; state.registrationOpen = !!identity.registration_open || !!state.auth.invitation_token; state.bootstrapRequired = !!identity.bootstrap_required;
         if (identity.csrf_token) sessionStorage.setItem('meridian-csrf', identity.csrf_token);
         if (!identity.authenticated && !identity.local_mode) {
           state.authRequired = true;
@@ -64,6 +65,7 @@ const Root = {
           api('/api/analysis/methods'), api(withWorkspace('/api/agent-profiles', state.workspaceId)), api('/api/commands'),
         ]);
         state.workspaces = data.workspaces; state.workspaceId = data.active_workspace?.id || 'default';
+        state.workspaceRole = data.active_membership?.role || (!state.user ? 'owner' : '');
         state.sessions = data.sessions; state.sources = data.sources; state.providers = data.providers;
         state.activeSessionId = data.active_session?.id || data.sessions[0]?.id || '';
         state.skills = skills.items; state.analysisMethods = methods.items; state.agentProfiles = profiles.items; state.commands = commands.items;
@@ -84,6 +86,7 @@ const Root = {
           return;
         }
         state.authRequired = false; state.authChecking = true;
+        state.auth.password = ''; state.auth.bootstrap_token = '';
         await bootstrap();
       } catch (error) { state.authError = error?.message || '认证失败'; }
     };
@@ -145,9 +148,10 @@ const Root = {
         <header><span class="brand__mark"><i></i><i></i><i></i></span><div><h1>经纬</h1><p>企业数据分析工作台</p></div></header>
         <div class="segmented" v-if="state.registrationOpen"><button type="button" :class="{active:state.authMode==='login'}" @click="state.authMode='login';state.authError=''">登录</button><button type="button" :class="{active:state.authMode==='register'}" @click="state.authMode='register';state.authError=''">创建所有者</button></div>
         <label v-if="state.authMode==='register'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" required maxlength="80"></label>
+        <label v-if="state.authMode==='register' && state.bootstrapRequired && !state.auth.invitation_token"><span>初始化令牌</span><input v-model="state.auth.bootstrap_token" type="password" autocomplete="off" required><small>由部署管理员从 MERIDIAN_BOOTSTRAP_TOKEN 安全交付。</small></label>
         <label><span>邮箱</span><input v-model.trim="state.auth.email" type="email" autocomplete="email" required></label>
         <label v-if="state.authMode!=='login'"><span>邮箱验证码</span><span class="auth-code"><input v-model.trim="state.auth.code" inputmode="numeric" maxlength="6"><button class="button button--small" type="button" @click="sendAuthCode">发送验证码</button></span></label>
-        <label><span>密码</span><input v-model="state.auth.password" type="password" :autocomplete="state.authMode==='login'?'current-password':'new-password'" required minlength="8"></label>
+        <label><span>密码</span><input v-model="state.auth.password" type="password" :autocomplete="state.authMode==='login'?'current-password':'new-password'" required minlength="12"></label>
         <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
         <button class="button button--primary" type="submit">{{ state.authMode==='register' ? '创建并进入' : state.authMode==='reset' ? '重置密码' : '登录' }}</button>
         <button v-if="state.authMode==='login'" class="text-button" type="button" @click="state.authMode='reset';state.authError=''">忘记密码</button>
@@ -167,6 +171,7 @@ const Root = {
         <ChatPanel v-if="state.route==='chat'" :ctx="ctx"/>
         <SourcesPanel v-else-if="state.route==='sources'" :ctx="ctx"/>
         <KnowledgePanel v-else-if="state.route==='knowledge'" :ctx="ctx" :key="state.workspaceId"/>
+        <SemanticPanel v-else-if="state.route==='semantic'" :ctx="ctx" :key="state.workspaceId"/>
         <AutomationPanel v-else-if="state.route==='automation'" :ctx="ctx" :key="state.workspaceId"/>
         <DashboardsPanel v-else-if="state.route==='dashboards'" :ctx="ctx" :key="state.workspaceId"/>
         <FeishuBotPanel v-else-if="state.route==='feishu'" :ctx="ctx" :key="state.workspaceId+'-'+state.activeSessionId"/>

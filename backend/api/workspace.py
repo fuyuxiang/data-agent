@@ -12,6 +12,7 @@ from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
 from ..services.memory import consolidate_memories, search_memories
+from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
@@ -21,6 +22,8 @@ from .common import (
     db,
     ok,
     require_record,
+    require_session_access,
+    require_source_access,
     require_workspace_access,
     require_workspace_record,
     workspace_id,
@@ -34,14 +37,23 @@ bp = Blueprint("workspace", __name__)
 @bp.get("/api/bootstrap")
 def bootstrap():
     wid = workspace_id()
-    sessions = db().list("sessions", workspace_id=wid)
+    sessions = filter_authorized_sessions(
+        db(), db().list("sessions", workspace_id=wid),
+        workspace_id=wid, actor_id=current_user_id(),
+    )
     active_session = next((item for item in sessions if item.get("status") == "active"), sessions[0] if sessions else None)
     return ok(
         workspaces=[item for item in db().list("workspaces") if workspace_membership(item["id"])],
         active_workspace=db().get("workspaces", wid) or db().get("workspaces", "default"),
+        active_membership=workspace_membership(wid),
         sessions=sessions,
         active_session=active_session,
-        sources=[_public_source(item) for item in db().list("sources", workspace_id=wid)],
+        sources=[
+            _public_source(item) for item in filter_authorized_sources(
+                db(), db().list("sources", workspace_id=wid),
+                workspace_id=wid, actor_id=current_user_id(),
+            )
+        ],
         providers=[
             _public_provider(item) for item in db().list("providers")
             if item["id"] == "environment-default" or item.get("workspace_id", "default") == wid
@@ -309,7 +321,7 @@ def register_workspace_file(record_id: str):
 @bp.get("/api/workspaces/<record_id>/storage")
 @api_errors
 def workspace_storage(record_id: str):
-    require_workspace_access(record_id)
+    require_workspace_access(record_id, owner=True)
     collections = ("sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards", "decision_maps")
     summary = []
     total_size = 0
@@ -331,7 +343,7 @@ def workspace_storage(record_id: str):
 @bp.post("/api/workspaces/<record_id>/checkpoints")
 @api_errors
 def create_checkpoint(record_id: str):
-    workspace = require_workspace_access(record_id, write=True)
+    workspace = require_workspace_access(record_id, owner=True)
     snapshot_id = db().new_id("snap")
     files = WorkspaceFiles(db(), record_id, set(), str(body().get("session_id") or ""))
     snapshot_root = (
@@ -387,7 +399,7 @@ def create_checkpoint(record_id: str):
 
 @bp.get("/api/workspaces/<record_id>/checkpoints")
 def list_checkpoints(record_id: str):
-    require_workspace_access(record_id)
+    require_workspace_access(record_id, owner=True)
     return ok(items=[{
         key: value for key, value in item.items()
         if key not in {"state", "messages", "snapshot_path"}
@@ -398,7 +410,7 @@ def list_checkpoints(record_id: str):
 @api_errors
 def restore_checkpoint(snapshot_id: str):
     snapshot = require_record("checkpoints", snapshot_id)
-    require_workspace_access(snapshot["workspace_id"], write=True)
+    require_workspace_access(snapshot["workspace_id"], owner=True)
     if body().get("confirm") is not True:
         raise ValueError("恢复快照需要 confirm=true")
     wid = snapshot["workspace_id"]
@@ -474,7 +486,11 @@ def restore_file_version(version_id: str):
 
 @bp.get("/api/sessions")
 def list_sessions():
-    return ok(items=db().list("sessions", workspace_id=workspace_id()))
+    wid = workspace_id()
+    return ok(items=filter_authorized_sessions(
+        db(), db().list("sessions", workspace_id=wid),
+        workspace_id=wid, actor_id=current_user_id(),
+    ))
 
 
 @bp.post("/api/sessions")
@@ -483,7 +499,7 @@ def create_session():
     wid = workspace_id()
     source_ids = [str(value) for value in body().get("source_ids", [])]
     for source_id in source_ids:
-        require_workspace_record("sources", source_id, wid)
+        require_source_access(source_id, wid)
     provider_id = body().get("provider_id")
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
@@ -499,6 +515,7 @@ def create_session():
             "status": "active",
             "source_ids": source_ids,
             "provider_id": provider_id,
+            "owner_id": current_user_id(),
         },
         workspace_id=wid,
     )
@@ -508,14 +525,14 @@ def create_session():
 @bp.get("/api/sessions/<session_id>")
 @api_errors
 def get_session(session_id: str):
-    item = require_workspace_record("sessions", session_id)
+    item = require_session_access(session_id)
     return ok(item=item, messages=db().messages(session_id))
 
 
 @bp.patch("/api/sessions/<session_id>")
 @api_errors
 def update_session(session_id: str):
-    current = require_workspace_record("sessions", session_id)
+    current = require_session_access(session_id)
     allowed = {
         key: value for key, value in body().items()
         if key in {
@@ -530,7 +547,7 @@ def update_session(session_id: str):
     if "source_ids" in allowed:
         allowed["source_ids"] = [str(value) for value in allowed["source_ids"]]
         for source_id in allowed["source_ids"]:
-            require_workspace_record("sources", source_id, current["workspace_id"])
+            require_source_access(source_id, current["workspace_id"])
     if allowed.get("provider_id") and allowed["provider_id"] != "environment-default":
         require_workspace_record("providers", str(allowed["provider_id"]), current["workspace_id"])
     item = db().patch("sessions", session_id, allowed)
@@ -546,7 +563,7 @@ def update_session(session_id: str):
 @bp.delete("/api/sessions/<session_id>")
 @api_errors
 def archive_session(session_id: str):
-    require_workspace_record("sessions", session_id)
+    require_session_access(session_id)
     if not db().archive("sessions", session_id):
         raise FileNotFoundError("会话不存在")
     return ok(archived=True)
@@ -555,12 +572,13 @@ def archive_session(session_id: str):
 @bp.post("/api/sessions/<session_id>/save")
 @api_errors
 def save_session(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     snapshot = db().put(
         "saved_sessions",
         {
             "id": db().new_id("save"),
             "workspace_id": session.get("workspace_id", "default"),
+            "owner_id": current_user_id(),
             "name": str(body().get("name") or session.get("name") or "已保存会话")[:100],
             "session": session,
             "messages": db().messages(session_id, 1000),
@@ -575,6 +593,8 @@ def saved_sessions():
     items = db().list("saved_sessions", workspace_id=workspace_id())
     public = []
     for item in items:
+        if not _saved_session_owned(item):
+            continue
         value = {key: value for key, value in item.items() if key not in {"session", "messages", "history"}}
         messages = item.get("messages") or item.get("history") or []
         value.setdefault("filename", item.get("filename") or item.get("id"))
@@ -590,11 +610,35 @@ def saved_sessions():
 @api_errors
 def load_saved_session(saved_id: str):
     saved = require_workspace_record("saved_sessions", saved_id)
+    if not _saved_session_owned(saved):
+        raise FileNotFoundError("已保存会话不存在")
     original = saved["session"]
+    source_ids = []
+    for source_id in original.get("source_ids") or []:
+        try:
+            require_source_access(str(source_id), saved["workspace_id"])
+        except (FileNotFoundError, PermissionError):
+            continue
+        source_ids.append(str(source_id))
     new_id = db().new_id("ses")
-    session = db().put("sessions", {**original, "id": new_id, "name": saved["name"], "status": "active"}, workspace_id=saved["workspace_id"])
+    session = db().put(
+        "sessions",
+        {
+            **original, "id": new_id, "name": saved["name"], "status": "active",
+            "source_ids": source_ids, "owner_id": current_user_id(), "visibility": "private",
+        },
+        workspace_id=saved["workspace_id"],
+    )
     db().replace_messages(new_id, saved.get("messages", []))
     return ok(item=session, messages=db().messages(new_id))
+
+
+def _saved_session_owned(item: dict) -> bool:
+    owner_id = str(item.get("owner_id") or (item.get("session") or {}).get("owner_id") or "")
+    if owner_id:
+        return owner_id == current_user_id()
+    membership = workspace_membership(str(item.get("workspace_id") or workspace_id()))
+    return bool(membership and membership.get("role") == "owner")
 
 
 @bp.get("/api/memories")
@@ -680,6 +724,19 @@ def consolidate_memory_records():
 def memory_notices():
     wid = workspace_id()
     items = db().list("memory_notices", workspace_id=wid, limit=int(request.args.get("limit", "20")))
+    visible = []
+    for item in items:
+        if item.get("user_id"):
+            if str(item["user_id"]) == current_user_id():
+                visible.append(item)
+            continue
+        if item.get("session_id"):
+            try:
+                require_session_access(str(item["session_id"]), wid)
+            except (FileNotFoundError, PermissionError):
+                continue
+            visible.append(item)
+    items = visible
     session_id = request.args.get("session_id")
     if session_id:
         items = [item for item in items if item.get("session_id") == session_id]
@@ -690,12 +747,16 @@ def memory_notices():
 
 
 @bp.get("/api/audit")
+@api_errors
 def audit_entries():
+    require_workspace_access(workspace_id(), owner=True)
     return ok(items=db().audit_entries(workspace_id(), int(request.args.get("limit", "100"))))
 
 
 @bp.get("/api/usage")
+@api_errors
 def usage_metrics():
+    require_workspace_access(workspace_id(), owner=True)
     events = db().list("usage_events", workspace_id=workspace_id(), limit=int(request.args.get("limit", "5000")))
     by_model = {}
     for event in events:
@@ -709,6 +770,7 @@ def usage_metrics():
 
 @bp.get("/api/trash")
 def trash():
+    require_workspace_access(workspace_id(), owner=True)
     collections = request.args.getlist("collection") or ["sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards"]
     items = []
     for collection in collections:
@@ -721,6 +783,7 @@ def trash():
 @bp.post("/api/trash/<collection>/<record_id>/restore")
 @api_errors
 def restore_trash(collection: str, record_id: str):
+    require_workspace_access(workspace_id(), owner=True)
     allowed = {"sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards", "decision_maps"}
     item = db().get(collection, record_id, include_archived=True) if collection in allowed else None
     if not item or item.get("workspace_id", "default") != workspace_id() or not db().restore(collection, record_id):
@@ -731,6 +794,7 @@ def restore_trash(collection: str, record_id: str):
 @bp.delete("/api/trash/<collection>/<record_id>")
 @api_errors
 def delete_trash(collection: str, record_id: str):
+    require_workspace_access(workspace_id(), owner=True)
     if body().get("confirm") is not True:
         raise ValueError("永久删除需要 confirm=true")
     item = db().get(collection, record_id, include_archived=True)

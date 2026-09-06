@@ -7,6 +7,10 @@ from typing import Callable
 from flask import current_app, jsonify, request, session
 
 from ..core.database import Database
+from ..services.authorization import require_result_access as require_result_policy
+from ..services.authorization import require_job_access as require_job_policy
+from ..services.authorization import require_session_access as require_session_policy
+from ..services.authorization import require_source_access as require_source_policy
 
 
 def db() -> Database:
@@ -65,6 +69,42 @@ def require_workspace_record(collection: str, record_id: str, expected_workspace
 
 def current_user_id() -> str:
     return str(session.get("user_id") or "local-default")
+
+
+def require_source_access(
+    source_id: str, expected_workspace_id: str | None = None, *, action: str = "read",
+) -> dict:
+    return require_source_policy(
+        db(), source_id, workspace_id=expected_workspace_id or workspace_id(),
+        actor_id=current_user_id(), action=action,
+    )
+
+
+def require_query_result_access(
+    result_id: str, expected_workspace_id: str | None = None, *, action: str = "read",
+) -> dict:
+    wid = expected_workspace_id or workspace_id()
+    result = db().get("query_results", result_id, workspace_id=wid)
+    return require_result_policy(
+        db(), result, workspace_id=wid, actor_id=current_user_id(), action=action,
+    )
+
+
+def require_job_access(job_id: str, expected_workspace_id: str | None = None) -> dict:
+    wid = expected_workspace_id or workspace_id()
+    job = db().get("jobs", job_id, workspace_id=wid)
+    return require_job_policy(
+        db(), job, workspace_id=wid, actor_id=current_user_id(),
+    )
+
+
+def require_session_access(
+    session_id: str, expected_workspace_id: str | None = None,
+) -> dict:
+    wid = expected_workspace_id or workspace_id()
+    return require_session_policy(
+        db(), session_id, workspace_id=wid, actor_id=current_user_id(),
+    )
 
 
 def require_system_owner() -> dict:

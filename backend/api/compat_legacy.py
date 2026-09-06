@@ -15,10 +15,17 @@ from ..core.database import utcnow
 from ..services.dashboard_refresh import refresh_dashboard as refresh_dashboard_record
 from ..services.dashboard_refresh import refresh_widget as refresh_widget_record
 from ..services.datasets import SUPPORTED_FILE_EXTENSIONS, public_source, register_upload
+from ..services.authorization import (
+    require_artifact_access, require_dashboard_access as require_dashboard_policy,
+    require_result_access as require_result_policy,
+)
 from .common import (
     api_errors,
     body,
+    current_user_id,
     db,
+    require_session_access,
+    require_source_access,
     require_workspace_access,
     require_workspace_record,
     safe_child,
@@ -34,7 +41,7 @@ def _session(session_id: str, *, create: bool = False) -> dict:
     wid = workspace_id()
     record = db().get("sessions", session_id)
     if record:
-        return require_workspace_record("sessions", session_id, wid)
+        return require_session_access(session_id, wid)
     if not create:
         raise FileNotFoundError("session not found")
     require_workspace_access(wid, write=True)
@@ -48,6 +55,7 @@ def _session(session_id: str, *, create: bool = False) -> dict:
             "source_ids": [],
             "attached_source_ids": [],
             "provider_id": None,
+            "owner_id": current_user_id(),
         },
         workspace_id=wid,
     )
@@ -156,12 +164,20 @@ def _find_saved_session(identifier: str, wid: str | None = None) -> dict | None:
     safe = Path(identifier).name
     for key in (identifier, safe):
         record = db().get("saved_sessions", key)
-        if record and str(record.get("workspace_id") or "default") == wid:
+        if record and str(record.get("workspace_id") or "default") == wid and _saved_session_owned(record):
             return record
     for record in db().list("saved_sessions", workspace_id=wid, limit=5000):
-        if Path(str(record.get("filename") or "")).name == safe:
+        if Path(str(record.get("filename") or "")).name == safe and _saved_session_owned(record):
             return record
     return None
+
+
+def _saved_session_owned(record: dict) -> bool:
+    owner_id = str(record.get("owner_id") or (record.get("session") or {}).get("owner_id") or "")
+    if owner_id:
+        return owner_id == current_user_id()
+    membership = workspace_membership(str(record.get("workspace_id") or workspace_id()))
+    return bool(membership and membership.get("role") == "owner")
 
 
 def _save_session_snapshot(session: dict, *, name: str, autosave: bool, record_id: str = "") -> dict:
@@ -180,6 +196,7 @@ def _save_session_snapshot(session: dict, *, name: str, autosave: bool, record_i
             "id": record_id,
             "filename": record_id,
             "workspace_id": wid,
+            "owner_id": current_user_id(),
             "name": name[:100],
             "saved_at": utcnow(),
             "autosave": autosave,
@@ -203,6 +220,7 @@ def _save_session_snapshot(session: dict, *, name: str, autosave: bool, record_i
 
 
 def _attach_source(session: dict, source_id: str) -> dict:
+    require_source_access(source_id, str(session.get("workspace_id") or "default"))
     attached = [str(item) for item in session.get("attached_source_ids") or session.get("source_ids") or []]
     active = [str(item) for item in session.get("source_ids") or []]
     if source_id not in attached:
@@ -221,8 +239,11 @@ def _session_sources(session: dict) -> list[dict]:
     attached = [str(item) for item in session.get("attached_source_ids") or session.get("source_ids") or []]
     result = []
     for source_id in attached:
-        source = db().get("sources", source_id)
-        if not source or str(source.get("workspace_id") or "default") != str(session.get("workspace_id") or "default"):
+        try:
+            source = require_source_access(
+                source_id, str(session.get("workspace_id") or "default"),
+            )
+        except (FileNotFoundError, PermissionError):
             continue
         public = public_source(source)
         public["source_id"] = source_id
@@ -550,7 +571,16 @@ def load_session(session_id: str):
         if isinstance(item, dict)
     ]
     db().replace_messages(session_id, history)
-    source_ids = [str(item) for item in (saved.get("session") or {}).get("source_ids", session.get("source_ids", []))]
+    requested_source_ids = [
+        str(item) for item in (saved.get("session") or {}).get("source_ids", session.get("source_ids", []))
+    ]
+    source_ids = []
+    for source_id in requested_source_ids:
+        try:
+            require_source_access(source_id, session["workspace_id"])
+        except (FileNotFoundError, PermissionError):
+            continue
+        source_ids.append(source_id)
     session = db().patch(
         "sessions",
         session_id,
@@ -571,7 +601,7 @@ def load_session(session_id: str):
         "total_output": int(saved.get("total_output_tokens") or 0),
         "ds_connected": bool(source_ids),
         "ds_name": "",
-        "ds_lost": False,
+        "ds_lost": len(source_ids) != len(requested_source_ids),
         "workspace_restored": True,
         "workspace_lost": False,
         "workspace_identity_mismatch": False,
@@ -698,6 +728,13 @@ def record_command_metric(session_id: str):
 @api_errors
 def serve_chart(chart_id: str):
     chart = require_workspace_record("charts", chart_id)
+    if chart.get("result_id"):
+        require_result_policy(
+            db(), db().get("query_results", str(chart["result_id"]), workspace_id=chart["workspace_id"]),
+            workspace_id=chart["workspace_id"], actor_id=current_user_id(),
+        )
+    elif chart.get("source_id"):
+        require_source_access(str(chart["source_id"]), chart["workspace_id"])
     return Response(_chart_html(chart.get("spec") or {}, str(chart.get("name") or "Chart")), mimetype="text/html")
 
 
@@ -707,6 +744,10 @@ def dashboard_page(dashboard_id: str):
     dashboard = db().get("dashboards", dashboard_id)
     if not dashboard or not workspace_membership(str(dashboard.get("workspace_id") or "default")):
         return Response("Dashboard not found", status=404, mimetype="text/plain")
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=str(dashboard.get("workspace_id") or "default"),
+        actor_id=current_user_id(),
+    )
     return Response(_dashboard_html(dashboard), mimetype="text/html")
 
 
@@ -736,6 +777,15 @@ def generate_dashboard():
             continue
         chart_id = str(raw.get("chart_id") or "")
         chart = require_workspace_record("charts", chart_id, wid) if chart_id else None
+        result_id = str(raw.get("result_id") or (chart or {}).get("result_id") or "")
+        source_id = str(raw.get("source_id") or (chart or {}).get("source_id") or "")
+        if result_id:
+            require_result_policy(
+                db(), db().get("query_results", result_id, workspace_id=wid),
+                workspace_id=wid, actor_id=current_user_id(),
+            )
+        if source_id:
+            require_source_access(source_id, wid)
         spec = raw.get("chart") or raw.get("spec") or (chart or {}).get("spec") or {}
         widgets.append({
             "id": str(raw.get("id") or f"widget-{index}")[:100],
@@ -746,8 +796,8 @@ def generate_dashboard():
             "query": raw.get("query") or raw.get("sql") or "",
             "field_mapping": raw.get("field_mapping") or {},
             "grid": raw.get("grid") or {"x": (index - 1) % 2 * 6, "y": (index - 1) // 2 * 4, "w": 6, "h": 4},
-            "result_id": raw.get("result_id") or (chart or {}).get("result_id"),
-            "source_id": raw.get("source_id") or (chart or {}).get("source_id"),
+            "result_id": result_id or None,
+            "source_id": source_id or None,
         })
     dashboard = db().put(
         "dashboards",
@@ -760,6 +810,7 @@ def generate_dashboard():
             "updated_at": utcnow(),
             "color_scheme": str(payload.get("color_scheme") or "mckinsey"),
             "session_id": session_id,
+            "owner_id": current_user_id(),
             "widgets": widgets,
             "layout": payload.get("layout", {"columns": 12}),
             "revision": 1,
@@ -773,6 +824,9 @@ def generate_dashboard():
 @api_errors
 def get_dashboard(dashboard_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"], actor_id=current_user_id(),
+    )
     return jsonify(_dashboard_public(dashboard))
 
 
@@ -780,6 +834,10 @@ def get_dashboard(dashboard_id: str):
 @api_errors
 def update_dashboard(dashboard_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="update",
+    )
     payload = body()
     changes: dict[str, Any] = {}
     if "name" in payload:
@@ -803,6 +861,10 @@ def update_dashboard(dashboard_id: str):
         changes["widgets"] = current_widgets
     changes["updated_at"] = utcnow()
     changes["revision"] = int(dashboard.get("revision", 1)) + 1
+    require_dashboard_policy(
+        db(), {**dashboard, **changes}, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="update",
+    )
     updated = db().patch("dashboards", dashboard_id, changes) or dashboard
     return jsonify({"ok": True, "item": updated})
 
@@ -810,7 +872,11 @@ def update_dashboard(dashboard_id: str):
 @bp.delete("/api/dashboard/<dashboard_id>")
 @api_errors
 def delete_dashboard(dashboard_id: str):
-    require_workspace_record("dashboards", dashboard_id)
+    dashboard = require_workspace_record("dashboards", dashboard_id)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="delete",
+    )
     db().archive("dashboards", dashboard_id)
     return jsonify({"ok": True})
 
@@ -819,7 +885,11 @@ def delete_dashboard(dashboard_id: str):
 @api_errors
 def refresh_dashboard(dashboard_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
-    dashboard = refresh_dashboard_record(db(), dashboard)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="query",
+    )
+    dashboard = refresh_dashboard_record(db(), dashboard, current_user_id())
     results = [
         {
             "id": widget.get("id"), "chart_id": widget.get("chart_id"),
@@ -834,12 +904,17 @@ def refresh_dashboard(dashboard_id: str):
 @api_errors
 def refresh_widget(dashboard_id: str, widget_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="query",
+    )
     found = None
     widgets = []
     for widget in dashboard.get("widgets") or []:
         if str(widget.get("id")) == widget_id:
             widget = refresh_widget_record(
                 db(), widget, str(dashboard.get("workspace_id") or "default"),
+                current_user_id(),
             )
             found = widget
         widgets.append(widget)
@@ -855,6 +930,10 @@ def refresh_widget(dashboard_id: str, widget_id: str):
 @api_errors
 def export_dashboard_legacy(dashboard_id: str):
     dashboard = require_workspace_record("dashboards", dashboard_id)
+    require_dashboard_policy(
+        db(), dashboard, workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action="export",
+    )
     return Response(
         _dashboard_html(dashboard),
         mimetype="text/html",
@@ -874,6 +953,10 @@ def download_export(filename: str):
     )
     if not artifact:
         raise FileNotFoundError("文件不存在")
+    require_artifact_access(
+        db(), artifact, workspace_id=artifact["workspace_id"],
+        actor_id=current_user_id(), action="export",
+    )
     path = safe_child(current_app.config["SETTINGS"].export_dir, Path(artifact["path"]))
     if not path.is_file():
         raise FileNotFoundError("文件不存在")
@@ -1078,6 +1161,7 @@ def rename_workspace(session_id: str, target_workspace_id: str):
 @api_errors
 def workspace_checkpoints(session_id: str):
     session = _session(session_id)
+    require_workspace_access(session["workspace_id"], owner=True)
     snapshots = [
         {key: value for key, value in item.items() if key not in {"state", "messages", "snapshot_path"}}
         for item in db().list("checkpoints", workspace_id=session["workspace_id"], limit=5000)
@@ -1089,7 +1173,7 @@ def workspace_checkpoints(session_id: str):
 @api_errors
 def restore_workspace_checkpoint(session_id: str, snapshot_id: str):
     session = _session(session_id)
-    require_workspace_access(session["workspace_id"], write=True)
+    require_workspace_access(session["workspace_id"], owner=True)
     snapshot = db().get("checkpoints", snapshot_id)
     if not snapshot or snapshot.get("workspace_id") != session["workspace_id"]:
         raise FileNotFoundError("快照不存在")
@@ -1107,7 +1191,7 @@ def restore_workspace_checkpoint(session_id: str, snapshot_id: str):
 @api_errors
 def workspace_permission(session_id: str):
     session = _session(session_id)
-    require_workspace_access(session["workspace_id"], write=True)
+    require_workspace_access(session["workspace_id"], owner=True)
     permission = str(body().get("permission") or "")
     if permission not in {"read_only", "read_write"}:
         return jsonify({"ok": False, "error": "permission 必须是 read_only 或 read_write。"}), 400

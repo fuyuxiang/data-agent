@@ -228,7 +228,8 @@ def _memory_job_handler(app, spec, progress, cancel):
     applied = _apply_ops(operations, workspace_id, user_id)
     _db().put("memory_notices", {
         "id": _db().new_id("memnotice"), "workspace_id": workspace_id,
-        "session_id": session_id, "message": f"已更新 {len(applied)} 条长期记忆",
+        "session_id": session_id, "user_id": user_id,
+        "message": f"已更新 {len(applied)} 条长期记忆",
         "memory_ids": [item["id"] for item in applied], "read": False,
     }, workspace_id=workspace_id)
     return {"applied": len(applied), "memory_ids": [item["id"] for item in applied]}

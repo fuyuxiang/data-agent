@@ -113,6 +113,12 @@ def register():
     email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
     invitation = _invitation(str(payload.get("invitation_token") or ""), email)
+    first_user = not db().list("users", include_archived=True, limit=1)
+    if first_user and current_app.config["SETTINGS"].environment == "production":
+        expected = os.getenv("MERIDIAN_BOOTSTRAP_TOKEN", "").strip()
+        supplied = str(payload.get("bootstrap_token") or "").strip()
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            raise PermissionError("生产实例初始化令牌无效")
     invited_workspace = None
     if invitation:
         invited_workspace = db().get("workspaces", invitation["workspace_id"])
@@ -265,10 +271,14 @@ def me():
         session.clear()
         user = None
     if not user:
-        local_mode = not db().list("users", include_archived=True, limit=1) and current_app.config["SETTINGS"].environment != "production"
+        first_user = not db().list("users", include_archived=True, limit=1)
+        local_mode = first_user and current_app.config["SETTINGS"].environment != "production"
         return ok(
             user=None, local_mode=local_mode, authenticated=False,
             registration_open=_registration_open(), csrf_token="",
+            bootstrap_required=bool(
+                first_user and current_app.config["SETTINGS"].environment == "production"
+            ),
         )
     wid = str(session.get("active_workspace_id") or "default")
     return ok(

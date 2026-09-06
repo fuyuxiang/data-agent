@@ -13,7 +13,9 @@ from ..services.feishu_bot import (
     start_long_connection,
 )
 from ..services.security import SecretVault
-from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, db, ok, require_session_access, workspace_id,
+)
 
 
 bp = Blueprint("feishu_bot", __name__)
@@ -114,13 +116,13 @@ def _conversation_payload(session: dict) -> dict:
 @bp.get("/api/session/<session_id>/feishu-bot")
 @api_errors
 def get_session_feishu_bot(session_id: str):
-    return ok(**_conversation_payload(require_workspace_record("sessions", session_id)))
+    return ok(**_conversation_payload(require_session_access(session_id)))
 
 
 @bp.put("/api/session/<session_id>/feishu-bot")
 @api_errors
 def put_session_feishu_bot(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     payload = body()
     if not isinstance(payload.get("enabled"), bool):
         raise ValueError("enabled 必须是布尔值")
@@ -147,7 +149,7 @@ def put_session_feishu_bot(session_id: str):
 @bp.get("/api/session/<session_id>/feishu-bot/events")
 @api_errors
 def get_session_feishu_events(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     after = max(0, int(request.args.get("after", "0")))
     events = sorted(
         [

@@ -6,6 +6,7 @@ from ..agent.store import RunStore
 from ..services.data_plane.factory import livy_adapter, public_engine, trino_adapter
 from ..services.data_plane.livy import LivyBatchAdapter, LivyConfig
 from ..services.data_plane.trino import TrinoAdapter, TrinoConfig
+from ..services.authorization import require_sources_access
 from ..services.security import SecretVault
 from .common import api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id
 
@@ -142,6 +143,10 @@ def _owned_run(run_id: str, wid: str) -> dict:
     run = RunStore(db()).get_run(run_id, workspace_id=wid)
     if not run or run.get("actor_id") != current_user_id():
         raise FileNotFoundError("分析任务不存在")
+    require_sources_access(
+        db(), run.get("source_scope") or [], workspace_id=wid,
+        actor_id=current_user_id(), action="read",
+    )
     return run
 
 

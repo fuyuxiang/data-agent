@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import PurePath
+from typing import Iterable
 
 import sqlglot
 from sqlglot import expressions as exp
@@ -132,3 +133,39 @@ def bounded_read_only_sql(sql: str, limit: int, dialect: str | None = None) -> s
     if existing_value is None or existing_value > limit:
         root = root.limit(limit, copy=False)
     return root.sql(dialect=dialect)
+
+
+def validate_query_tables(
+    sql: str,
+    allowed_tables: Iterable[str],
+    dialect: str | None = None,
+) -> list[str]:
+    """Reject reads outside the catalog captured for the selected source(s)."""
+    statement = validate_read_only_sql(sql, dialect)
+    root = sqlglot.parse_one(statement, read=dialect)
+    allowed = {str(value).strip().lower() for value in allowed_tables if str(value).strip()}
+    cte_names = {
+        str(node.alias_or_name or "").strip().lower()
+        for node in root.find_all(exp.CTE)
+        if str(node.alias_or_name or "").strip()
+    }
+    referenced: list[str] = []
+    for table in root.find_all(exp.Table):
+        name = str(table.name or "").strip()
+        if not name or name.lower() in cte_names:
+            continue
+        database_name = str(table.db or "").strip()
+        catalog_name = str(table.catalog or "").strip()
+        qualified = ".".join(value for value in (catalog_name, database_name, name) if value)
+        candidate = qualified.lower()
+        # Qualified references must match their complete approved scope. This
+        # prevents `private.orders` from passing because `orders` is approved.
+        if (database_name or catalog_name) and candidate not in allowed:
+            raise PermissionError(f"查询引用了未授权数据表：{qualified}")
+        if not database_name and not catalog_name and name.lower() not in allowed:
+            raise PermissionError(f"查询引用了未授权数据表：{name}")
+        referenced.append(qualified)
+    if not referenced:
+        # Constant-only SELECT is safe and useful for connectivity checks.
+        return []
+    return referenced

@@ -13,7 +13,9 @@ from ..services.knowledge import (
     strip_temp_prompt_thinking,
 )
 from ..services.models import resolve_provider
-from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, db, ok, require_session_access, require_workspace_record, workspace_id,
+)
 
 
 log = logging.getLogger(__name__)
@@ -307,13 +309,13 @@ def _temp_state(session: dict) -> dict:
 @bp.get("/api/session/<session_id>/temp-prompt")
 @api_errors
 def temp_prompt_get(session_id: str):
-    return jsonify(_temp_state(require_workspace_record("sessions", session_id)))
+    return jsonify(_temp_state(require_session_access(session_id)))
 
 
 @bp.post("/api/session/<session_id>/temp-prompt")
 @api_errors
 def temp_prompt_set(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     payload = body()
     raw_text = strip_temp_prompt_thinking(payload.get("text"))
     if len(raw_text) > TEMP_PROMPT_MAX_CHARS:
@@ -359,7 +361,7 @@ def temp_prompt_set(session_id: str):
 @bp.post("/api/session/<session_id>/temp-prompt/toggle")
 @api_errors
 def temp_prompt_toggle(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     text = strip_temp_prompt_thinking(session.get("temporary_instruction"))
     if not text:
         session = db().patch("sessions", session_id, {"temp_prompt_enabled": False})

@@ -79,3 +79,32 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe('summary.docx');
 });
+
+
+test('builds and validates an approved semantic metric from the UI', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '数据目录' }).click();
+  await page.locator('input[type=file][accept*=".csv"]').setInputFiles({
+    name: 'sales.csv', mimeType: 'text/csv',
+    buffer: Buffer.from('region,month,sales\nNorth,2026-01-01,120\nSouth,2026-01-01,90\n'),
+  });
+  await expect(page.getByText('sales', { exact: true }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: '指标中心' }).click();
+  await page.getByRole('button', { name: '新建语义模型' }).click();
+  await page.getByLabel('模型名称').fill('销售事实模型');
+  await page.getByRole('button', { name: '保存并校验' }).click();
+  await expect(page.getByText('销售事实模型', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: '新建指标' }).click();
+  await page.getByLabel('技术名称').fill('total_sales');
+  await page.getByLabel('显示名称').fill('销售额');
+  await page.getByLabel('度量').selectOption('sales');
+  await page.getByLabel('初始状态').selectOption('approved');
+  await page.getByRole('button', { name: '保存并校验' }).click();
+  await expect(page.getByText('销售额', { exact: true }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: '执行验收' }).click();
+  await expect(page.getByText('结果可追溯')).toBeVisible();
+  await expect(page.getByRole('cell', { name: '210' })).toBeVisible();
+});

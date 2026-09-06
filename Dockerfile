@@ -35,5 +35,5 @@ RUN mkdir -p storage/uploads storage/exports storage/knowledge storage/workspace
 USER meridian
 EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/api/ready', timeout=3).read()"]
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/api/health', timeout=3).read()"]
 CMD ["python", "app.py"]

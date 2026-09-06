@@ -20,10 +20,19 @@ from ..services.lifecycle import (
     uploads_preview,
     workspace_preview,
 )
-from .common import body, db, workspace_id
+from .common import body, db, require_workspace_access, workspace_id
 
 
 bp = Blueprint("lifecycle", __name__)
+
+
+@bp.before_request
+def require_lifecycle_owner():
+    try:
+        require_workspace_access(workspace_id(), owner=True)
+    except (FileNotFoundError, PermissionError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 403
+    return None
 
 
 def _failure(exc: Exception, not_found: str):

@@ -9,6 +9,7 @@ from ..agent.store import RunStore
 from ..services.exports import export_dashboard_html, export_data, export_report
 from ..services.dashboard_refresh import refresh_dashboard as refresh_dashboard_record
 from ..services.dashboard_refresh import refresh_widget as refresh_widget_record
+from ..services.authorization import require_sources_access
 from ..services.results.delivery import ARTIFACT_KINDS, generate_artifacts, prepare_eml, send_email
 from ..services.results.manifests import ResultService
 from .common import (
@@ -16,6 +17,8 @@ from .common import (
     body,
     db,
     ok,
+    require_query_result_access,
+    require_source_access,
     require_workspace_record,
     safe_child,
     workspace_id,
@@ -28,14 +31,14 @@ bp = Blueprint("delivery", __name__)
 @bp.post("/api/exports/data")
 @api_errors
 def create_data_export():
-    artifact = export_data(body(), workspace_id())
+    artifact = export_data(body(), workspace_id(), current_user_id())
     return ok(artifact=_public_artifact(artifact)), 201
 
 
 @bp.post("/api/exports/report")
 @api_errors
 def create_report_export():
-    artifact = export_report(body(), workspace_id())
+    artifact = export_report(body(), workspace_id(), current_user_id())
     return ok(artifact=_public_artifact(artifact)), 201
 
 
@@ -55,7 +58,19 @@ def _actor_artifacts(items: list[dict]) -> list[dict]:
         if (run := RunStore(db()).get_run(run_id, workspace_id=workspace_id()))
         and run.get("actor_id") == actor_id
     }
-    return [item for item in items if not item.get("run_id") or str(item["run_id"]) in owned]
+    visible = []
+    for item in items:
+        if item.get("run_id") and str(item["run_id"]) not in owned:
+            continue
+        try:
+            require_sources_access(
+                db(), item.get("source_ids") or [],
+                workspace_id=item.get("workspace_id", workspace_id()), actor_id=actor_id,
+            )
+        except (FileNotFoundError, PermissionError):
+            continue
+        visible.append(item)
+    return visible
 
 
 @bp.get("/api/artifacts")
@@ -68,6 +83,10 @@ def list_artifacts():
 @api_errors
 def download_artifact(artifact_id: str):
     item = require_workspace_record("artifacts", artifact_id)
+    require_sources_access(
+        db(), item.get("source_ids") or [], workspace_id=item["workspace_id"],
+        actor_id=current_user_id(), action="export",
+    )
     if item.get("run_id"):
         run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"])
         if not run or run.get("actor_id") != current_user_id():
@@ -82,6 +101,10 @@ def _analysis_run(run_id: str) -> dict:
     run = RunStore(db()).get_run(run_id, workspace_id=workspace_id())
     if not run or run.get("actor_id") != current_user_id():
         raise FileNotFoundError("分析任务不存在")
+    require_sources_access(
+        db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
+        actor_id=current_user_id(), action="read",
+    )
     return run
 
 
@@ -185,6 +208,10 @@ def send_analysis_email(run_id: str):
 @api_errors
 def archive_artifact(artifact_id: str):
     item = require_workspace_record("artifacts", artifact_id)
+    require_sources_access(
+        db(), item.get("source_ids") or [], workspace_id=item["workspace_id"],
+        actor_id=current_user_id(), action="delete",
+    )
     if item.get("run_id"):
         _analysis_run(str(item["run_id"]))
     if not db().archive("artifacts", artifact_id):
@@ -192,9 +219,44 @@ def archive_artifact(artifact_id: str):
     return ok(archived=True)
 
 
+def _dashboard_source_ids(dashboard: dict) -> list[str]:
+    source_ids: list[str] = []
+    for widget in dashboard.get("widgets") or []:
+        raw = widget.get("source_ids")
+        if not isinstance(raw, list):
+            raw = [widget["source_id"]] if widget.get("source_id") else []
+        source_ids.extend(str(value) for value in raw if str(value))
+        result_id = str(widget.get("result_id") or "")
+        if not result_id and widget.get("chart_id"):
+            chart = db().get(
+                "charts", str(widget["chart_id"]), workspace_id=dashboard["workspace_id"],
+            ) or {}
+            result_id = str(chart.get("result_id") or "")
+        if result_id:
+            result = db().get(
+                "query_results", result_id, workspace_id=dashboard["workspace_id"],
+            ) or {}
+            source_ids.extend(str(value) for value in result.get("source_ids") or [])
+    return list(dict.fromkeys(source_ids))
+
+
+def _require_dashboard_access(dashboard: dict, *, action: str = "read") -> dict:
+    require_sources_access(
+        db(), _dashboard_source_ids(dashboard), workspace_id=dashboard["workspace_id"],
+        actor_id=current_user_id(), action=action,
+    )
+    return dashboard
+
+
 @bp.get("/api/dashboards")
 def dashboards():
-    return ok(items=db().list("dashboards", workspace_id=workspace_id()))
+    items = []
+    for item in db().list("dashboards", workspace_id=workspace_id()):
+        try:
+            items.append(_require_dashboard_access(item))
+        except (FileNotFoundError, PermissionError):
+            continue
+    return ok(items=items)
 
 
 def _normalize_refresh(value) -> dict:
@@ -229,11 +291,18 @@ def _normalize_widgets(value, wid: str) -> list[dict]:
         widget["id"] = identifier
         widget["title"] = str(widget.get("title") or f"组件 {index + 1}")[:100]
         if widget.get("result_id"):
-            require_workspace_record("query_results", str(widget["result_id"]), wid)
+            require_query_result_access(str(widget["result_id"]), wid)
         if widget.get("source_id"):
-            require_workspace_record("sources", str(widget["source_id"]), wid)
+            require_source_access(str(widget["source_id"]), wid)
+        if widget.get("source_ids"):
+            if not isinstance(widget["source_ids"], list):
+                raise ValueError("看板组件 source_ids 必须是数组")
+            for source_id in widget["source_ids"]:
+                require_source_access(str(source_id), wid)
         if widget.get("chart_id"):
             chart = require_workspace_record("charts", str(widget["chart_id"]), wid)
+            if chart.get("result_id"):
+                require_query_result_access(str(chart["result_id"]), wid)
             widget.setdefault("chart", chart.get("spec", {}))
         if "chart" in widget and not isinstance(widget["chart"], dict):
             raise ValueError(f"组件 {identifier} 的图表规格无效")
@@ -256,6 +325,7 @@ def create_dashboard():
             "widgets": _normalize_widgets(payload.get("widgets", []), wid),
             "layout": payload.get("layout", {"columns": 12}),
             "refresh": _normalize_refresh(payload.get("refresh")),
+            "owner_id": current_user_id(),
             "revision": 1,
         },
         workspace_id=wid,
@@ -266,13 +336,15 @@ def create_dashboard():
 @bp.get("/api/dashboards/<dashboard_id>")
 @api_errors
 def dashboard(dashboard_id: str):
-    return ok(item=require_workspace_record("dashboards", dashboard_id))
+    return ok(item=_require_dashboard_access(require_workspace_record("dashboards", dashboard_id)))
 
 
 @bp.put("/api/dashboards/<dashboard_id>")
 @api_errors
 def update_dashboard(dashboard_id: str):
-    current = require_workspace_record("dashboards", dashboard_id)
+    current = _require_dashboard_access(
+        require_workspace_record("dashboards", dashboard_id), action="update",
+    )
     payload = body()
     expected = payload.pop("expected_revision", None)
     if expected is not None and int(expected) != int(current.get("revision", 1)):
@@ -290,7 +362,7 @@ def update_dashboard(dashboard_id: str):
 @bp.delete("/api/dashboards/<dashboard_id>")
 @api_errors
 def archive_dashboard(dashboard_id: str):
-    require_workspace_record("dashboards", dashboard_id)
+    _require_dashboard_access(require_workspace_record("dashboards", dashboard_id), action="delete")
     if not db().archive("dashboards", dashboard_id):
         raise FileNotFoundError("看板不存在")
     return ok(archived=True)
@@ -299,27 +371,36 @@ def archive_dashboard(dashboard_id: str):
 @bp.post("/api/dashboards/<dashboard_id>/export")
 @api_errors
 def dashboard_export(dashboard_id: str):
-    dashboard = require_workspace_record("dashboards", dashboard_id)
-    return ok(artifact=_public_artifact(export_dashboard_html(dashboard, dashboard.get("workspace_id", "default"))))
+    dashboard = _require_dashboard_access(
+        require_workspace_record("dashboards", dashboard_id), action="export",
+    )
+    payload = {**dashboard, "source_ids": _dashboard_source_ids(dashboard)}
+    return ok(artifact=_public_artifact(export_dashboard_html(payload, dashboard.get("workspace_id", "default"))))
 
 
 @bp.post("/api/dashboards/<dashboard_id>/refresh")
 @api_errors
 def refresh_dashboard(dashboard_id: str):
-    dashboard = require_workspace_record("dashboards", dashboard_id)
-    item = refresh_dashboard_record(db(), dashboard)
+    dashboard = _require_dashboard_access(
+        require_workspace_record("dashboards", dashboard_id), action="query",
+    )
+    item = refresh_dashboard_record(db(), dashboard, current_user_id())
     return ok(item=item)
 
 
 @bp.post("/api/dashboards/<dashboard_id>/widgets/<widget_id>/refresh")
 @api_errors
 def refresh_dashboard_widget(dashboard_id: str, widget_id: str):
-    dashboard = require_workspace_record("dashboards", dashboard_id)
+    dashboard = _require_dashboard_access(
+        require_workspace_record("dashboards", dashboard_id), action="query",
+    )
     found = False
     widgets = []
     for widget in dashboard.get("widgets", []):
         if widget.get("id") == widget_id:
-            widget = refresh_widget_record(db(), widget, str(dashboard.get("workspace_id") or "default"))
+            widget = refresh_widget_record(
+                db(), widget, str(dashboard.get("workspace_id") or "default"), current_user_id(),
+            )
             found = True
         widgets.append(widget)
     if not found:

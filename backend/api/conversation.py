@@ -9,14 +9,17 @@ from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
 from ..services.advanced_agent import available_formal_tools
 from ..services.hooks import dispatch_hooks
-from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, db, ok, require_session_access, require_source_access,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("conversation", __name__)
 
 
 def _owned_tool_result(session_id: str, artifact_id: str) -> tuple[dict, dict]:
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     item = require_workspace_record("tool_results", artifact_id, session["workspace_id"])
     if item.get("session_id") != session_id:
         raise FileNotFoundError(f"tool_results 记录不存在：{artifact_id}")
@@ -26,7 +29,7 @@ def _owned_tool_result(session_id: str, artifact_id: str) -> tuple[dict, dict]:
 @bp.get("/api/sessions/<session_id>/messages")
 @api_errors
 def messages(session_id: str):
-    require_workspace_record("sessions", session_id)
+    require_session_access(session_id)
     return ok(items=db().messages(session_id, int(request.args.get("limit", "300"))))
 
 
@@ -99,7 +102,7 @@ def legacy_tool_result(session_id: str, artifact_id: str):
 @bp.post("/api/sessions/<session_id>/messages")
 @api_errors
 def chat(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     payload = body()
     question = str(payload.get("message") or "").strip()
     if not question:
@@ -112,7 +115,7 @@ def chat(session_id: str):
     provider_id = payload.get("provider_id") or session.get("provider_id")
     wid = session.get("workspace_id", workspace_id())
     for source_id in source_ids:
-        require_workspace_record("sources", str(source_id), wid)
+        require_source_access(str(source_id), wid, action="analyze")
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
 
@@ -156,7 +159,7 @@ def chat(session_id: str):
 @bp.post("/api/sessions/<session_id>/stop")
 @api_errors
 def stop_chat(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     store = RunStore(db())
     active = next((
         item for item in store.list_runs(session_record["workspace_id"], session_id=session_id, limit=100)
@@ -179,7 +182,7 @@ def stop_chat(session_id: str):
 @bp.post("/api/sessions/<session_id>/compact")
 @api_errors
 def compact(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     wid = session.get("workspace_id", workspace_id())
     messages = db().messages(session_id, 1000)
     keep = max(4, int(body().get("keep_recent", 12)))
@@ -213,7 +216,7 @@ def compact(session_id: str):
 @bp.post("/api/sessions/<session_id>/clear")
 @api_errors
 def clear_conversation(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     count = len(db().messages(session_id, 1000))
     db().replace_messages(session_id, [])
     db().audit(
@@ -227,7 +230,7 @@ def clear_conversation(session_id: str):
 @bp.post("/api/session/<session_id>/commands/<name>/execute")
 @api_errors
 def execute_command(session_id: str, name: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     normalized = str(name or "").lower()
     aliases = {"c": "compact"}
     normalized = aliases.get(normalized, normalized)
@@ -250,7 +253,7 @@ def execute_command(session_id: str, name: str):
 @bp.get("/api/sessions/<session_id>/command-metrics")
 @api_errors
 def command_metrics(session_id: str):
-    session = require_workspace_record("sessions", session_id)
+    session = require_session_access(session_id)
     items = [
         item for item in db().list("command_metrics", workspace_id=session["workspace_id"], limit=1000)
         if item.get("session_id") == session_id

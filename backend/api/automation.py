@@ -10,6 +10,7 @@ from flask import Blueprint, current_app, request
 
 from ..core.database import utcnow
 from ..services.jobs import get_job_manager
+from ..services.authorization import filter_authorized_jobs
 from ..services.hooks import SUPPORTED_EVENTS, dispatch_hooks as run_hooks, normalize_event_name
 from ..services.security import validate_outbound_url
 from ..services.scheduler import validate_cron
@@ -25,8 +26,9 @@ from ..services.workflows import (
     validate_definition,
 )
 from .common import (
-    api_errors, body, current_user_id, db, ok, require_workspace_access,
-    require_workspace_record, workspace_id,
+    api_errors, body, current_user_id, db, ok, require_job_access,
+    require_query_result_access, require_session_access, require_source_access,
+    require_workspace_access, require_workspace_record, workspace_id,
 )
 
 
@@ -49,7 +51,7 @@ def _validate_hook_action(action: dict, wid: str) -> None:
     if action_type in {"http", "webhook"} and action.get("url") and "{{" not in str(action["url"]):
         validate_outbound_url(str(action["url"]))
     if action_type == "workflow":
-        require_workspace_record("workflows", str(action.get("workflow_id") or ""), wid)
+        _require_workflow_access(str(action.get("workflow_id") or ""), action="query")
     if action_type == "connector":
         require_workspace_record("connectors", str(action.get("connector_id") or ""), wid)
 
@@ -60,23 +62,76 @@ def _validate_workflow_references(definition: dict, wid: str) -> None:
         if not isinstance(node, dict):
             continue
         config = node.get("config") if isinstance(node.get("config"), dict) else {}
-        for source_id in config.get("source_ids") or []:
-            require_workspace_record("sources", str(source_id), wid)
+        source_ids = config.get("source_ids") or []
+        if isinstance(source_ids, str):
+            source_ids = [source_ids]
+        if config.get("source_id"):
+            source_ids = [*source_ids, config["source_id"]]
+        for source_id in source_ids:
+            if "{{" not in str(source_id) and "${" not in str(source_id):
+                require_source_access(str(source_id), wid, action="query")
         references = {
-            "result_id": "query_results", "connector_id": "connectors",
+            "connector_id": "connectors",
             "agent_profile_id": "agent_profiles",
         }
+        result_id = config.get("result_id")
+        if result_id and "{{" not in str(result_id) and "${" not in str(result_id):
+            require_query_result_access(str(result_id), wid, action="read")
         for key, collection in references.items():
-            if config.get(key):
+            if config.get(key) and "{{" not in str(config[key]) and "${" not in str(config[key]):
                 require_workspace_record(collection, str(config[key]), wid)
         provider_id = config.get("provider_id")
-        if provider_id and provider_id != "environment-default":
+        if (
+            provider_id and provider_id != "environment-default"
+            and "{{" not in str(provider_id) and "${" not in str(provider_id)
+        ):
             require_workspace_record("providers", str(provider_id), wid)
+
+
+def _workflow_is_authorized(workflow: dict, *, action: str = "read", definition: dict | None = None) -> bool:
+    """Hide workflows whose static inputs reference data the caller cannot access."""
+    if not workflow.get("id"):
+        return False
+    wid = str(workflow.get("workspace_id") or workspace_id())
+    candidate = definition or workflow.get("published_definition") or workflow.get("definition") or {}
+    try:
+        nodes = candidate.get("nodes") or candidate.get("steps") or []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            config = node.get("config") if isinstance(node.get("config"), dict) else {}
+            source_ids = config.get("source_ids") or []
+            if isinstance(source_ids, str):
+                source_ids = [source_ids]
+            if config.get("source_id"):
+                source_ids = [*source_ids, config["source_id"]]
+            for source_id in source_ids:
+                if "{{" not in str(source_id) and "${" not in str(source_id):
+                    require_source_access(str(source_id), wid, action=action)
+            result_id = config.get("result_id")
+            if result_id and "{{" not in str(result_id) and "${" not in str(result_id):
+                require_query_result_access(str(result_id), wid, action=action)
+    except (FileNotFoundError, PermissionError):
+        return False
+    return True
+
+
+def _require_workflow_access(
+    workflow_id: str, *, action: str = "read", definition: dict | None = None,
+) -> dict:
+    workflow = require_workspace_record("workflows", workflow_id)
+    if not _workflow_is_authorized(workflow, action=action, definition=definition):
+        raise FileNotFoundError(f"workflows 记录不存在：{workflow_id}")
+    return workflow
 
 
 @bp.get("/api/jobs")
 def list_jobs():
-    items = db().list("jobs", workspace_id=workspace_id(), limit=int(request.args.get("limit", "200")))
+    wid = workspace_id()
+    items = filter_authorized_jobs(
+        db(), db().list("jobs", workspace_id=wid, limit=int(request.args.get("limit", "200"))),
+        workspace_id=wid, actor_id=current_user_id(),
+    )
     if request.args.get("active") == "true":
         items = [item for item in items if item.get("status") in {"queued", "running", "waiting_approval"}]
     return ok(items=items)
@@ -84,7 +139,13 @@ def list_jobs():
 
 @bp.get("/api/jobs/events")
 def job_events():
-    allowed = {item["id"] for item in db().list("jobs", workspace_id=workspace_id(), limit=5000)}
+    wid = workspace_id()
+    allowed = {
+        item["id"] for item in filter_authorized_jobs(
+            db(), db().list("jobs", workspace_id=wid, limit=5000),
+            workspace_id=wid, actor_id=current_user_id(),
+        )
+    }
     items = db().job_events(int(request.args.get("after", "0")), int(request.args.get("limit", "500")))
     return ok(items=[item for item in items if item.get("job_id") in allowed])
 
@@ -92,13 +153,13 @@ def job_events():
 @bp.get("/api/jobs/<job_id>")
 @api_errors
 def get_job(job_id: str):
-    return ok(item=require_workspace_record("jobs", job_id))
+    return ok(item=require_job_access(job_id))
 
 
 @bp.post("/api/jobs/<job_id>/cancel")
 @api_errors
 def cancel_job(job_id: str):
-    require_workspace_record("jobs", job_id)
+    require_job_access(job_id)
     accepted = get_job_manager(current_app._get_current_object()).cancel(job_id)
     return ok(accepted=accepted)
 
@@ -106,7 +167,12 @@ def cancel_job(job_id: str):
 @bp.delete("/api/jobs/completed")
 def clear_jobs():
     count = 0
-    for item in db().list("jobs", workspace_id=workspace_id()):
+    wid = workspace_id()
+    items = filter_authorized_jobs(
+        db(), db().list("jobs", workspace_id=wid),
+        workspace_id=wid, actor_id=current_user_id(),
+    )
+    for item in items:
         if item.get("status") in {"completed", "failed", "cancelled"} and db().archive("jobs", item["id"]):
             count += 1
     return ok(archived=count)
@@ -152,7 +218,10 @@ def create_agent_profile():
 
 @bp.get("/api/workflows")
 def list_workflows():
-    return ok(items=db().list("workflows", workspace_id=workspace_id()))
+    return ok(items=[
+        item for item in db().list("workflows", workspace_id=workspace_id())
+        if _workflow_is_authorized(item)
+    ])
 
 
 @bp.post("/api/workflows")
@@ -182,13 +251,13 @@ def create_workflow():
 @bp.get("/api/workflows/<workflow_id>")
 @api_errors
 def get_workflow(workflow_id: str):
-    return ok(item=require_workspace_record("workflows", workflow_id))
+    return ok(item=_require_workflow_access(workflow_id))
 
 
 @bp.put("/api/workflows/<workflow_id>/draft")
 @api_errors
 def update_workflow(workflow_id: str):
-    workflow = require_workspace_record("workflows", workflow_id)
+    workflow = _require_workflow_access(workflow_id, action="query")
     payload = body()
     expected = payload.get("expected_revision")
     if expected is not None and int(expected) != int(workflow.get("draft_revision", 1)):
@@ -208,14 +277,14 @@ def update_workflow(workflow_id: str):
 @bp.post("/api/workflows/<workflow_id>/validate")
 @api_errors
 def validate_workflow(workflow_id: str):
-    workflow = require_workspace_record("workflows", workflow_id)
+    workflow = _require_workflow_access(workflow_id)
     return ok(validation=validate_definition(workflow.get("definition", {})))
 
 
 @bp.post("/api/workflows/<workflow_id>/publish")
 @api_errors
 def publish_workflow(workflow_id: str):
-    workflow = require_workspace_record("workflows", workflow_id)
+    workflow = _require_workflow_access(workflow_id, action="query")
     validation = validate_definition(workflow.get("definition", {}))
     if not validation["valid"]:
         raise ValueError("；".join(validation["errors"]))
@@ -264,7 +333,7 @@ def publish_workflow(workflow_id: str):
 @bp.get("/api/workflows/<workflow_id>/versions")
 @api_errors
 def workflow_versions(workflow_id: str):
-    workflow = require_workspace_record("workflows", workflow_id)
+    workflow = _require_workflow_access(workflow_id)
     items = [
         item for item in db().list("workflow_versions", workspace_id=workflow["workspace_id"], limit=5000)
         if item.get("workflow_id") == workflow_id
@@ -275,7 +344,7 @@ def workflow_versions(workflow_id: str):
 @bp.delete("/api/workflows/<workflow_id>")
 @api_errors
 def archive_workflow(workflow_id: str):
-    require_workspace_record("workflows", workflow_id)
+    _require_workflow_access(workflow_id, action="query")
     if not db().archive("workflows", workflow_id):
         raise FileNotFoundError("工作流不存在")
     return ok(archived=True)
@@ -284,7 +353,7 @@ def archive_workflow(workflow_id: str):
 @bp.post("/api/workflows/<workflow_id>/runs")
 @api_errors
 def run_workflow(workflow_id: str):
-    workflow = require_workspace_record("workflows", workflow_id)
+    workflow = _require_workflow_access(workflow_id, action="query")
     payload = body()
     if workflow.get("status") != "published" and not payload.get("allow_draft"):
         raise ValueError("请先发布工作流")
@@ -445,9 +514,7 @@ def cancel_run(run_id: str):
 
 
 def _require_session_run(session_id: str, run_id: str) -> tuple[dict, dict]:
-    session_record = require_workspace_record("sessions", session_id)
-    if str(session_record.get("owner_id") or "local-default") != current_user_id():
-        raise FileNotFoundError("会话不存在")
+    session_record = require_session_access(session_id)
     run = _owned_execution("workflow_runs", run_id, session_record["workspace_id"])
     run_session = str(run.get("inputs", {}).get("session_id") or "")
     if run_session and run_session != session_id:
@@ -458,13 +525,13 @@ def _require_session_run(session_id: str, run_id: str) -> tuple[dict, dict]:
 @bp.post("/api/session/<session_id>/workflow-runs")
 @api_errors
 def start_session_workflow_run(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
-    if str(session_record.get("owner_id") or "local-default") != current_user_id():
-        raise FileNotFoundError("会话不存在")
+    session_record = require_session_access(session_id)
     payload = body()
     version_id = str(payload.get("workflow_version_id") or "")
     version = require_workspace_record("workflow_versions", version_id, session_record["workspace_id"])
-    workflow = require_workspace_record("workflows", str(version.get("workflow_id") or ""), session_record["workspace_id"])
+    workflow = _require_workflow_access(
+        str(version.get("workflow_id") or ""), action="query", definition=version.get("definition") or {},
+    )
     executable = {
         **workflow, "definition": deepcopy(version["definition"]),
         "version": version["version"], "current_version_id": version["id"],
@@ -482,9 +549,7 @@ def start_session_workflow_run(session_id: str):
 @bp.get("/api/session/<session_id>/workflow-runs")
 @api_errors
 def list_session_workflow_runs(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
-    if str(session_record.get("owner_id") or "local-default") != current_user_id():
-        raise FileNotFoundError("会话不存在")
+    session_record = require_session_access(session_id)
     runs = [
         item for item in db().list("workflow_runs", workspace_id=session_record["workspace_id"], limit=5000)
         if str(item.get("inputs", {}).get("session_id") or "") == session_id
@@ -635,7 +700,7 @@ def fork_session_workflow_run(session_id: str, run_id: str):
 @bp.get("/api/session/<session_id>/workflow-templates")
 @api_errors
 def workflow_templates(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     return ok(templates=db().list("workflow_run_templates", workspace_id=session_record["workspace_id"], limit=5000))
 
 
@@ -654,9 +719,15 @@ def mark_workflow_template(session_id: str, run_id: str):
 @bp.get("/api/session/<session_id>/workflow-knowledge-candidates")
 @api_errors
 def workflow_knowledge_candidates(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     run_id, status = str(request.args.get("run_id") or ""), str(request.args.get("status") or "")
-    items = db().list("workflow_knowledge_candidates", workspace_id=session_record["workspace_id"], limit=5000)
+    items = [
+        item
+        for item in db().list(
+            "workflow_knowledge_candidates", workspace_id=session_record["workspace_id"], limit=5000,
+        )
+        if _candidate_belongs_to_session(item, session_id, session_record["workspace_id"])
+    ]
     if run_id:
         items = [item for item in items if item.get("run_id") == run_id]
     if status:
@@ -674,8 +745,10 @@ def create_workflow_knowledge_candidates(session_id: str, run_id: str):
 @bp.post("/api/session/<session_id>/workflow-knowledge-candidates/<candidate_id>/decide")
 @api_errors
 def decide_workflow_knowledge_candidate(session_id: str, candidate_id: str):
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     candidate = require_workspace_record("workflow_knowledge_candidates", candidate_id, session_record["workspace_id"])
+    if not _candidate_belongs_to_session(candidate, session_id, session_record["workspace_id"]):
+        raise FileNotFoundError("知识候选项不存在")
     if candidate.get("status") in {"accepted", "rejected"}:
         return ok(candidate=candidate)
     payload, published_ref = body(), {}
@@ -711,6 +784,14 @@ def decide_workflow_knowledge_candidate(session_id: str, candidate_id: str):
     return ok(candidate=candidate)
 
 
+def _candidate_belongs_to_session(candidate: dict, session_id: str, wid: str) -> bool:
+    run = db().get("workflow_runs", str(candidate.get("run_id") or ""), workspace_id=wid)
+    return bool(
+        run and str(run.get("actor_id") or "local-default") == current_user_id()
+        and str(run.get("inputs", {}).get("session_id") or "") == session_id
+    )
+
+
 def _duration_seconds(start: str | None, end: str | None) -> float | None:
     if not start or not end:
         return None
@@ -720,8 +801,11 @@ def _duration_seconds(start: str | None, end: str | None) -> float | None:
         return None
 
 
-def _workflow_metrics(wid: str, version_filter: str = "") -> dict:
-    runs = db().list("workflow_runs", workspace_id=wid, limit=5000)
+def _workflow_metrics(wid: str, version_filter: str = "", *, actor_id: str = "") -> dict:
+    runs = [
+        item for item in db().list("workflow_runs", workspace_id=wid, limit=5000)
+        if not actor_id or str(item.get("actor_id") or "local-default") == actor_id
+    ]
     if version_filter:
         runs = [item for item in runs if item.get("workflow_version_id") == version_filter]
     versions = []
@@ -757,7 +841,10 @@ def _workflow_metrics(wid: str, version_filter: str = "") -> dict:
             })
         durations = [value for value in (_duration_seconds(item.get("started_at"), item.get("finished_at")) for item in terminal) if value is not None]
         waits = [value for value in (_duration_seconds(item.get("requested_at"), item.get("decided_at")) for item in approvals) if value is not None]
-        workflow = db().get("workflows", version_runs[0]["workflow_id"]) if version_runs else {}
+        workflow = (
+            db().get("workflows", version_runs[0]["workflow_id"], workspace_id=wid)
+            if version_runs else {}
+        )
         versions.append({
             "workflow_id": version_runs[0]["workflow_id"] if version_runs else "",
             "workflow_name": (workflow or {}).get("name", version_id), "workflow_version_id": version_id,
@@ -821,21 +908,38 @@ def _optimization_suggestions(metrics: dict) -> list[dict]:
 @bp.get("/api/session/<session_id>/workflow-metrics")
 @api_errors
 def workflow_metrics(session_id: str):
-    session_record = require_workspace_record("sessions", session_id)
-    metrics = _workflow_metrics(session_record["workspace_id"], str(request.args.get("workflow_version_id") or ""))
+    session_record = require_session_access(session_id)
+    metrics = _workflow_metrics(
+        session_record["workspace_id"], str(request.args.get("workflow_version_id") or ""),
+        actor_id=current_user_id(),
+    )
     suggestions = _optimization_suggestions(metrics)
     for item in suggestions:
-        db().put("workflow_optimization_suggestions", {**item, "workspace_id": session_record["workspace_id"]}, workspace_id=session_record["workspace_id"])
+        db().put(
+            "workflow_optimization_suggestions",
+            {
+                **item, "workspace_id": session_record["workspace_id"],
+                "actor_id": current_user_id(), "session_id": session_id,
+            },
+            workspace_id=session_record["workspace_id"],
+        )
     return ok(metrics=metrics, suggestions=suggestions)
 
 
 @bp.post("/api/session/<session_id>/workflow-optimization-suggestions/<suggestion_id>/draft")
 @api_errors
 def workflow_suggestion_draft(session_id: str, suggestion_id: str):
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     suggestion = require_workspace_record("workflow_optimization_suggestions", suggestion_id, session_record["workspace_id"])
+    if (
+        str(suggestion.get("actor_id") or "local-default") != current_user_id()
+        or str(suggestion.get("session_id") or "") != session_id
+    ):
+        raise FileNotFoundError("工作流优化建议不存在")
     version = require_workspace_record("workflow_versions", suggestion["workflow_version_id"], session_record["workspace_id"])
-    source = require_workspace_record("workflows", version["workflow_id"], session_record["workspace_id"])
+    source = _require_workflow_access(
+        str(version["workflow_id"]), action="query", definition=version.get("definition") or {},
+    )
     workflow = db().put(
         "workflows",
         {
@@ -853,7 +957,20 @@ def workflow_suggestion_draft(session_id: str, suggestion_id: str):
 
 @bp.get("/api/schedules")
 def list_schedules():
-    return ok(items=db().list("schedules", workspace_id=workspace_id()))
+    return ok(items=[
+        item for item in db().list("schedules", workspace_id=workspace_id())
+        if str(item.get("actor_id") or "local-default") == current_user_id()
+        and _workflow_is_authorized(
+            db().get("workflows", str(item.get("workflow_id") or ""), workspace_id=workspace_id()) or {},
+        )
+    ])
+
+
+def _owned_schedule(schedule_id: str) -> dict:
+    schedule = require_workspace_record("schedules", schedule_id)
+    if str(schedule.get("actor_id") or "local-default") != current_user_id():
+        raise FileNotFoundError("计划不存在")
+    return schedule
 
 
 @bp.post("/api/schedules")
@@ -861,7 +978,7 @@ def list_schedules():
 def create_schedule():
     payload = body()
     wid = workspace_id()
-    workflow = require_workspace_record("workflows", str(payload.get("workflow_id") or ""), wid)
+    workflow = _require_workflow_access(str(payload.get("workflow_id") or ""), action="query")
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("只能为已发布的工作流创建调度")
     cron = validate_cron(str(payload.get("cron") or ""))
@@ -887,12 +1004,12 @@ def create_schedule():
 @bp.patch("/api/schedules/<schedule_id>")
 @api_errors
 def update_schedule(schedule_id: str):
-    schedule = require_workspace_record("schedules", schedule_id)
+    schedule = _owned_schedule(schedule_id)
     payload = body()
     allowed = {"name", "workflow_id", "cron", "timezone", "inputs", "enabled"}
     changes = {key: payload[key] for key in allowed if key in payload}
     workflow_id = str(changes.get("workflow_id") or schedule.get("workflow_id") or "")
-    workflow = require_workspace_record("workflows", workflow_id, schedule["workspace_id"])
+    workflow = _require_workflow_access(workflow_id, action="query")
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("调度只能关联已发布的工作流")
     if "cron" in changes:
@@ -913,7 +1030,7 @@ def update_schedule(schedule_id: str):
 @bp.delete("/api/schedules/<schedule_id>")
 @api_errors
 def delete_schedule(schedule_id: str):
-    require_workspace_record("schedules", schedule_id)
+    _owned_schedule(schedule_id)
     if not db().archive("schedules", schedule_id):
         raise FileNotFoundError("计划不存在")
     return ok(archived=True)
@@ -922,8 +1039,8 @@ def delete_schedule(schedule_id: str):
 @bp.post("/api/schedules/<schedule_id>/run")
 @api_errors
 def run_schedule_now(schedule_id: str):
-    schedule = require_workspace_record("schedules", schedule_id)
-    workflow = require_workspace_record("workflows", schedule["workflow_id"], schedule["workspace_id"])
+    schedule = _owned_schedule(schedule_id)
+    workflow = _require_workflow_access(str(schedule["workflow_id"]), action="query")
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("调度关联的工作流尚未发布")
     executable = {**workflow, "definition": workflow["published_definition"]}
@@ -933,8 +1050,10 @@ def run_schedule_now(schedule_id: str):
 
 
 @bp.get("/api/hooks")
+@api_errors
 def list_hooks():
     wid = workspace_id()
+    require_workspace_access(wid, owner=True)
     items = db().list("hooks", workspace_id=wid)
     configured = [
         {
@@ -1003,7 +1122,9 @@ def validate_hook():
 
 
 @bp.get("/api/hooks/history")
+@api_errors
 def hook_history():
+    require_workspace_access(workspace_id(), owner=True)
     limit = int(request.args.get("limit", "100"))
     return ok(items=db().list("hook_runs", workspace_id=workspace_id(), limit=limit))
 

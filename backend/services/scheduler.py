@@ -325,7 +325,9 @@ def _dashboard_refresh_handler(app, spec, progress, cancel):
     if not current:
         raise FileNotFoundError("看板不存在")
     try:
-        refreshed = refresh_dashboard(database, current)
+        refreshed = refresh_dashboard(
+            database, current, str(current.get("owner_id") or current.get("created_by") or "local-default"),
+        )
     except Exception as exc:
         database.patch("dashboards", dashboard_id, {
             "refresh_queued_at": None, "refresh_status": "error", "refresh_error": str(exc),

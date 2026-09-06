@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, g, jsonify, request, send_from_directory, session
+from flask import Flask, Response, g, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -64,6 +64,14 @@ def create_app(test_config: dict | None = None) -> Flask:
             for value in (configured_secret, configured_encryption)
         ):
             raise RuntimeError("MERIDIAN_BACKUP_KEY 必须独立于应用会话和凭据加密密钥")
+        bootstrap_token = os.getenv("MERIDIAN_BOOTSTRAP_TOKEN", "").strip()
+        if len(bootstrap_token) < 32:
+            raise RuntimeError("生产环境必须配置至少 32 字符的 MERIDIAN_BOOTSTRAP_TOKEN")
+        metrics_token = os.getenv("MERIDIAN_METRICS_TOKEN", "").strip()
+        if len(metrics_token) < 32:
+            raise RuntimeError("生产环境必须配置至少 32 字符的 MERIDIAN_METRICS_TOKEN")
+        if not app.config["SESSION_COOKIE_SECURE"]:
+            raise RuntimeError("生产环境必须启用 MERIDIAN_COOKIE_SECURE=1")
         if not settings.trusted_hosts:
             raise RuntimeError("生产环境必须配置 MERIDIAN_TRUSTED_HOSTS")
         if not os.getenv("MERIDIAN_OUTBOUND_HOST_ALLOWLIST", "").strip():
@@ -93,6 +101,9 @@ def create_app(test_config: dict | None = None) -> Flask:
     database = Database(settings.database_path)
     database.initialize()
     app.extensions["meridian_db"] = database
+    from .core.metrics import RequestMetrics
+
+    app.extensions["meridian_metrics"] = RequestMetrics()
 
     CORS(
         app,
@@ -167,8 +178,20 @@ def create_app(test_config: dict | None = None) -> Flask:
         return None
 
     @app.before_request
+    def protect_metrics():
+        if request.path != "/api/metrics":
+            return None
+        token = os.getenv("MERIDIAN_METRICS_TOKEN", "").strip()
+        supplied = str(request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        if token and supplied and hmac.compare_digest(token, supplied):
+            return None
+        if settings.environment != "production" and request.remote_addr in {"127.0.0.1", "::1", None}:
+            return None
+        return jsonify({"ok": False, "error": "指标端点鉴权失败"}), 401
+
+    @app.before_request
     def require_authenticated_workspace():
-        if not request.path.startswith("/api/") or request.path in {"/api/health", "/api/ready"}:
+        if not request.path.startswith("/api/") or request.path in {"/api/health", "/api/ready", "/api/metrics"}:
             return None
         if request.path.startswith("/api/auth/") or request.path in {"/api/integrations/events", "/api/feishu-bot/events"}:
             return None
@@ -209,7 +232,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         owner_only_prefixes = (
             "/api/providers", "/api/models", "/api/mcp", "/api/connectors",
             "/api/compute", "/api/system/", "/api/hooks", "/api/feishu-bot",
-            "/api/warehouse/engines",
+            "/api/warehouse/engines", "/api/lifecycle",
         )
         if (
             request.method in {"POST", "PUT", "PATCH", "DELETE"}
@@ -254,12 +277,44 @@ def create_app(test_config: dict | None = None) -> Flask:
             sandbox = sandbox_client().capability()
         except Exception as exc:
             sandbox = {"available": False, "host_fallback": False, "error": str(exc)}
-        status = 200 if storage_ready and database_status == "ready" else 503
+        owner_ready = bool(database.list("users", include_archived=True, limit=1))
+        provider_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
+        if not provider_ready:
+            from .services.security import SecretVault
+
+            vault = SecretVault(app.config["VAULT_KEY"])
+            for item in database.list("providers", limit=5000):
+                if not item.get("enabled", True):
+                    continue
+                try:
+                    provider_ready = bool(
+                        (vault.open(item.get("credential", ""), {}) or {}).get("api_key"),
+                    )
+                except (TypeError, ValueError):
+                    provider_ready = False
+                if provider_ready:
+                    break
+        base_ready = storage_ready and database_status == "ready"
+        production_dependencies = owner_ready and provider_ready and bool(sandbox.get("available"))
+        status = 200 if base_ready and (settings.environment != "production" or production_dependencies) else 503
         return jsonify({
             "ok": status == 200, "database": database_status, "storage_writable": storage_ready,
+            "owner_configured": owner_ready, "model_provider_configured": provider_ready,
             "scheduler": "disabled" if os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") == "1" else "enabled",
             "sandbox": sandbox,
         }), status
+
+    @app.get("/api/metrics")
+    def metrics():
+        with database.connect() as connection:
+            run_rows = connection.execute(
+                "SELECT execution_status,quality_status FROM agent_runs ORDER BY updated_at DESC LIMIT 5000",
+            ).fetchall()
+        payload = app.extensions["meridian_metrics"].render(
+            jobs=database.list("jobs", limit=5000),
+            agent_runs=[dict(row) for row in run_rows],
+        )
+        return Response(payload, content_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.errorhandler(413)
     def too_large(_error):
@@ -313,6 +368,11 @@ def create_app(test_config: dict | None = None) -> Flask:
         if response.mimetype == "text/html" or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         if request.path.startswith("/api/"):
+            route = request.url_rule.rule if request.url_rule else "unmatched"
+            app.extensions["meridian_metrics"].observe(
+                request.method, route, response.status_code,
+                max(0.0, time.perf_counter() - getattr(g, "request_started", time.perf_counter())),
+            )
             logging.getLogger("meridian.request").info(
                 "request_completed",
                 extra={"request_detail": {

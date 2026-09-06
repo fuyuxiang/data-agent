@@ -25,6 +25,8 @@ class Settings:
     max_ingest_rows: int
     max_ingest_cells: int
     max_query_rows: int
+    max_query_bytes: int
+    max_query_cell_bytes: int
     source_sample_rows: int
     query_timeout_seconds: int
     max_analysis_rows: int
@@ -77,6 +79,8 @@ class Settings:
             max_ingest_rows=max(1, int(os.getenv("MERIDIAN_MAX_INGEST_ROWS", "1000000"))),
             max_ingest_cells=max(1, int(os.getenv("MERIDIAN_MAX_INGEST_CELLS", "10000000"))),
             max_query_rows=max(1, int(os.getenv("MERIDIAN_MAX_QUERY_ROWS", "10000"))),
+            max_query_bytes=max(1, int(os.getenv("MERIDIAN_MAX_QUERY_MB", "20"))) * 1024 * 1024,
+            max_query_cell_bytes=max(1024, int(os.getenv("MERIDIAN_MAX_QUERY_CELL_KB", "1024"))) * 1024,
             source_sample_rows=max(1, int(os.getenv("MERIDIAN_SOURCE_SAMPLE_ROWS", "50000"))),
             query_timeout_seconds=max(1, int(os.getenv("MERIDIAN_QUERY_TIMEOUT_SECONDS", "30"))),
             max_analysis_rows=max(100, int(os.getenv("MERIDIAN_MAX_ANALYSIS_ROWS", "100000"))),

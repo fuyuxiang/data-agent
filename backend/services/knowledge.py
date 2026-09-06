@@ -111,6 +111,10 @@ def _embedding(text: str, workspace_id: str = "default") -> list[float]:
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        # Indexes created by a previous provider must be rebuilt; never score
+        # truncated vectors from different embedding spaces as comparable.
+        return 0.0
     return sum(a * b for a, b in zip(left, right))
 
 

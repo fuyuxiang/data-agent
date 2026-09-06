@@ -93,6 +93,8 @@ jobs:
           MERIDIAN_SECRET_KEY: ci-secret-key-that-is-at-least-32-characters
           MERIDIAN_ENCRYPTION_KEY: ci-encryption-key-that-is-at-least-32-characters
           MERIDIAN_BACKUP_KEY: ci-backup-key-that-is-at-least-32-characters
+          MERIDIAN_BOOTSTRAP_TOKEN: ci-bootstrap-token-that-is-at-least-32-characters
+          MERIDIAN_METRICS_TOKEN: ci-metrics-token-that-is-at-least-32-characters
           MERIDIAN_SANDBOX_PROXY_TOKEN: ci-sandbox-token-that-is-at-least-32-characters
           MERIDIAN_TRUSTED_HOSTS: localhost
           MERIDIAN_OUTBOUND_HOST_ALLOWLIST: api.openai.com

@@ -20,7 +20,11 @@ from ..services.datasets import (
 )
 from ..services.jobs import get_job_manager, register_job_handler
 from ..services.security import SecretVault
-from .common import api_errors, body, db, require_workspace_record, workspace_id
+from ..services.authorization import decide_source_access
+from .common import (
+    api_errors, body, current_user_id, db, require_session_access, require_source_access,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("datasource_compat", __name__)
@@ -28,7 +32,7 @@ EXACT_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 
 def _session(sid: str) -> dict:
-    return require_workspace_record("sessions", sid)
+    return require_session_access(sid)
 
 
 def _source_schema_preview(source: dict) -> str:
@@ -54,8 +58,9 @@ def _session_sources(session: dict) -> list[dict]:
     attached = [str(value) for value in session.get("attached_source_ids") or session.get("source_ids") or []]
     result = []
     for source_id in attached:
-        source = db().get("sources", source_id)
-        if not source or source.get("workspace_id", "default") != session.get("workspace_id", "default"):
+        try:
+            source = require_source_access(source_id, session.get("workspace_id", "default"))
+        except (FileNotFoundError, PermissionError):
             continue
         item = public_source(source)
         result.append({
@@ -68,6 +73,7 @@ def _session_sources(session: dict) -> list[dict]:
 
 
 def _attach_source(session: dict, source_id: str, *, active: bool = True) -> dict:
+    require_source_access(source_id, session.get("workspace_id", "default"))
     attached = [str(value) for value in session.get("attached_source_ids") or session.get("source_ids") or []]
     active_ids = [str(value) for value in session.get("source_ids") or []]
     if source_id not in attached:
@@ -80,6 +86,8 @@ def _attach_source(session: dict, source_id: str, *, active: bool = True) -> dic
 
 
 def _replace_sources(session: dict, attached: list[str], active: list[str]) -> dict:
+    for source_id in list(dict.fromkeys([*attached, *active])):
+        require_source_access(source_id, session.get("workspace_id", "default"))
     return db().patch(
         "sessions", session["id"],
         {"attached_source_ids": attached, "source_ids": active},
@@ -144,9 +152,8 @@ def _save_warehouse(session: dict, name: str, *, autosaved: bool = False) -> dic
     attached = [str(value) for value in session.get("attached_source_ids") or session.get("source_ids") or []]
     snapshots = []
     for source_id in attached:
-        source = db().get("sources", source_id)
-        if source and source.get("workspace_id", "default") == session.get("workspace_id", "default"):
-            snapshots.append({"source_id": source_id, "active": source_id in active, "record": source})
+        source = require_source_access(source_id, session.get("workspace_id", "default"), action="export")
+        snapshots.append({"source_id": source_id, "active": source_id in active, "record": source})
     if not snapshots:
         raise ValueError("当前没有可保存的数据源")
     item = db().put(
@@ -154,12 +161,34 @@ def _save_warehouse(session: dict, name: str, *, autosaved: bool = False) -> dic
         {
             "id": f"warehouse_{uuid.uuid4().hex[:16]}.json",
             "workspace_id": session.get("workspace_id", "default"),
+            "owner_id": current_user_id(),
             "session_id": session["id"], "name": name, "saved_at": utcnow(),
             "autosaved": autosaved, "sources": snapshots,
         },
         workspace_id=session.get("workspace_id", "default"),
     )
     return _warehouse_public(item)
+
+
+def _warehouse_owned(record: dict) -> bool:
+    owner_id = str(record.get("owner_id") or "")
+    if owner_id:
+        return owner_id == current_user_id()
+    session_id = str(record.get("session_id") or "")
+    if not session_id:
+        return False
+    try:
+        _session(session_id)
+        return True
+    except (FileNotFoundError, PermissionError):
+        return False
+
+
+def _require_warehouse(filename: str, wid: str) -> dict:
+    record = require_workspace_record("data_warehouses", filename, wid)
+    if not _warehouse_owned(record):
+        raise FileNotFoundError("数据仓库不存在")
+    return record
 
 
 def _compat_job(job: dict) -> dict:
@@ -269,7 +298,7 @@ def finalize_upload(sid: str, jid: str):
     if job.get("status") != "completed":
         return jsonify({"error": "Excel 解析任务尚未完成", "status": _compat_job(job)["status"]}), 409
     source_id = str((job.get("result") or {}).get("source_id") or "")
-    source = require_workspace_record("sources", source_id, session["workspace_id"])
+    source = require_source_access(source_id, session["workspace_id"])
     session = _attach_source(session, source_id)
     added = [{
         "source_id": source_id, "source_name": source["name"],
@@ -296,7 +325,7 @@ def connect_db(sid: str):
         {"url": connection_string, "name": payload.get("name") or saved.get("name") or ""},
         session["workspace_id"],
     )
-    source = require_workspace_record("sources", source_public["id"], session["workspace_id"])
+    source = require_source_access(source_public["id"], session["workspace_id"])
     session = _attach_source(session, source["id"])
     _save_config(session["workspace_id"], "sql", {
         "connection_string": connection_string, "name": payload.get("name") or "",
@@ -315,7 +344,11 @@ def sources(sid: str):
 
 @bp.get("/api/data-warehouses")
 def warehouses():
-    return jsonify([_warehouse_public(item) for item in db().list("data_warehouses", workspace_id=workspace_id())])
+    return jsonify([
+        _warehouse_public(item)
+        for item in db().list("data_warehouses", workspace_id=workspace_id())
+        if _warehouse_owned(item)
+    ])
 
 
 @bp.post("/api/session/<sid>/data-warehouse/save")
@@ -333,11 +366,19 @@ def load_warehouse(sid: str):
     filename = str(body().get("filename") or "").strip()
     if not filename:
         raise ValueError("未指定数据仓库文件")
-    warehouse = require_workspace_record("data_warehouses", filename, session["workspace_id"])
+    warehouse = _require_warehouse(filename, session["workspace_id"])
     restored, active, errors = [], [], []
     for snapshot in warehouse.get("sources") or []:
         source_id = str(snapshot.get("source_id") or "")
         source = db().get("sources", source_id, include_archived=True)
+        if source:
+            decision = decide_source_access(
+                db(), source, workspace_id=session["workspace_id"],
+                actor_id=current_user_id(), action="update",
+            )
+            if not decision.allowed:
+                errors.append(f"{source.get('name') or source_id}: 无权恢复该数据源")
+                continue
         if source and source.get("archived_at"):
             db().restore("sources", source_id)
             source = db().get("sources", source_id)
@@ -350,6 +391,10 @@ def load_warehouse(sid: str):
             source_id = db().new_id("src")
             record["id"] = source_id
             record["workspace_id"] = session["workspace_id"]
+            allowed = record.get("authorized_user_ids")
+            if isinstance(allowed, list) and current_user_id() not in {str(value) for value in allowed}:
+                errors.append(f"{record.get('name') or source_id}: 快照权限不包含当前用户")
+                continue
             source = db().put("sources", record, workspace_id=session["workspace_id"])
         restored.append(source_id)
         if snapshot.get("active", True):
@@ -366,7 +411,7 @@ def load_warehouse(sid: str):
 @bp.delete("/api/data-warehouses/<path:filename>")
 @api_errors
 def delete_warehouse(filename: str):
-    require_workspace_record("data_warehouses", filename)
+    _require_warehouse(filename, workspace_id())
     if not db().archive("data_warehouses", filename):
         raise FileNotFoundError("数据仓库不存在")
     return jsonify({"ok": True})
@@ -376,7 +421,7 @@ def delete_warehouse(filename: str):
 @api_errors
 def analysis_tables(sid: str, source_id: str):
     session = _session(sid)
-    source = require_workspace_record("sources", source_id, session["workspace_id"])
+    source = require_source_access(source_id, session["workspace_id"], action="update")
     if source_id not in (session.get("attached_source_ids") or session.get("source_ids") or []):
         raise FileNotFoundError("data source not found")
     if source.get("kind") != "database":
@@ -397,7 +442,7 @@ def analysis_tables(sid: str, source_id: str):
 @api_errors
 def toggle_source(sid: str, source_id: str):
     session = _session(sid)
-    require_workspace_record("sources", source_id, session["workspace_id"])
+    require_source_access(source_id, session["workspace_id"])
     attached = [str(value) for value in session.get("attached_source_ids") or session.get("source_ids") or []]
     if source_id not in attached:
         raise FileNotFoundError("data source not found")
@@ -465,7 +510,7 @@ def preview_table(sid: str):
     target = next((item for item in active if item["id"] == source_id), None) if source_id else (active[0] if active else None)
     if not target:
         raise FileNotFoundError("no data source")
-    source = require_workspace_record("sources", target["id"], session["workspace_id"])
+    source = require_source_access(target["id"], session["workspace_id"])
     data = preview_source(source, table, 100)
     return jsonify({
         "name": data["table"], "columns": data["columns"], "rows": data["data"],
@@ -500,7 +545,7 @@ def connect_gsheets(sid: str):
         {"creds_dict": creds, "spreadsheet": spreadsheet, "name": payload.get("name") or ""},
         session["workspace_id"],
     )
-    source = require_workspace_record("sources", source_public["id"], session["workspace_id"])
+    source = require_source_access(source_public["id"], session["workspace_id"])
     session = _attach_source(session, source["id"])
     _save_config(session["workspace_id"], "gsheets", {
         "creds_json": json.dumps(creds, ensure_ascii=False), "spreadsheet": spreadsheet,
@@ -526,7 +571,7 @@ def connect_api(sid: str):
         {"url": url, "auth_type": auth_type, "auth_value": auth_value, "name": payload.get("name") or ""},
         session["workspace_id"],
     )
-    source = require_workspace_record("sources", source_public["id"], session["workspace_id"])
+    source = require_source_access(source_public["id"], session["workspace_id"])
     session = _attach_source(session, source["id"])
     _save_config(session["workspace_id"], "api", {
         "url": url, "auth_type": auth_type, "auth_value": auth_value, "name": payload.get("name") or "",

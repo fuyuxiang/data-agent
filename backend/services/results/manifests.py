@@ -1,12 +1,150 @@
 from __future__ import annotations
 
 import json
+import math
+import re
+from pathlib import Path
 from typing import Any, Callable
+
+import pandas as pd
 
 from ...agent.store import RunStore
 from ...core.database import Database, utcnow
 from ..validation.engine import Rule, ValidationEngine, outcome
 from .rendering import build_manifest_payload
+
+
+NUMBER_RE = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+
+
+def _result_for_ref(database: Database, workspace_id: str, ref_id: str) -> dict | None:
+    result = database.get("query_results", ref_id, workspace_id=workspace_id)
+    if result:
+        return result
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT payload FROM dataset_refs WHERE id=? AND workspace_id=?", (ref_id, workspace_id),
+        ).fetchone()
+    if not row:
+        return None
+    payload = json.loads(row["payload"])
+    result_id = str((payload.get("location") or {}).get("query_result_id") or "")
+    return database.get("query_results", result_id, workspace_id=workspace_id) if result_id else None
+
+
+def _expand_result_refs(
+    database: Database, workspace_id: str, ref_id: str, seen: set[str] | None = None,
+) -> list[str]:
+    """Resolve a validated child publication to its immutable data evidence."""
+    seen = seen or set()
+    if not ref_id or ref_id in seen:
+        return []
+    seen.add(ref_id)
+    if _result_for_ref(database, workspace_id, ref_id):
+        return [ref_id]
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT manifest_id FROM publications WHERE id=? AND workspace_id=?",
+            (ref_id, workspace_id),
+        ).fetchone()
+        manifest = connection.execute(
+            "SELECT payload FROM result_manifests WHERE id=? AND workspace_id=?",
+            (row["manifest_id"], workspace_id),
+        ).fetchone() if row else None
+    if not manifest:
+        return []
+    payload = json.loads(manifest["payload"])
+    expanded = []
+    for child_ref in payload.get("evidence_refs") or []:
+        expanded.extend(_expand_result_refs(database, workspace_id, str(child_ref), seen))
+    return list(dict.fromkeys(expanded))
+
+
+def _evidence_cells(
+    database: Database, workspace_id: str, refs: list[str], max_cells: int = 200_000,
+) -> list[dict[str, Any]]:
+    cells: list[dict[str, Any]] = []
+    seen_results: set[str] = set()
+    for ref_id in refs:
+        result = _result_for_ref(database, workspace_id, ref_id)
+        if not result or result["id"] in seen_results or result.get("completeness") != "complete":
+            continue
+        seen_results.add(result["id"])
+        path = Path(str(result.get("path") or ""))
+        frame = pd.read_csv(path) if path.is_file() else pd.DataFrame(result.get("data") or [])
+        for row_index, row in frame.iterrows():
+            for column, value in row.items():
+                if len(cells) >= max_cells:
+                    return cells
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(numeric):
+                    continue
+                cells.append({
+                    "ref": f"{result['id']}[row={int(row_index)},column={column}]",
+                    "result_id": result["id"], "row": int(row_index),
+                    "column": str(column), "value": numeric,
+                    "semantic_query": result.get("semantic_query"),
+                })
+    return cells
+
+
+def _claim_sentences(answer: str) -> list[str]:
+    return [value.strip() for value in re.split(r"(?<=[。！？!?;；])|\n+", answer) if value.strip()]
+
+
+def _claim_numbers(text: str) -> list[dict[str, Any]]:
+    output = []
+    for match in NUMBER_RE.finditer(text):
+        raw = match.group(0)
+        plain = raw.replace(",", "").rstrip("%")
+        try:
+            value = float(plain)
+        except ValueError:
+            continue
+        suffix = text[match.end(): match.end() + 1]
+        # Calendar years are context, not quantitative claims.
+        if value.is_integer() and 1900 <= value <= 2100 and (suffix == "年" or "-" in text[max(0, match.start() - 1):match.end() + 1]):
+            continue
+        output.append({"text": raw, "value": value, "percentage": raw.endswith("%")})
+    return output
+
+
+def _numbers_match(number: dict[str, Any], cell_value: float) -> bool:
+    candidates = [number["value"]]
+    if number["percentage"]:
+        candidates.append(number["value"] / 100.0)
+    return any(math.isclose(value, cell_value, rel_tol=1e-6, abs_tol=1e-9) for value in candidates)
+
+
+def _build_claims(
+    database: Database, workspace_id: str, answer: str, refs: list[str],
+) -> list[dict[str, Any]]:
+    cells = _evidence_cells(database, workspace_id, refs)
+    claims = []
+    for text in _claim_sentences(answer):
+        numbers = _claim_numbers(text)
+        matched = []
+        unmatched = []
+        for number in numbers:
+            found = next((cell for cell in cells if _numbers_match(number, cell["value"])), None)
+            if found:
+                matched.append({"number": number["text"], **found})
+            else:
+                unmatched.append(number["text"])
+        semantic_refs = list(dict.fromkeys(
+            f"metric:{item['semantic_query']['metric_id']}@{item['semantic_query']['metric_version']}"
+            for item in matched if item.get("semantic_query")
+        ))
+        claims.append({
+            "text": text, "evidence_refs": refs, "evidence_cells": matched,
+            "definition_refs": semantic_refs, "numbers": numbers,
+            "unmatched_numbers": unmatched,
+            "numeric_replay": "PASS" if not unmatched else "FAIL",
+        })
+    return claims
 
 
 class ResultService:
@@ -48,22 +186,47 @@ class ResultService:
                 "PASS" if ctx["validated"] else "FAIL",
                 "已执行独立结果验证" if ctx["validated"] else "未执行或未通过独立结果验证",
             )),
+            Rule("numeric_claim_replay", "1", "expression", "blocking", 3, lambda ctx: outcome(
+                "PASS" if all(item["numeric_replay"] == "PASS" for item in ctx["claims"]) else "FAIL",
+                "回答中的数字均可从证据单元格复算"
+                if all(item["numeric_replay"] == "PASS" for item in ctx["claims"])
+                else "回答包含无法从证据单元格核对的数字",
+                unmatched=[
+                    {"claim": item["text"], "numbers": item["unmatched_numbers"]}
+                    for item in ctx["claims"] if item["unmatched_numbers"]
+                ],
+            )),
         ]
         successful = [item for item in evidence if item.get("status") == "SUCCEEDED"]
         failed = [item.get("tool") for item in evidence if item.get("status") in {"FAILED", "UNKNOWN"}]
-        refs = list(dict.fromkeys(ref for item in successful for ref in item.get("refs") or []))
-        referenced = [item for item in successful if item.get("refs")]
-        complete = bool(referenced) and all(item.get("completeness") == "complete" for item in referenced)
-        validated = any(item.get("validation_status") == "PASS" for item in successful)
+        all_refs = list(dict.fromkeys(ref for item in successful for ref in item.get("refs") or []))
+        refs = list(dict.fromkeys(
+            resolved
+            for ref in all_refs
+            for resolved in _expand_result_refs(self.db, run["workspace_id"], ref)
+        ))
+        referenced = [
+            item for item in successful
+            if any(ref in refs for ref in item.get("refs") or [])
+        ]
+        complete = bool(refs) and all(item.get("completeness") == "complete" for item in referenced)
+        validated_refs = {
+            resolved
+            for item in successful if item.get("validation_status") == "PASS"
+            for ref in item.get("refs") or []
+            for resolved in _expand_result_refs(self.db, run["workspace_id"], ref)
+        }
+        validated = bool(refs) and set(refs).issubset(validated_refs)
+        claims = _build_claims(self.db, run["workspace_id"], answer, refs)
         subject = refs[0] if refs else f"run:{run_id}"
         validation = ValidationEngine(self.db, rules).evaluate(
             run_id=run_id, workspace_id=run["workspace_id"], subject_ref=subject,
             context={
                 "successful": successful, "failed": failed, "refs": refs,
-                "complete": complete, "validated": validated,
+                "complete": complete, "validated": validated, "claims": claims,
             },
         )
-        manifest = self.create_manifest(run, contract, answer, refs, validation)
+        manifest = self.create_manifest(run, contract, answer, refs, validation, claims)
         if validation["status"] != "PASS":
             return {
                 "published": False, "quality_status": "failed" if validation["status"] == "FAIL" else "unknown",
@@ -82,6 +245,7 @@ class ResultService:
         answer: str,
         evidence_refs: list[str],
         validation: dict[str, Any],
+        claims: list[dict[str, Any]],
     ) -> dict[str, Any]:
         with self.db.transaction() as connection:
             row = connection.execute(
@@ -103,17 +267,31 @@ class ResultService:
                    VALUES(?,?,?,?,?,?,?)""",
                 (manifest_id, run["workspace_id"], run["id"], version, "validated_draft", json.dumps(payload, ensure_ascii=False), utcnow()),
             )
-            claim_id = self.db.new_id("claim")
-            claim = {
-                "text": answer, "evidence_refs": evidence_refs, "definition_refs": [],
-                "validation_refs": [item["id"] for item in validation["items"]], "status": "validated" if validation["status"] == "PASS" else "draft",
-            }
-            connection.execute(
-                """INSERT INTO claims(id,workspace_id,run_id,manifest_id,claim_type,payload,created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (claim_id, run["workspace_id"], run["id"], manifest_id, "fact", json.dumps(claim, ensure_ascii=False), utcnow()),
-            )
-            payload["claims"] = [claim_id]
+            claim_ids = []
+            claim_details = []
+            for value in claims:
+                claim_id = self.db.new_id("claim")
+                claim = {
+                    **value,
+                    "validation_refs": [item["id"] for item in validation["items"]],
+                    "status": (
+                        "validated"
+                        if validation["status"] == "PASS" and value["numeric_replay"] == "PASS"
+                        else "draft"
+                    ),
+                }
+                connection.execute(
+                    """INSERT INTO claims(id,workspace_id,run_id,manifest_id,claim_type,payload,created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        claim_id, run["workspace_id"], run["id"], manifest_id, "fact",
+                        json.dumps(claim, ensure_ascii=False), utcnow(),
+                    ),
+                )
+                claim_ids.append(claim_id)
+                claim_details.append({"id": claim_id, **claim})
+            payload["claims"] = claim_ids
+            payload["claim_details"] = claim_details
             connection.execute(
                 "UPDATE result_manifests SET payload=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), manifest_id),
             )

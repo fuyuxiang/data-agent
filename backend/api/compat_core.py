@@ -18,7 +18,10 @@ from ..services.hooks import SUPPORTED_EVENTS, normalize_event_name
 from ..services.mcp import ALLOWED_STDIO_COMMANDS, get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
 from ..services.security import SecretVault, validate_outbound_url
-from .common import api_errors, body, current_user_id, db, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, current_user_id, db, require_session_access,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("compat_core", __name__)
@@ -396,7 +399,7 @@ def test_model():
 @bp.post("/api/session/<sid>/model")
 @api_errors
 def set_session_model(sid: str):
-    session = require_workspace_record("sessions", sid)
+    session = require_session_access(sid)
     provider = str(body().get("provider") or "").strip()
     if provider != "environment-default":
         require_workspace_record("providers", provider, session["workspace_id"])

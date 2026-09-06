@@ -194,14 +194,15 @@ def embed_batch(texts: Sequence[str], workspace_id: str = "default") -> list[lis
         except Exception:
             _cloud_status[workspace_id] = False
             if config["mode"] == "cloud":
-                # Keep semantic search available by falling through to the local hash provider.
-                pass
-    if config["mode"] in {"auto", "local", "cloud"} and local_installed():
+                raise
+    if config["mode"] in {"auto", "local"} and local_installed():
         try:
             return local_embed_batch(texts)
         except Exception:
             if config["mode"] == "local":
-                pass
+                raise
+    if config["mode"] in {"cloud", "local"}:
+        raise RuntimeError(f"显式向量模式 {config['mode']} 不可用，已拒绝静默降级")
     return [hash_embed(text) for text in texts]
 
 
@@ -225,8 +226,10 @@ def info(workspace_id: str, *, probe: bool = False) -> dict:
     local_available = local_installed()
     if config["mode"] in {"auto", "cloud"} and config["token_configured"] and cloud_available is True:
         active, dimensions, model = "cloud", 0, config["model"]
-    elif config["mode"] in {"auto", "local", "cloud"} and local_available:
+    elif config["mode"] in {"auto", "local"} and local_available:
         active, dimensions, model = "local", LOCAL_DIMENSIONS, "BGE-small-zh-v1.5 (local)"
+    elif config["mode"] in {"cloud", "local"}:
+        active, dimensions, model = "unavailable", 0, config["model"]
     else:
         active, dimensions, model = "hash", HASH_DIMENSIONS, "基础关键词匹配（Hash 384维）"
     return {

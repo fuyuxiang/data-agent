@@ -34,6 +34,58 @@ def test_database_rejects_cross_workspace_record_takeover(app):
     assert database.get("mcp_servers", "shared-id")["name"] == "alpha"
 
 
+def test_prometheus_metrics_use_bounded_route_labels(client):
+    client.get("/api/health")
+    response = client.get("/api/metrics")
+    assert response.status_code == 200
+    content = response.get_data(as_text=True)
+    assert "meridian_http_requests_total" in content
+    assert 'route="/api/health"' in content
+    assert "meridian_http_request_duration_seconds_bucket" in content
+
+
+def test_production_metrics_require_bearer_token_and_readiness_is_strict(monkeypatch, tmp_path):
+    from backend import create_app
+
+    token = "metrics-token-that-is-longer-than-thirty-two-characters"
+    monkeypatch.setenv("MERIDIAN_ENV", "production")
+    monkeypatch.setenv("MERIDIAN_METRICS_TOKEN", token)
+    monkeypatch.setenv("MERIDIAN_STORAGE_DIR", str(tmp_path / "storage"))
+    application = create_app({
+        "TESTING": True,
+        "DATABASE_PATH": tmp_path / "production-metrics.sqlite3",
+        "STORAGE_DIR": tmp_path / "storage",
+    })
+    client = application.test_client()
+
+    assert client.get("/api/metrics").status_code == 401
+    assert client.get("/api/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get(
+        "/api/metrics", headers={"Authorization": f"Bearer {token}"},
+    ).status_code == 200
+    readiness = client.get("/api/ready")
+    assert readiness.status_code == 503
+    assert readiness.get_json()["owner_configured"] is False
+
+
+def test_explicit_embedding_provider_fails_closed(monkeypatch):
+    from backend.services import embeddings
+    from backend.services.knowledge import _cosine
+
+    monkeypatch.setattr(embeddings, "get_config", lambda _wid: {
+        "mode": "cloud", "url": "https://embedding.example.com", "model": "embedding-model",
+        "token": "secret", "token_configured": True,
+    })
+    monkeypatch.setattr(embeddings, "local_installed", lambda: True)
+    monkeypatch.setattr(
+        embeddings, "cloud_embed_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("cloud unavailable")),
+    )
+    with pytest.raises(ConnectionError, match="cloud unavailable"):
+        embeddings.embed_batch(["业务口径"])
+    assert _cosine([1.0, 0.0], [1.0]) == 0.0
+
+
 def test_provider_resolution_and_bootstrap_are_workspace_scoped(app, client):
     database = app.extensions["meridian_db"]
     with app.app_context():
@@ -346,6 +398,30 @@ def test_production_requires_independent_backup_key(monkeypatch, tmp_path):
     monkeypatch.delenv("MERIDIAN_BACKUP_KEY", raising=False)
     with pytest.raises(RuntimeError, match="MERIDIAN_BACKUP_KEY"):
         create_app()
+
+
+def test_production_first_owner_requires_bootstrap_token(monkeypatch, tmp_path):
+    from backend import create_app
+
+    token = "bootstrap-token-that-is-longer-than-thirty-two-characters"
+    monkeypatch.setenv("MERIDIAN_ENV", "production")
+    monkeypatch.setenv("MERIDIAN_BOOTSTRAP_TOKEN", token)
+    application = create_app({
+        "TESTING": True,
+        "DATABASE_PATH": tmp_path / "production.sqlite3",
+        "STORAGE_DIR": tmp_path / "storage",
+    })
+    client = application.test_client()
+    payload = {
+        "email": "production-owner@example.com", "password": "correct-horse",
+        "name": "Production Owner",
+    }
+    denied = client.post("/api/auth/register", json=payload)
+    assert denied.status_code == 403
+    created = client.post(
+        "/api/auth/register", json={**payload, "bootstrap_token": token},
+    )
+    assert created.status_code == 201
 
 
 def test_invalid_compressed_upload_is_a_client_error(client):

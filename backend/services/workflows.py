@@ -17,6 +17,7 @@ from ..agent.store import RunStore
 from ..agent.tools import ToolExecutor, ToolRegistry
 from ..core.database import Database, utcnow
 from .analytics import run_analysis
+from .authorization import require_result_access, require_session_access, require_sources_access
 from .datasets import execute_query, load_result_frame, source_table
 from .exports import export_data, export_report
 from .hooks import dispatch_hooks
@@ -352,6 +353,11 @@ def start_workflow(
     if not validation["valid"]:
         raise ValueError("；".join(validation["errors"]))
     workspace_id = workflow.get("workspace_id", "default")
+    requested_session_id = str(payload.get("session_id") or "")
+    if requested_session_id:
+        require_session_access(
+            _db(), requested_session_id, workspace_id=workspace_id, actor_id=str(actor_id),
+        )
     normalized = validation["definition"]
     run_id = _db().new_id("run")
     if idempotency_key:
@@ -365,13 +371,9 @@ def start_workflow(
                 raise ValueError("幂等键已被不同的工作流请求占用")
             return existing
     source_ids = _workflow_source_ids(normalized, payload)
-    for source_id in source_ids:
-        source = _db().get("sources", source_id, workspace_id=workspace_id)
-        if not source:
-            raise PermissionError("工作流引用的数据源不存在或不属于当前工作空间")
-        allowed_users = source.get("authorized_user_ids")
-        if isinstance(allowed_users, list) and actor_id not in allowed_users:
-            raise PermissionError("工作流执行者无权访问选定数据源")
+    require_sources_access(
+        _db(), source_ids, workspace_id=workspace_id, actor_id=str(actor_id), action="analyze",
+    )
     store = RunStore(_db())
     agent_run, _ = store.create_run(
         workspace_id=workspace_id, session_id=str(payload.get("session_id") or f"workflow:{workflow['id']}"),
@@ -476,25 +478,36 @@ def _execute_step(step: dict, config: dict, context: dict, workspace_id: str) ->
     step_type = step["type"]
     if step_type == "query":
         source_ids = config.get("source_ids") or context["inputs"].get("source_ids")
-        return execute_query([str(item) for item in source_ids or []], str(config["sql"]), workspace_id)
+        return execute_query(
+            [str(item) for item in source_ids or []], str(config["sql"]), workspace_id,
+            actor_id=str(context.get("_actor_id") or "local-default"),
+        )
     if step_type == "analysis":
         result_id = config.get("result_id") or context.get("result_id")
         if result_id:
-            result = _db().get("query_results", str(result_id))
-            if not result or result.get("workspace_id", "default") != workspace_id:
-                raise ValueError("分析步骤的查询结果不存在或不属于当前工作空间")
+            require_result_access(
+                _db(), _db().get("query_results", str(result_id)), workspace_id=workspace_id,
+                actor_id=str(context.get("_actor_id") or "local-default"), action="analyze",
+            )
             frame = load_result_frame(str(result_id))
         else:
             source_id = config.get("source_id") or context["inputs"].get("source_id")
-            source = _db().get("sources", str(source_id or ""))
-            if not source or source.get("workspace_id", "default") != workspace_id:
-                raise ValueError("分析步骤的数据源不存在或不属于当前工作空间")
+            source = require_sources_access(
+                _db(), [str(source_id or "")], workspace_id=workspace_id,
+                actor_id=str(context.get("_actor_id") or "local-default"), action="analyze",
+            )[0]
             _, frame = source_table(source, config.get("table"))
         return run_analysis(frame, str(config["method"]), config.get("params", {}))
     if step_type == "export_data":
-        return export_data({**config, "result_id": config.get("result_id") or context.get("result_id")}, workspace_id)
+        return export_data(
+            {**config, "result_id": config.get("result_id") or context.get("result_id")},
+            workspace_id, str(context.get("_actor_id") or "local-default"),
+        )
     if step_type == "export_report":
-        return export_report({**config, "result_id": config.get("result_id") or context.get("result_id")}, workspace_id)
+        return export_report(
+            {**config, "result_id": config.get("result_id") or context.get("result_id")},
+            workspace_id, str(context.get("_actor_id") or "local-default"),
+        )
     if step_type == "notification":
         connector_id = str(config.get("connector_id") or "")
         if not connector_id:
@@ -735,7 +748,10 @@ def execute_run(run_id: str, progress, cancel) -> dict:
         raise FileNotFoundError("工作流运行不存在")
     definition = normalize_definition(run.get("definition_snapshot") or {})
     by_id = {step["id"]: step for step in definition["steps"]}
-    context: dict[str, Any] = {"inputs": deepcopy(run.get("inputs", {})), "steps": {}}
+    context: dict[str, Any] = {
+        "inputs": deepcopy(run.get("inputs", {})), "steps": {},
+        "_actor_id": str(run.get("actor_id") or "local-default"),
+    }
     context.update(run.get("inputs", {}))
     for step_id, output in run.get("outputs", {}).items():
         if isinstance(output, dict):
@@ -931,15 +947,24 @@ def execute_run(run_id: str, progress, cancel) -> dict:
         actions = parent_store.actions(run["agent_run_id"])
         evidence = []
         for action in actions:
-            node_id = str((action.get("arguments") or {}).get("node_id") or "")
+            arguments = action.get("arguments") or {}
+            node_id = str(arguments.get("node_id") or "")
             if action["status"] != "succeeded" and run.get("step_states", {}).get(node_id, {}).get("status") == "completed":
                 continue
             result = action.get("result") or {}
             tool_result = result.get("tool_result") or {}
+            has_data_ref = bool(
+                tool_result.get("dataset_ref_id") or tool_result.get("result_id")
+                or tool_result.get("publication_id")
+            )
+            refs = (
+                list(tool_result.get("output_refs") or [])
+                if has_data_ref or action["tool_id"] == "validate_result" else []
+            )
             evidence.append({
                 "tool": action["tool_id"],
                 "status": "SUCCEEDED" if action["status"] == "succeeded" else "FAILED",
-                "refs": list(tool_result.get("output_refs") or []),
+                "refs": refs,
                 "completeness": tool_result.get("completeness", "unknown"),
                 "validation_status": tool_result.get("validation_status", "not_evaluated"),
             })
@@ -959,7 +984,7 @@ def execute_run(run_id: str, progress, cancel) -> dict:
             _db(), authorize=lambda current: _source_authorized(_db(), current),
         ).finalize(
             run["agent_run_id"],
-            json.dumps(run["outputs"], ensure_ascii=False, default=str, sort_keys=True),
+            "工作流已完成，数据结果已通过独立验证。",
             evidence,
         )
         run["result_manifest_id"] = final.get("manifest_id")

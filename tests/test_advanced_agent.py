@@ -96,6 +96,11 @@ def test_analysis_attachments_are_bounded_and_contract_scope_locks(client):
 
 def test_single_agent_loop_publishes_only_after_independent_validation(app):
     store, run = _confirmed_run(app)
+    store.db.put("query_results", {
+        "id": "result-1", "workspace_id": "default", "source_ids": [],
+        "rows": 1, "columns": ["checked"], "data": [{"checked": 1}],
+        "completeness": "complete", "accuracy": "exact",
+    }, workspace_id="default")
     registry = ToolRegistry()
     registry.register(ToolSpec("query", "query", {"type": "object", "properties": {}}), lambda _args: {
         "result_id": "result-1", "output_refs": ["result-1"], "completeness": "complete",
@@ -137,6 +142,40 @@ def test_publication_gate_blocks_partial_or_unvalidated_result(app):
     assert result.status == "finished"
     assert result.outcome == "partial"
     assert result.publication_id is None
+
+
+def test_publication_gate_replays_numeric_claims_against_result_cells(app, source):
+    from backend.services.datasets import execute_query
+
+    store, run = _confirmed_run(app, source_ids=(source["id"],))
+    with app.app_context():
+        result = execute_query(
+            [source["id"]], "SELECT SUM(sales) AS total_sales FROM data", "default",
+            actor_id="local-default",
+        )
+        evidence = [
+            {
+                "tool": "query_data", "status": "SUCCEEDED", "refs": [result["id"]],
+                "completeness": "complete", "validation_status": "not_evaluated",
+            },
+            {
+                "tool": "validate_result", "status": "SUCCEEDED", "refs": [result["id"]],
+                "completeness": "complete", "validation_status": "PASS",
+            },
+        ]
+        blocked = ResultService(store.db).finalize(run["id"], "销售额合计为 999 元。", evidence)
+        assert blocked["published"] is False
+        replay = next(
+            item for item in blocked["validation"]["items"]
+            if item["rule_id"] == "numeric_claim_replay"
+        )
+        assert replay["status"] == "FAIL"
+
+        published = ResultService(store.db).finalize(run["id"], "销售额合计为 745 元。", evidence)
+        assert published["published"] is True
+        claims = ResultService(store.db).claims(run["id"], workspace_id="default")
+        assert claims[-1]["payload"]["numeric_replay"] == "PASS"
+        assert claims[-1]["payload"]["evidence_cells"][0]["column"] == "total_sales"
 
 
 def test_tool_executor_enforces_effective_tools_and_budget(app):

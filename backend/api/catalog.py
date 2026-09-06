@@ -4,6 +4,7 @@ import pandas as pd
 from flask import Blueprint, current_app, request, send_file
 
 from ..services.analytics import clean_frame, profile
+from ..services.authorization import filter_authorized_sources, inherited_source_policy
 from ..services.datasets import (
     execute_query,
     preview_source,
@@ -18,9 +19,13 @@ from ..services.datasets import (
     source_table,
 )
 from ..services.knowledge import add_document, public_document, save_entry, search
+from ..services.semantic import (
+    compile_metric_query, execute_metric_query, save_metric, save_model, visible_metrics,
+)
 from ..services.skills import get_skill, load_skills, public_skill, read_skill_resource
 from .common import (
     api_errors, body, current_user_id, db, ok, require_workspace_access,
+    require_query_result_access, require_session_access, require_source_access,
     require_workspace_record, workspace_id,
 )
 
@@ -28,19 +33,38 @@ from .common import (
 bp = Blueprint("catalog", __name__)
 
 
+def _source_set(set_id: str) -> dict:
+    item = require_workspace_record("source_sets", set_id)
+    for source_id in item.get("source_ids") or []:
+        require_source_access(str(source_id), item["workspace_id"])
+    return item
+
+
 @bp.get("/api/sources")
 def list_sources():
+    wid = workspace_id()
     page = db().page(
-        "sources", workspace_id=workspace_id(), limit=int(request.args.get("limit", 100)),
+        "sources", workspace_id=wid, limit=int(request.args.get("limit", 100)),
         cursor=str(request.args.get("cursor") or ""), search=str(request.args.get("q") or ""),
         category=str(request.args.get("category") or ""),
     )
-    return ok(items=[public_source(item) for item in page["items"]], next_cursor=page["next_cursor"])
+    visible = filter_authorized_sources(
+        db(), page["items"], workspace_id=wid, actor_id=current_user_id(),
+    )
+    return ok(items=[public_source(item) for item in visible], next_cursor=page["next_cursor"])
 
 
 @bp.get("/api/source-sets")
 def list_source_sets():
-    return ok(items=db().list("source_sets", workspace_id=workspace_id()))
+    items = []
+    for item in db().list("source_sets", workspace_id=workspace_id()):
+        try:
+            for source_id in item.get("source_ids") or []:
+                require_source_access(str(source_id), item["workspace_id"])
+        except (FileNotFoundError, PermissionError):
+            continue
+        items.append(item)
+    return ok(items=items)
 
 
 @bp.post("/api/source-sets")
@@ -52,7 +76,7 @@ def create_source_set():
         raise ValueError("数据组合需要名称和至少一个数据源")
     wid = workspace_id()
     for source_id in source_ids:
-        require_workspace_record("sources", source_id, wid)
+        require_source_access(source_id, wid)
     item = db().put(
         "source_sets",
         {"id": db().new_id("set"), "workspace_id": wid, "name": str(payload["name"])[:100], "description": str(payload.get("description") or "")[:500], "source_ids": source_ids},
@@ -64,19 +88,23 @@ def create_source_set():
 @bp.patch("/api/source-sets/<set_id>")
 @api_errors
 def update_source_set(set_id: str):
-    require_workspace_record("source_sets", set_id)
+    item = _source_set(set_id)
     if "source_ids" in body():
         for source_id in body()["source_ids"]:
-            require_workspace_record("sources", str(source_id))
-    return ok(item=db().patch("source_sets", set_id, {key: value for key, value in body().items() if key in {"name", "description", "source_ids"}}))
+            require_source_access(str(source_id))
+    return ok(item=db().patch(
+        "source_sets", set_id,
+        {key: value for key, value in body().items() if key in {"name", "description", "source_ids"}},
+        workspace_id=item["workspace_id"],
+    ))
 
 
 @bp.post("/api/source-sets/<set_id>/apply")
 @api_errors
 def apply_source_set(set_id: str):
-    item = require_workspace_record("source_sets", set_id)
+    item = _source_set(set_id)
     session_id = str(body().get("session_id") or "")
-    session_record = require_workspace_record("sessions", session_id)
+    session_record = require_session_access(session_id)
     if session_record.get("workspace_id") != item.get("workspace_id"):
         raise ValueError("数据组合与会话不属于同一工作空间")
     session = db().patch("sessions", session_id, {"source_ids": item["source_ids"]})
@@ -86,7 +114,7 @@ def apply_source_set(set_id: str):
 @bp.delete("/api/source-sets/<set_id>")
 @api_errors
 def archive_source_set(set_id: str):
-    require_workspace_record("source_sets", set_id)
+    _source_set(set_id)
     if not db().archive("source_sets", set_id):
         raise FileNotFoundError("数据组合不存在")
     return ok(archived=True)
@@ -132,13 +160,56 @@ def connect_lark_table():
 @bp.get("/api/sources/<source_id>")
 @api_errors
 def get_source(source_id: str):
-    return ok(item=public_source(require_workspace_record("sources", source_id)))
+    return ok(item=public_source(require_source_access(source_id)))
+
+
+@bp.patch("/api/sources/<source_id>")
+@api_errors
+def update_source(source_id: str):
+    source = require_source_access(source_id, action="update")
+    payload = body()
+    allowed = {
+        key: payload[key]
+        for key in ("name", "description", "classification", "sensitivity", "retention_policy")
+        if key in payload
+    }
+    if "authorized_user_ids" in payload:
+        require_workspace_access(source["workspace_id"], owner=True)
+        values = payload["authorized_user_ids"]
+        if values is not None and not isinstance(values, list):
+            raise ValueError("authorized_user_ids 必须是用户 ID 数组或 null")
+        if isinstance(values, list):
+            member_ids = {
+                str(item.get("user_id"))
+                for item in db().list("workspace_members", workspace_id=source["workspace_id"], limit=5000)
+                if item.get("enabled", True)
+            }
+            if not db().list("users", include_archived=True, limit=1):
+                member_ids.add("local-default")
+            normalized = list(dict.fromkeys(str(value) for value in values if str(value)))
+            if any(value not in member_ids for value in normalized):
+                raise ValueError("数据源授权用户必须是当前工作空间成员")
+            if current_user_id() not in normalized:
+                raise ValueError("不能在本次操作中移除自己的数据源访问权限")
+            allowed["authorized_user_ids"] = normalized
+        else:
+            allowed["authorized_user_ids"] = None
+    if "name" in allowed:
+        allowed["name"] = str(allowed["name"]).strip()[:120]
+        if not allowed["name"]:
+            raise ValueError("数据源名称不能为空")
+    item = db().patch("sources", source_id, allowed, workspace_id=source["workspace_id"])
+    db().audit(
+        "source.updated", workspace_id=source["workspace_id"], actor=current_user_id(),
+        object_type="source", object_id=source_id, detail={"fields": sorted(allowed)},
+    )
+    return ok(item=public_source(item or source))
 
 
 @bp.delete("/api/sources/<source_id>")
 @api_errors
 def archive_source(source_id: str):
-    require_workspace_record("sources", source_id)
+    require_source_access(source_id, action="delete")
     if not db().archive("sources", source_id):
         raise FileNotFoundError("数据源不存在")
     return ok(archived=True)
@@ -147,26 +218,26 @@ def archive_source(source_id: str):
 @bp.post("/api/sources/<source_id>/refresh")
 @api_errors
 def refresh(source_id: str):
-    return ok(item=public_source(refresh_source(require_workspace_record("sources", source_id))))
+    return ok(item=public_source(refresh_source(require_source_access(source_id, action="refresh"))))
 
 
 @bp.get("/api/sources/<source_id>/schema")
 @api_errors
 def source_schema(source_id: str):
-    return ok(schema=schema_for_source(require_workspace_record("sources", source_id)))
+    return ok(schema=schema_for_source(require_source_access(source_id)))
 
 
 @bp.get("/api/sources/<source_id>/preview")
 @api_errors
 def source_preview(source_id: str):
     limit = int(request.args.get("limit", "100"))
-    return ok(preview=preview_source(require_workspace_record("sources", source_id), request.args.get("table"), min(limit, 500)))
+    return ok(preview=preview_source(require_source_access(source_id), request.args.get("table"), min(limit, 500)))
 
 
 @bp.get("/api/sources/<source_id>/profile")
 @api_errors
 def source_profile(source_id: str):
-    _, frame = source_table(require_workspace_record("sources", source_id), request.args.get("table"))
+    _, frame = source_table(require_source_access(source_id), request.args.get("table"))
     return ok(profile=profile(frame))
 
 
@@ -174,7 +245,7 @@ def source_profile(source_id: str):
 @api_errors
 def clean_preview(source_id: str):
     payload = body()
-    _, frame = source_table(require_workspace_record("sources", source_id), payload.get("table"))
+    _, frame = source_table(require_source_access(source_id, action="analyze"), payload.get("table"))
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     return ok(
         before=profile(frame),
@@ -188,7 +259,7 @@ def clean_preview(source_id: str):
 @api_errors
 def clean_apply(source_id: str):
     payload = body()
-    source = require_workspace_record("sources", source_id)
+    source = require_source_access(source_id, action="analyze")
     _, frame = source_table(source, payload.get("table"))
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     derived_id = db().new_id("src")
@@ -207,6 +278,7 @@ def clean_apply(source_id: str):
             "lineage": {"operation": "clean", "steps": log},
             "tables": [{"name": "data", "source_name": "data", "rows": len(cleaned), "columns": len(cleaned.columns)}],
             "status": "ready",
+            **inherited_source_policy(source),
         },
         workspace_id=source.get("workspace_id", workspace_id()),
     )
@@ -220,7 +292,10 @@ def query():
     source_ids = payload.get("source_ids") or ([payload["source_id"]] if payload.get("source_id") else [])
     if not source_ids:
         raise ValueError("请选择数据源")
-    result = execute_query([str(item) for item in source_ids], str(payload.get("sql") or ""), workspace_id(), int(payload.get("limit", 1000)))
+    result = execute_query(
+        [str(item) for item in source_ids], str(payload.get("sql") or ""), workspace_id(),
+        int(payload.get("limit", 1000)), actor_id=current_user_id(),
+    )
     public = {key: value for key, value in result.items() if key != "path"}
     return ok(result=public)
 
@@ -228,9 +303,106 @@ def query():
 @bp.get("/api/query-results/<result_id>")
 @api_errors
 def get_query_result(result_id: str):
-    item = require_workspace_record("query_results", result_id)
+    item = require_query_result_access(result_id)
     item = {key: value for key, value in item.items() if key != "path"}
     return ok(result=item)
+
+
+@bp.get("/api/semantic/models")
+def list_semantic_models():
+    wid = workspace_id()
+    items = []
+    for item in db().list("semantic_models", workspace_id=wid, limit=5000):
+        try:
+            require_source_access(str(item.get("source_id") or ""), wid)
+        except (FileNotFoundError, PermissionError):
+            continue
+        items.append(item)
+    return ok(items=items)
+
+
+@bp.post("/api/semantic/models")
+@api_errors
+def create_semantic_model():
+    wid = workspace_id()
+    return ok(item=save_model(db(), body(), wid, current_user_id())), 201
+
+
+@bp.patch("/api/semantic/models/<model_id>")
+@api_errors
+def update_semantic_model(model_id: str):
+    current = require_workspace_record("semantic_models", model_id)
+    require_source_access(str(current.get("source_id") or ""), current["workspace_id"], action="update")
+    has_approved_metrics = any(
+        item.get("model_id") == model_id and item.get("status") == "approved"
+        for item in db().list("semantic_metrics", workspace_id=current["workspace_id"], limit=5000)
+    )
+    if has_approved_metrics:
+        require_workspace_access(current["workspace_id"], owner=True)
+    return ok(item=save_model(db(), body(), current["workspace_id"], current_user_id(), model_id))
+
+
+@bp.delete("/api/semantic/models/<model_id>")
+@api_errors
+def archive_semantic_model(model_id: str):
+    current = require_workspace_record("semantic_models", model_id)
+    require_source_access(str(current.get("source_id") or ""), current["workspace_id"], action="delete")
+    referenced = [
+        item for item in db().list("semantic_metrics", workspace_id=current["workspace_id"], limit=5000)
+        if item.get("model_id") == model_id
+    ]
+    if referenced:
+        raise ValueError("语义模型仍被指标引用，请先删除或迁移这些指标")
+    if not db().archive("semantic_models", model_id):
+        raise FileNotFoundError("语义模型不存在")
+    return ok(archived=True)
+
+
+@bp.get("/api/semantic/metrics")
+def list_semantic_metrics():
+    return ok(items=visible_metrics(db(), workspace_id(), current_user_id()))
+
+
+@bp.post("/api/semantic/metrics")
+@api_errors
+def create_semantic_metric():
+    wid = workspace_id()
+    if str(body().get("status") or "draft") == "approved":
+        require_workspace_access(wid, owner=True)
+    return ok(item=save_metric(db(), body(), wid, current_user_id())), 201
+
+
+@bp.patch("/api/semantic/metrics/<metric_id>")
+@api_errors
+def update_semantic_metric(metric_id: str):
+    current = require_workspace_record("semantic_metrics", metric_id)
+    if current.get("status") == "approved" or str(body().get("status") or "") == "approved":
+        require_workspace_access(current["workspace_id"], owner=True)
+    return ok(item=save_metric(db(), body(), current["workspace_id"], current_user_id(), metric_id))
+
+
+@bp.delete("/api/semantic/metrics/<metric_id>")
+@api_errors
+def archive_semantic_metric(metric_id: str):
+    current = require_workspace_record("semantic_metrics", metric_id)
+    require_workspace_access(current["workspace_id"], owner=True)
+    if not db().archive("semantic_metrics", metric_id):
+        raise FileNotFoundError("语义指标不存在")
+    return ok(archived=True)
+
+
+@bp.post("/api/semantic/compile")
+@api_errors
+def compile_semantic_metric():
+    return ok(plan=compile_metric_query(db(), body(), workspace_id(), current_user_id()))
+
+
+@bp.post("/api/semantic/query")
+@api_errors
+def query_semantic_metric():
+    output = execute_metric_query(db(), body(), workspace_id(), current_user_id())
+    result = {key: value for key, value in output["result"].items() if key != "path"}
+    return ok(plan=output["plan"], result=result)
 
 
 @bp.get("/api/knowledge/documents")
