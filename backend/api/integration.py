@@ -15,6 +15,7 @@ from flask import Blueprint, current_app, request
 
 from ..services.mcp import get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
+from ..services.saas import assert_feature_enabled
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
 from .common import (
     api_errors, body, current_user_id, db, ok, require_system_owner,
@@ -101,6 +102,8 @@ def mcp_servers():
 @api_errors
 def create_mcp_server():
     payload = body()
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "mcp_integrations")
     transport = str(payload.get("transport") or "streamable-http")
     if transport not in {"http", "streamable-http", "sse", "stdio"}:
         raise ValueError("不支持的 MCP 传输类型")
@@ -114,7 +117,6 @@ def create_mcp_server():
             raise PermissionError("stdio MCP 未在服务端启用")
     if transport != "stdio":
         payload["url"] = validate_outbound_url(str(payload["url"]))
-    wid = workspace_id()
     secrets = {"headers": payload.get("headers", {}), "env": payload.get("env", {})}
     credential = SecretVault(current_app.config["VAULT_KEY"]).seal(secrets) if any(secrets.values()) else ""
     requested_id = str(payload.get("server_id") or "").strip()
@@ -140,6 +142,7 @@ def create_mcp_server():
 @api_errors
 def update_mcp_server(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
+    assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     payload = body()
     resulting_transport = str(payload.get("transport") or server.get("transport") or "streamable-http")
     if resulting_transport == "stdio":
@@ -174,6 +177,7 @@ def delete_mcp_server(server_id: str):
 @api_errors
 def test_mcp(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
+    assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     if server.get("transport") == "stdio":
         require_system_owner()
     started = time.perf_counter()
@@ -191,6 +195,7 @@ def test_mcp(server_id: str):
 @api_errors
 def mcp_tools(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
+    assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     items = server.get("tools", [])
     return ok(items=items, server_id=server_id, tools=items)
 
@@ -199,6 +204,7 @@ def mcp_tools(server_id: str):
 @api_errors
 def call_mcp_tool(server_id: str, tool_name: str):
     server = require_workspace_record("mcp_servers", server_id)
+    assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     if server.get("transport") == "stdio":
         require_system_owner()
     if not server.get("enabled", True):
@@ -227,6 +233,8 @@ def connectors():
 @api_errors
 def create_connector():
     payload = body()
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "result_delivery")
     connector_type = str(payload.get("type") or "webhook")
     if connector_type not in {"webhook", "lark", "lark_app", "dingtalk", "slack", "email"}:
         raise ValueError("连接器类型不受支持")
@@ -241,7 +249,6 @@ def create_connector():
         not payload.get(key) for key in ("app_id", "app_secret", "receive_id")
     ):
         raise ValueError("飞书应用连接需要 app_id、app_secret 和 receive_id")
-    wid = workspace_id()
     credential = SecretVault(current_app.config["VAULT_KEY"]).seal({
         "url": url, "token": payload.get("token", ""),
         "host": payload.get("host", ""), "port": int(payload.get("port", 587)),
@@ -317,6 +324,7 @@ def _send_connector(connector: dict, message: str, extra: dict | None = None) ->
 @api_errors
 def test_connector(connector_id: str):
     connector = require_workspace_record("connectors", connector_id)
+    assert_feature_enabled(db(), connector["workspace_id"], "result_delivery")
     return ok(result=_send_connector(connector, "经纬分析工作台连接测试成功"))
 
 
@@ -324,6 +332,7 @@ def test_connector(connector_id: str):
 @api_errors
 def send_connector(connector_id: str):
     connector = require_workspace_record("connectors", connector_id)
+    assert_feature_enabled(db(), connector["workspace_id"], "result_delivery")
     message = str(body().get("message") or "").strip()
     if not message:
         raise ValueError("消息不能为空")

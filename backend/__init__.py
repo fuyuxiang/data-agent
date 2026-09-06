@@ -101,6 +101,9 @@ def create_app(test_config: dict | None = None) -> Flask:
     database = Database(settings.database_path)
     database.initialize()
     app.extensions["meridian_db"] = database
+    from .services.saas import ensure_saas_baseline
+
+    ensure_saas_baseline(database)
     from .core.metrics import RequestMetrics
 
     app.extensions["meridian_metrics"] = RequestMetrics()

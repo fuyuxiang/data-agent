@@ -14,6 +14,7 @@ from ..services.authorization import require_sources_access
 from ..services.jobs import get_job_manager
 from ..services.knowledge import add_document
 from ..services.results.manifests import ResultService
+from ..services.saas import assert_agent_run_limit, assert_feature_enabled
 from ..services.validation.engine import ValidationEngine
 from .common import (
     api_errors, body, current_user_id, db, ok, require_session_access,
@@ -82,6 +83,8 @@ def _draft_contract(payload: dict[str, Any], source_ids: list[str]) -> TaskContr
 @api_errors
 def create_analysis():
     payload, wid = body(), workspace_id()
+    assert_feature_enabled(db(), wid, "governed_agent")
+    assert_agent_run_limit(db(), wid)
     source_ids = list(dict.fromkeys(str(value) for value in payload.get("source_ids") or []))
     if len(source_ids) > 100:
         raise ValueError("单次分析最多选择 100 个来源")

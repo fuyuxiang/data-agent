@@ -12,6 +12,7 @@ from ..services.feishu_bot import (
     public_status,
     start_long_connection,
 )
+from ..services.saas import assert_feature_enabled
 from ..services.security import SecretVault
 from .common import (
     api_errors, body, db, ok, require_session_access, workspace_id,
@@ -38,6 +39,7 @@ def get_feishu_bot():
 @api_errors
 def put_feishu_bot():
     payload, wid = body(), workspace_id()
+    assert_feature_enabled(db(), wid, "feishu_bot")
     current = bot_connector(db(), wid)
     old_secret = connector_secret(current) if current else {}
     enabled = payload.get("enabled", current.get("enabled", False) if current else False)
@@ -84,7 +86,9 @@ def put_feishu_bot():
 @bp.get("/api/feishu-bot/chats")
 @api_errors
 def get_feishu_chats():
-    connector = bot_connector(db(), workspace_id())
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "feishu_bot")
+    connector = bot_connector(db(), wid)
     if not connector:
         raise ValueError("请先配置飞书应用机器人")
     return ok(chats=list_joined_chats(connector))
@@ -93,7 +97,9 @@ def get_feishu_chats():
 @bp.post("/api/feishu-bot/test")
 @api_errors
 def test_feishu_bot():
-    connector = bot_connector(db(), workspace_id())
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "feishu_bot")
+    connector = bot_connector(db(), wid)
     if not connector or not connector.get("enabled", True):
         raise ValueError("请先启用飞书应用机器人")
     from .integration import _send_connector
@@ -113,16 +119,17 @@ def _conversation_payload(session: dict) -> dict:
     }
 
 
-@bp.get("/api/session/<session_id>/feishu-bot")
+@bp.get("/api/sessions/<session_id>/feishu-bot")
 @api_errors
 def get_session_feishu_bot(session_id: str):
     return ok(**_conversation_payload(require_session_access(session_id)))
 
 
-@bp.put("/api/session/<session_id>/feishu-bot")
+@bp.put("/api/sessions/<session_id>/feishu-bot")
 @api_errors
 def put_session_feishu_bot(session_id: str):
     session = require_session_access(session_id)
+    assert_feature_enabled(db(), session["workspace_id"], "feishu_bot")
     payload = body()
     if not isinstance(payload.get("enabled"), bool):
         raise ValueError("enabled 必须是布尔值")
@@ -146,7 +153,7 @@ def put_session_feishu_bot(session_id: str):
     return ok(**_conversation_payload(session))
 
 
-@bp.get("/api/session/<session_id>/feishu-bot/events")
+@bp.get("/api/sessions/<session_id>/feishu-bot/events")
 @api_errors
 def get_session_feishu_events(session_id: str):
     session = require_session_access(session_id)

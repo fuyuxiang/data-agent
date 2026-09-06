@@ -7,6 +7,7 @@ from ..services.data_plane.factory import livy_adapter, public_engine, trino_ada
 from ..services.data_plane.livy import LivyBatchAdapter, LivyConfig
 from ..services.data_plane.trino import TrinoAdapter, TrinoConfig
 from ..services.authorization import require_sources_access
+from ..services.saas import assert_collection_limit, assert_feature_enabled
 from ..services.security import SecretVault
 from .common import api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id
 
@@ -27,6 +28,8 @@ def engines():
 @api_errors
 def create_engine():
     payload, wid = body(), workspace_id()
+    assert_feature_enabled(db(), wid, "warehouse")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
     engine_type = str(payload.get("type") or "trino").lower()
     engine_id = db().new_id("engine")
     vault = SecretVault(current_app.config["VAULT_KEY"])
@@ -81,6 +84,7 @@ def create_engine():
 @api_errors
 def update_engine(engine_id: str):
     current = _engine(engine_id)
+    assert_feature_enabled(db(), current["workspace_id"], "warehouse")
     allowed = {key: body()[key] for key in ("name", "enabled", "native_limits_confirmed") if key in body()}
     if "enabled" in allowed:
         allowed["enabled"] = bool(allowed["enabled"])
@@ -105,13 +109,15 @@ def disable_engine(engine_id: str):
 @api_errors
 def engine_capabilities(engine_id: str):
     item = _engine(engine_id)
+    assert_feature_enabled(db(), item["workspace_id"], "warehouse")
     return ok(type=item["type"], capabilities=item.get("capabilities") or {})
 
 
 @bp.get("/api/warehouse/engines/<engine_id>/catalog")
 @api_errors
 def engine_catalog(engine_id: str):
-    _engine(engine_id)
+    engine = _engine(engine_id)
+    assert_feature_enabled(db(), engine["workspace_id"], "warehouse")
     adapter = trino_adapter(db(), workspace_id(), engine_id)
     return ok(**adapter.discover(
         catalog=request.args.get("catalog"), schema=request.args.get("schema"),
@@ -122,7 +128,8 @@ def engine_catalog(engine_id: str):
 @bp.get("/api/warehouse/engines/<engine_id>/search")
 @api_errors
 def search_engine_catalog(engine_id: str):
-    _engine(engine_id)
+    engine = _engine(engine_id)
+    assert_feature_enabled(db(), engine["workspace_id"], "warehouse")
     return ok(**trino_adapter(db(), workspace_id(), engine_id).search(
         str(request.args.get("q") or ""), catalog=request.args.get("catalog"),
         schema=request.args.get("schema"), limit=int(request.args.get("limit", 50)),
@@ -132,7 +139,8 @@ def search_engine_catalog(engine_id: str):
 @bp.get("/api/warehouse/engines/<engine_id>/describe")
 @api_errors
 def describe_engine_table(engine_id: str):
-    _engine(engine_id)
+    engine = _engine(engine_id)
+    assert_feature_enabled(db(), engine["workspace_id"], "warehouse")
     return ok(item=trino_adapter(db(), workspace_id(), engine_id).describe(
         str(request.args.get("catalog") or ""), str(request.args.get("schema") or ""),
         str(request.args.get("table") or ""),

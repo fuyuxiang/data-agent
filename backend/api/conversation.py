@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 
-from flask import Blueprint, Response, current_app, jsonify, request, session as flask_session
+from flask import Blueprint, Response, current_app, request, session as flask_session
 
 from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
@@ -61,44 +60,6 @@ def tool_result(session_id: str, artifact_id: str):
     )
 
 
-@bp.get("/api/session/<session_id>/tool-results/<artifact_id>")
-@api_errors
-def legacy_tool_result(session_id: str, artifact_id: str):
-    """Serve the legacy singular-session tool-result contract.
-
-    The modern endpoint above remains paginated JSON.  The compatibility route
-    intentionally returns the complete text by default because legacy clients
-    use it as an artifact URL, while ownership is still checked against both
-    the workspace and session.
-    """
-    _, item = _owned_tool_result(session_id, artifact_id)
-    content = str(item.get("content") or "")
-    content_type = str(item.get("content_type") or "text/plain; charset=utf-8")
-    digest = str(item.get("sha256") or hashlib.sha256(content.encode("utf-8")).hexdigest())
-    record = {
-        "version": 1,
-        "artifact_id": artifact_id,
-        "session_id": session_id,
-        "workspace_id": item.get("workspace_id", ""),
-        "tool": item.get("tool_name", ""),
-        "data": content,
-        "content_type": content_type,
-        "sha256": digest,
-        "total_chars": len(content),
-    }
-    if request.args.get("format") == "json":
-        return jsonify(record)
-    return Response(
-        content,
-        content_type=content_type,
-        headers={
-            "X-Artifact-Id": artifact_id,
-            "X-Tool-Name": str(item.get("tool_name") or ""),
-            "X-Content-SHA256": digest,
-        },
-    )
-
-
 @bp.post("/api/sessions/<session_id>/messages")
 @api_errors
 def chat(session_id: str):
@@ -119,9 +80,8 @@ def chat(session_id: str):
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
 
-    # Compatibility endpoint is deliberately a thin adapter: it creates the same
-    # governed run and returns the required confirmation card. Execution never
-    # lives in the HTTP request and never enters the retired fallback loop.
+    # The synchronous chat endpoint creates the same governed run and returns
+    # the required confirmation card. Execution never lives in the HTTP request.
     store = RunStore(db())
     contract = TaskContract.from_payload({
         "objective": question,
@@ -227,7 +187,6 @@ def clear_conversation(session_id: str):
 
 
 @bp.post("/api/sessions/<session_id>/commands/<name>/execute")
-@bp.post("/api/session/<session_id>/commands/<name>/execute")
 @api_errors
 def execute_command(session_id: str, name: str):
     session = require_session_access(session_id)

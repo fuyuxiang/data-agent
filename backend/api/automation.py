@@ -12,6 +12,7 @@ from ..core.database import utcnow
 from ..services.jobs import get_job_manager
 from ..services.authorization import filter_authorized_jobs
 from ..services.hooks import SUPPORTED_EVENTS, dispatch_hooks as run_hooks, normalize_event_name
+from ..services.saas import assert_agent_run_limit, assert_collection_limit, assert_feature_enabled
 from ..services.security import validate_outbound_url
 from ..services.scheduler import validate_cron
 from ..services.teams import retry_team_run, start_team_run, team_run_to_workflow
@@ -233,6 +234,8 @@ def create_workflow():
         raise ValueError("工作流名称不能为空")
     definition = payload.get("definition") or {"steps": []}
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "automation")
+    assert_collection_limit(db(), wid, limit_key="workflows", collection="workflows")
     _validate_workflow_references(definition, wid)
     item = db().put(
         "workflows",
@@ -354,6 +357,8 @@ def archive_workflow(workflow_id: str):
 @api_errors
 def run_workflow(workflow_id: str):
     workflow = _require_workflow_access(workflow_id, action="query")
+    assert_feature_enabled(db(), workflow["workspace_id"], "automation")
+    assert_agent_run_limit(db(), workflow["workspace_id"])
     payload = body()
     if workflow.get("status") != "published" and not payload.get("allow_draft"):
         raise ValueError("请先发布工作流")
@@ -395,6 +400,7 @@ def _resume_run(run: dict):
 @api_errors
 def pause_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     if run.get("status") not in {"queued", "running", "waiting_approval"}:
         raise ValueError("当前状态不可暂停")
     changes = {"pause_requested": True}
@@ -407,6 +413,7 @@ def pause_run(run_id: str):
 @api_errors
 def resume_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     if run.get("status") != "paused":
         raise ValueError("只有已暂停的工作流可以继续")
     if any(state.get("status") == "waiting_approval" for state in run.get("step_states", {}).values()):
@@ -420,6 +427,7 @@ def resume_run(run_id: str):
 @api_errors
 def retry_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     if run.get("status") != "failed":
         raise ValueError("只有失败的工作流可以重试")
     step_ids = body().get("step_ids")
@@ -434,6 +442,7 @@ def retry_run(run_id: str):
 @api_errors
 def approve_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     require_workspace_access(run["workspace_id"], owner=True)
     step_id = str(body().get("step_id") or run.get("current_step_id") or "")
     state = run.get("step_states", {}).get(step_id)
@@ -459,6 +468,7 @@ def approve_run(run_id: str):
 @api_errors
 def reject_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     require_workspace_access(run["workspace_id"], owner=True)
     payload = body()
     step_id = str(payload.get("step_id") or run.get("current_step_id") or "")
@@ -505,6 +515,7 @@ def reject_run(run_id: str):
 @api_errors
 def cancel_run(run_id: str):
     run = _owned_execution("workflow_runs", run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     accepted = get_job_manager(current_app._get_current_object()).cancel(run.get("job_id", ""))
     item = db().patch(
         "workflow_runs", run_id,
@@ -522,10 +533,12 @@ def _require_session_run(session_id: str, run_id: str) -> tuple[dict, dict]:
     return session_record, run
 
 
-@bp.post("/api/session/<session_id>/workflow-runs")
+@bp.post("/api/sessions/<session_id>/workflow-runs")
 @api_errors
 def start_session_workflow_run(session_id: str):
     session_record = require_session_access(session_id)
+    assert_feature_enabled(db(), session_record["workspace_id"], "automation")
+    assert_agent_run_limit(db(), session_record["workspace_id"])
     payload = body()
     version_id = str(payload.get("workflow_version_id") or "")
     version = require_workspace_record("workflow_versions", version_id, session_record["workspace_id"])
@@ -546,7 +559,7 @@ def start_session_workflow_run(session_id: str):
     return ok(run=run), 202
 
 
-@bp.get("/api/session/<session_id>/workflow-runs")
+@bp.get("/api/sessions/<session_id>/workflow-runs")
 @api_errors
 def list_session_workflow_runs(session_id: str):
     session_record = require_session_access(session_id)
@@ -557,14 +570,14 @@ def list_session_workflow_runs(session_id: str):
     return ok(runs=runs)
 
 
-@bp.get("/api/session/<session_id>/workflow-runs/<run_id>")
+@bp.get("/api/sessions/<session_id>/workflow-runs/<run_id>")
 @api_errors
 def get_session_workflow_run(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
     return ok(**run_detail(db(), run))
 
 
-@bp.delete("/api/session/<session_id>/workflow-runs/<run_id>")
+@bp.delete("/api/sessions/<session_id>/workflow-runs/<run_id>")
 @api_errors
 def delete_session_workflow_run(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
@@ -585,7 +598,7 @@ def delete_session_workflow_run(session_id: str, run_id: str):
     return ok(deleted=True, cascaded=counts)
 
 
-@bp.get("/api/session/<session_id>/workflow-runs/<run_id>/events")
+@bp.get("/api/sessions/<session_id>/workflow-runs/<run_id>/events")
 @api_errors
 def session_workflow_events(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
@@ -594,7 +607,7 @@ def session_workflow_events(session_id: str, run_id: str):
     return ok(events=[{**item, "sequence": index} for index, item in enumerate(events, 1) if index > after])
 
 
-@bp.get("/api/session/<session_id>/workflow-runs/<run_id>/artifacts/<artifact_id>")
+@bp.get("/api/sessions/<session_id>/workflow-runs/<run_id>/artifacts/<artifact_id>")
 @api_errors
 def workflow_artifact_content(session_id: str, run_id: str, artifact_id: str):
     _, run = _require_session_run(session_id, run_id)
@@ -604,17 +617,18 @@ def workflow_artifact_content(session_id: str, run_id: str, artifact_id: str):
     return ok(artifact_id=artifact_id, content=artifact.get("content"), sha256=artifact.get("sha256"))
 
 
-@bp.get("/api/session/<session_id>/workflow-runs/<run_id>/approvals")
+@bp.get("/api/sessions/<session_id>/workflow-runs/<run_id>/approvals")
 @api_errors
 def workflow_approvals(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
     return ok(approvals=run_detail(db(), run)["approvals"])
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/approvals/<approval_id>/decide")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/approvals/<approval_id>/decide")
 @api_errors
 def decide_workflow_approval(session_id: str, run_id: str, approval_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     require_workspace_access(run["workspace_id"], owner=True)
     approval = require_workspace_record("workflow_approvals", approval_id, run["workspace_id"])
     if approval.get("run_id") != run_id:
@@ -653,7 +667,7 @@ def decide_workflow_approval(session_id: str, run_id: str, approval_id: str):
     return ok(**run_detail(db(), run), approval=decided, job=job), 202
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/cancel")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/cancel")
 @api_errors
 def cancel_session_workflow_run(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
@@ -664,10 +678,11 @@ def cancel_session_workflow_run(session_id: str, run_id: str):
     return ok(**run_detail(db(), item), accepted=accepted)
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/resume")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/resume")
 @api_errors
 def resume_session_workflow_run(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     if run.get("status") not in {"paused", "waiting_approval"}:
         raise ValueError("当前工作流不可继续")
     if any(state.get("status") == "waiting_approval" for state in run.get("step_states", {}).values()):
@@ -677,10 +692,11 @@ def resume_session_workflow_run(session_id: str, run_id: str):
     return ok(**run_detail(db(), run), job=_resume_run(run)), 202
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/nodes/<node_run_id>/retry")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/nodes/<node_run_id>/retry")
 @api_errors
 def retry_workflow_node(session_id: str, run_id: str, node_run_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     node_run = require_workspace_record("workflow_node_runs", node_run_id, run["workspace_id"])
     if node_run.get("run_id") != run_id or node_run.get("status") != "failed":
         raise ValueError("只能重试当前运行中失败的节点")
@@ -689,25 +705,27 @@ def retry_workflow_node(session_id: str, run_id: str, node_run_id: str):
     return ok(**run_detail(db(), run), job=_resume_run(run)), 202
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/fork")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/fork")
 @api_errors
 def fork_session_workflow_run(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     branch = fork_run(db(), run, str(body().get("checkpoint_node_run_id") or ""))
     return ok(**run_detail(db(), branch), job=_resume_run(branch)), 202
 
 
-@bp.get("/api/session/<session_id>/workflow-templates")
+@bp.get("/api/sessions/<session_id>/workflow-templates")
 @api_errors
 def workflow_templates(session_id: str):
     session_record = require_session_access(session_id)
     return ok(templates=db().list("workflow_run_templates", workspace_id=session_record["workspace_id"], limit=5000))
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/template")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/template")
 @api_errors
 def mark_workflow_template(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     payload = body()
     item = create_run_template(
         db(), run, name=str(payload.get("name") or ""), description=str(payload.get("description") or ""),
@@ -716,7 +734,7 @@ def mark_workflow_template(session_id: str, run_id: str):
     return ok(template=item), 201
 
 
-@bp.get("/api/session/<session_id>/workflow-knowledge-candidates")
+@bp.get("/api/sessions/<session_id>/workflow-knowledge-candidates")
 @api_errors
 def workflow_knowledge_candidates(session_id: str):
     session_record = require_session_access(session_id)
@@ -735,17 +753,19 @@ def workflow_knowledge_candidates(session_id: str):
     return ok(candidates=items)
 
 
-@bp.post("/api/session/<session_id>/workflow-runs/<run_id>/knowledge-candidates")
+@bp.post("/api/sessions/<session_id>/workflow-runs/<run_id>/knowledge-candidates")
 @api_errors
 def create_workflow_knowledge_candidates(session_id: str, run_id: str):
     _, run = _require_session_run(session_id, run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "automation")
     return ok(candidates=generate_knowledge_candidates(db(), run)), 201
 
 
-@bp.post("/api/session/<session_id>/workflow-knowledge-candidates/<candidate_id>/decide")
+@bp.post("/api/sessions/<session_id>/workflow-knowledge-candidates/<candidate_id>/decide")
 @api_errors
 def decide_workflow_knowledge_candidate(session_id: str, candidate_id: str):
     session_record = require_session_access(session_id)
+    assert_feature_enabled(db(), session_record["workspace_id"], "automation")
     candidate = require_workspace_record("workflow_knowledge_candidates", candidate_id, session_record["workspace_id"])
     if not _candidate_belongs_to_session(candidate, session_id, session_record["workspace_id"]):
         raise FileNotFoundError("知识候选项不存在")
@@ -905,7 +925,7 @@ def _optimization_suggestions(metrics: dict) -> list[dict]:
     return suggestions
 
 
-@bp.get("/api/session/<session_id>/workflow-metrics")
+@bp.get("/api/sessions/<session_id>/workflow-metrics")
 @api_errors
 def workflow_metrics(session_id: str):
     session_record = require_session_access(session_id)
@@ -926,10 +946,11 @@ def workflow_metrics(session_id: str):
     return ok(metrics=metrics, suggestions=suggestions)
 
 
-@bp.post("/api/session/<session_id>/workflow-optimization-suggestions/<suggestion_id>/draft")
+@bp.post("/api/sessions/<session_id>/workflow-optimization-suggestions/<suggestion_id>/draft")
 @api_errors
 def workflow_suggestion_draft(session_id: str, suggestion_id: str):
     session_record = require_session_access(session_id)
+    assert_feature_enabled(db(), session_record["workspace_id"], "automation")
     suggestion = require_workspace_record("workflow_optimization_suggestions", suggestion_id, session_record["workspace_id"])
     if (
         str(suggestion.get("actor_id") or "local-default") != current_user_id()
@@ -978,6 +999,8 @@ def _owned_schedule(schedule_id: str) -> dict:
 def create_schedule():
     payload = body()
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "automation")
+    assert_collection_limit(db(), wid, limit_key="schedules", collection="schedules")
     workflow = _require_workflow_access(str(payload.get("workflow_id") or ""), action="query")
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("只能为已发布的工作流创建调度")
@@ -1005,6 +1028,7 @@ def create_schedule():
 @api_errors
 def update_schedule(schedule_id: str):
     schedule = _owned_schedule(schedule_id)
+    assert_feature_enabled(db(), schedule["workspace_id"], "automation")
     payload = body()
     allowed = {"name", "workflow_id", "cron", "timezone", "inputs", "enabled"}
     changes = {key: payload[key] for key in allowed if key in payload}
@@ -1040,6 +1064,8 @@ def delete_schedule(schedule_id: str):
 @api_errors
 def run_schedule_now(schedule_id: str):
     schedule = _owned_schedule(schedule_id)
+    assert_feature_enabled(db(), schedule["workspace_id"], "automation")
+    assert_agent_run_limit(db(), schedule["workspace_id"])
     workflow = _require_workflow_access(str(schedule["workflow_id"]), action="query")
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("调度关联的工作流尚未发布")
@@ -1087,6 +1113,8 @@ def create_hook():
     if str(payload.get("once_scope") or "session") not in {"turn", "session", "global"}:
         raise ValueError("once_scope 只能是 turn、session 或 global")
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "automation")
+    assert_collection_limit(db(), wid, limit_key="hooks", collection="hooks")
     _validate_hook_action(action, wid)
     item = db().put(
         "hooks",
@@ -1132,7 +1160,8 @@ def hook_history():
 @bp.patch("/api/hooks/<hook_id>")
 @api_errors
 def update_hook(hook_id: str):
-    require_workspace_record("hooks", hook_id)
+    hook = require_workspace_record("hooks", hook_id)
+    assert_feature_enabled(db(), hook["workspace_id"], "automation")
     changes = body()
     if "event" in changes:
         changes["event"] = normalize_event_name(str(changes["event"]))
@@ -1156,6 +1185,7 @@ def delete_hook(hook_id: str):
 @api_errors
 def dispatch_hooks():
     payload = body()
+    assert_feature_enabled(db(), workspace_id(), "automation")
     event = str(payload.get("event") or "")
     event_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     return ok(matched=run_hooks(event, event_payload, workspace_id()))

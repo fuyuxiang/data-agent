@@ -17,7 +17,10 @@ def utcnow() -> str:
 class Database:
     """Small transactional repository used by every feature module."""
 
-    GLOBAL_COLLECTIONS = frozenset({"workspaces", "users", "email_codes"})
+    GLOBAL_COLLECTIONS = frozenset({
+        "workspaces", "users", "email_codes",
+        "tenants", "tenant_members", "plans", "subscriptions",
+    })
 
     def __init__(self, path: Path):
         self.path = Path(path)

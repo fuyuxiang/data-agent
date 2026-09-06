@@ -14,6 +14,7 @@ from ..core.database import utcnow
 from ..services.memory import consolidate_memories, search_memories
 from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
+from ..services.saas import DEFAULT_TENANT_ID, assert_workspace_limit, product_status
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
     api_errors,
@@ -37,6 +38,8 @@ bp = Blueprint("workspace", __name__)
 @bp.get("/api/bootstrap")
 def bootstrap():
     wid = workspace_id()
+    product = product_status(db(), wid, current_user_id())
+    features = set(product["entitlements"].get("features") or [])
     sessions = filter_authorized_sessions(
         db(), db().list("sessions", workspace_id=wid),
         workspace_id=wid, actor_id=current_user_id(),
@@ -58,15 +61,18 @@ def bootstrap():
             _public_provider(item) for item in db().list("providers")
             if item["id"] == "environment-default" or item.get("workspace_id", "default") == wid
         ],
+        product=product,
+        entitlements=product["entitlements"],
+        onboarding=product["onboarding"],
         capabilities={
             "ingestion": ["csv", "tsv", "xlsx", "xls", "json", "parquet", "sql", "http"],
-            "analysis": True,
-            "knowledge": True,
-            "workflows": True,
-            "teams": True,
-            "hooks": True,
-            "mcp": True,
-            "exports": ["csv", "xlsx", "docx", "pptx", "html"],
+            "analysis": "governed_agent" in features,
+            "knowledge": "knowledge_base" in features,
+            "workflows": "automation" in features,
+            "teams": "automation" in features,
+            "hooks": "automation" in features,
+            "mcp": "mcp_integrations" in features,
+            "exports": ["csv", "xlsx", "docx", "pptx", "html"] if "result_delivery" in features else [],
         },
     )
 
@@ -97,6 +103,7 @@ def create_workspace():
     name = str(payload.get("name") or "").strip()
     if not name:
         raise ValueError("工作空间名称不能为空")
+    assert_workspace_limit(db(), DEFAULT_TENANT_ID)
     record = db().put(
         "workspaces",
         {
@@ -105,6 +112,7 @@ def create_workspace():
             "description": str(payload.get("description") or "")[:500],
             "permission": "write",
             "owner_id": current_user_id(),
+            "tenant_id": DEFAULT_TENANT_ID,
         },
     )
     db().put(

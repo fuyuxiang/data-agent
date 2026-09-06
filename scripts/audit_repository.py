@@ -12,7 +12,7 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCAN_ROOTS = ("backend", "frontend/src", "scripts", "packaging", "deploy")
+SCAN_ROOTS = ("backend", "frontend/src", "scripts", "deploy")
 TEXT_SUFFIXES = {".py", ".js", ".mjs", ".json", ".yml", ".yaml", ".toml", ".md", ".txt"}
 
 
@@ -116,11 +116,11 @@ def run_audit(*, negative_fixture: bool = False) -> list[Check]:
             r"/api/(?:gpu|business-canvas|drawio)|/drawio(?:/|\")",
             "退役路由不再注册或被前端调用",
         ))
-        build_paths = [path for path in paths if str(path.relative_to(ROOT)).startswith(("packaging/", "scripts/", "frontend/src/")) or path.name in {"Dockerfile", "package.json"}]
+        build_paths = [path for path in paths if str(path.relative_to(ROOT)).startswith(("scripts/", "frontend/src/")) or path.name in {"Dockerfile", "package.json"}]
         checks.append(absent(
             "C19-build-clean", build_paths,
             r"frontend/(?:dist/)?drawio|meridian_remote_runner\.py|backend\.(?:api\.gpu|services\.remote_gpu)",
-            "构建、镜像和桌面打包不再包含退役资源",
+            "构建和镜像不再包含退役资源",
         ))
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         checks.append(Check(

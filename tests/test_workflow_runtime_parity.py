@@ -98,13 +98,13 @@ def test_independent_workflow_nodes_run_in_parallel_with_manifests_lineage_and_f
         assert {item["candidate_type"] for item in candidates} == {"report_template", "metric_sql"}
 
     artifact = client.get(
-        f"/api/session/{session['id']}/workflow-runs/{run['id']}/artifacts/{artifact_id}",
+        f"/api/sessions/{session['id']}/workflow-runs/{run['id']}/artifacts/{artifact_id}",
     )
     assert artifact.status_code == 200
     assert artifact.get_json()["sha256"]
     candidate = next(item for item in candidates if item["candidate_type"] == "report_template")
     accepted = client.post(
-        f"/api/session/{session['id']}/workflow-knowledge-candidates/{candidate['id']}/decide",
+        f"/api/sessions/{session['id']}/workflow-knowledge-candidates/{candidate['id']}/decide",
         json={"decision": "accept", "comment": "人工复核通过"},
     )
     assert accepted.status_code == 200
@@ -128,11 +128,11 @@ def test_workflow_metrics_and_success_template_are_human_gated(app, client):
         workspace_id="default",
     )
     template = client.post(
-        f"/api/session/{session['id']}/workflow-runs/run_metric/template",
+        f"/api/sessions/{session['id']}/workflow-runs/run_metric/template",
         json={"name": "已复核模板"},
     )
     assert template.status_code == 201
     assert template.get_json()["template"]["name"] == "已复核模板"
-    metrics = client.get(f"/api/session/{session['id']}/workflow-metrics").get_json()["metrics"]
+    metrics = client.get(f"/api/sessions/{session['id']}/workflow-metrics").get_json()["metrics"]
     assert metrics["summary"]["run_count"] >= 1
     assert metrics["versions"][0]["success_rate"] == 1

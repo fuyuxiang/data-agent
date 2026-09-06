@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
+import smtplib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 
-from flask import Blueprint, current_app, session
+from flask import Blueprint, current_app, jsonify, request, session
 
 from .common import api_errors, body, db, ok
+from ..services.security import SecretVault
 from ..services.usage import quota_status
 
 
@@ -104,6 +108,71 @@ def _check_login_rate(email: str) -> tuple[str, dict]:
     if int(attempt.get("failures") or 0) >= 5:
         raise PermissionError("登录尝试过多，请 15 分钟后重试")
     return attempt_id, attempt
+
+
+@bp.post("/api/auth/send-code")
+@api_errors
+def send_code():
+    payload = body()
+    email = str(payload.get("email") or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("请输入有效邮箱")
+    address = request.remote_addr or "unknown"
+    rate_id = "mailrate:" + hashlib.sha256(address.encode()).hexdigest()
+    rate = db().get("email_delivery_limits", rate_id) or {
+        "id": rate_id, "count": 0, "window_started": time.time(),
+    }
+    if time.time() - float(rate.get("window_started") or 0) > 900:
+        rate = {"id": rate_id, "count": 0, "window_started": time.time()}
+    if int(rate.get("count") or 0) >= 10:
+        return jsonify({"error": "验证码发送次数过多，请稍后再试"}), 429
+    rate["count"] = int(rate.get("count") or 0) + 1
+    db().put("email_delivery_limits", rate, workspace_id="default")
+    existing = next((item for item in db().list("email_codes", limit=5000) if item.get("email") == email), None)
+    if existing:
+        sent = datetime.fromisoformat(existing["sent_at"])
+        if (datetime.now(timezone.utc) - sent).total_seconds() < 60:
+            return jsonify({"error": "发送太频繁，请 60 秒后再试"}), 429
+    host = os.getenv("SMTP_HOST", "").strip()
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "").strip()
+    sender = os.getenv("SMTP_FROM", username).strip()
+    if not host or not sender:
+        return jsonify({"error": "邮件服务未配置，请联系管理员"}), 503
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    record_id = existing["id"] if existing else db().new_id("mail")
+    now = datetime.now(timezone.utc)
+    db().put(
+        "email_codes",
+        {
+            "id": record_id, "email": email,
+            "code": SecretVault(current_app.config["VAULT_KEY"]).seal({"value": code}),
+            "sent_at": now.isoformat(timespec="seconds"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat(timespec="seconds"),
+            "attempts": 0,
+        },
+    )
+    message = EmailMessage()
+    message["Subject"] = "数据分析助手验证码"
+    message["From"], message["To"] = sender, email
+    message.set_content(f"您的验证码是 {code}，10 分钟内有效。")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    if os.getenv("SMTP_SSL", "1") == "1":
+        with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=20) as smtp:
+            smtp.starttls()
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    response = {"ok": True, "message": "验证码已发送至邮箱"}
+    if current_app.config.get("EXPOSE_TEST_CODES"):
+        response["debug_code"] = code
+    return jsonify(response)
 
 
 @bp.post("/api/auth/register")

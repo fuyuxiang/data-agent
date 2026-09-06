@@ -132,10 +132,10 @@ def ci() -> list[Result]:
     )
     return [
         command("python-compile", [
-            sys.executable, "-m", "compileall", "-q", "backend", "scripts", "packaging", "deploy/sandbox", "app.py",
+            sys.executable, "-m", "compileall", "-q", "backend", "scripts", "deploy/sandbox", "app.py",
         ]),
-        command("ruff", ["ruff", "check", "backend", "scripts", "packaging", "deploy/sandbox", "tests", "app.py"]),
-        command("ruff-security", ["ruff", "check", "--select", "S", "backend", "scripts", "packaging", "deploy/sandbox", "app.py"]),
+        command("ruff", ["ruff", "check", "backend", "scripts", "deploy/sandbox", "tests", "app.py"]),
+        command("ruff-security", ["ruff", "check", "--select", "S", "backend", "scripts", "deploy/sandbox", "app.py"]),
         command_no_skips("pytest", [
             sys.executable, "-m", "pytest", "-q", "-m", "not database_integration",
             "--cov=backend/agent", "--cov=backend/api", "--cov=backend/core", "--cov=backend/services",

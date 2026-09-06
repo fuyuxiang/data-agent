@@ -37,14 +37,14 @@ def test_bot_configuration_masks_secrets_and_binds_visible_group(client, monkeyp
 
     session = client.post("/api/sessions", json={"name": "飞书联动"}).get_json()["item"]
     linked = client.put(
-        f"/api/session/{session['id']}/feishu-bot",
+        f"/api/sessions/{session['id']}/feishu-bot",
         json={"enabled": True, "chat_id": "oc_group_1"},
     ).get_json()
     assert linked["connected"] is True
     assert linked["chat_name"] == "销售经营群"
 
     unlinked = client.put(
-        f"/api/session/{session['id']}/feishu-bot", json={"enabled": False},
+        f"/api/sessions/{session['id']}/feishu-bot", json={"enabled": False},
     ).get_json()
     assert unlinked["connected"] is False
 
@@ -57,7 +57,7 @@ def test_webhook_challenge_mentions_and_event_deduplication(client, monkeypatch)
     )
     session = client.post("/api/sessions", json={"name": "飞书入站"}).get_json()["item"]
     assert client.put(
-        f"/api/session/{session['id']}/feishu-bot",
+        f"/api/sessions/{session['id']}/feishu-bot",
         json={"enabled": True, "chat_id": "oc_group_1"},
     ).status_code == 200
 
@@ -130,7 +130,7 @@ def test_incremental_events_and_web_turn_mirroring(app, client, monkeypatch):
         sync_web_turn(database, session, "Web 问题", "A" * 8100)
 
     events = client.get(
-        f"/api/session/{session['id']}/feishu-bot/events?after={first['revision']}"
+        f"/api/sessions/{session['id']}/feishu-bot/events?after={first['revision']}"
     ).get_json()
     assert events["revision"] == second["revision"]
     assert [item["content"] for item in events["events"]] == ["群内答案"]

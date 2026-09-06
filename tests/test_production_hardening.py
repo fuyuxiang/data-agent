@@ -189,8 +189,8 @@ def test_daily_quota_blocks_model_turn_before_provider_call(app, client, monkeyp
 
 def test_online_self_update_is_removed(client):
     response = client.post("/api/system/update")
-    assert response.status_code == 410
-    assert "发布流水线" in response.get_json()["error"]
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "接口不存在"
 
 
 def test_spreadsheet_exports_neutralize_formula_cells(app):
@@ -482,7 +482,7 @@ def test_multipart_upload_uses_authenticated_active_workspace(app):
     assert app.extensions["meridian_db"].get("sources", source["id"], workspace_id="default") is None
 
 
-def test_legacy_routes_cannot_cross_workspace_boundaries(app, tmp_path):
+def test_formal_routes_cannot_cross_workspace_boundaries(app, tmp_path):
     owner = app.test_client()
     attacker = app.test_client()
     owner.post(
@@ -513,16 +513,16 @@ def test_legacy_routes_cannot_cross_workspace_boundaries(app, tmp_path):
         workspace_id=secret_workspace["id"],
     )
 
-    assert attacker.get("/api/session/foreign-session/load-current").status_code == 404
+    assert attacker.get("/api/sessions/foreign-session").status_code == 404
     assert attacker.get("/api/chart/foreign-chart").status_code == 404
-    assert attacker.get("/api/dashboard/foreign-dashboard").status_code == 404
+    assert attacker.get("/api/dashboards/foreign-dashboard").status_code == 404
     assert app.test_client().get("/dashboard/foreign-dashboard").status_code == 404
 
-    attacker_session = attacker.post("/api/session/new", json={"name": "attacker"}).get_json()["session_id"]
-    listed = attacker.get(f"/api/session/{attacker_session}/workspaces").get_json()["workspaces"]
+    assert attacker.post("/api/sessions", json={"name": "attacker"}).status_code == 201
+    listed = attacker.get("/api/workspaces").get_json()["items"]
     assert {item["id"] for item in listed} == {attacker_workspace_id}
     assert attacker.patch(
-        f"/api/session/{attacker_session}/workspaces/{secret_workspace['id']}",
+        f"/api/workspaces/{secret_workspace['id']}",
         json={"name": "PWNED"},
     ).status_code == 403
     assert database.get("workspaces", secret_workspace["id"])["name"] == "Secret"
@@ -531,7 +531,7 @@ def test_legacy_routes_cannot_cross_workspace_boundaries(app, tmp_path):
     outside.mkdir()
     (outside / "foreign.csv").write_text("secret\n42\n", encoding="utf-8")
     mounted = attacker.post(
-        f"/api/session/{attacker_session}/workspace/mount",
+        f"/api/workspaces/{attacker_workspace_id}/mount",
         json={"path": str(outside), "permission": "read_only"},
     )
     assert mounted.status_code == 403
@@ -541,7 +541,7 @@ def test_legacy_routes_cannot_cross_workspace_boundaries(app, tmp_path):
     )
 
 
-def test_legacy_saved_sessions_are_workspace_scoped(app):
+def test_saved_sessions_are_workspace_scoped(app):
     first = app.test_client()
     second = app.test_client()
     first.post(
@@ -561,9 +561,9 @@ def test_legacy_saved_sessions_are_workspace_scoped(app):
         },
         workspace_id="default",
     )
-    target = second.post("/api/session/new", json={"name": "target"}).get_json()["session_id"]
+    target = second.post("/api/sessions", json={"name": "target"}).get_json()["item"]["id"]
     response = second.post(
-        f"/api/session/{target}/load", json={"filename": "private-session.json"},
+        "/api/saved-sessions/private-session.json/load", json={"session_id": target},
     )
     assert response.status_code == 404
     assert second.patch(

@@ -19,6 +19,7 @@ from ..services.datasets import (
     source_table,
 )
 from ..services.knowledge import add_document, public_document, save_entry, search
+from ..services.saas import assert_collection_limit, assert_feature_enabled, assert_limit_available
 from ..services.semantic import (
     compile_metric_query, execute_metric_query, save_metric, save_model, visible_metrics,
 )
@@ -75,6 +76,7 @@ def create_source_set():
     if not payload.get("name") or not source_ids:
         raise ValueError("数据组合需要名称和至少一个数据源")
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
     for source_id in source_ids:
         require_source_access(source_id, wid)
     item = db().put(
@@ -89,6 +91,7 @@ def create_source_set():
 @api_errors
 def update_source_set(set_id: str):
     item = _source_set(set_id)
+    assert_feature_enabled(db(), item["workspace_id"], "data_sources")
     if "source_ids" in body():
         for source_id in body()["source_ids"]:
             require_source_access(str(source_id))
@@ -103,6 +106,7 @@ def update_source_set(set_id: str):
 @api_errors
 def apply_source_set(set_id: str):
     item = _source_set(set_id)
+    assert_feature_enabled(db(), item["workspace_id"], "data_sources")
     session_id = str(body().get("session_id") or "")
     session_record = require_session_access(session_id)
     if session_record.get("workspace_id") != item.get("workspace_id"):
@@ -127,6 +131,8 @@ def upload_source():
     if not files:
         raise ValueError("没有收到上传文件")
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources", adding=len(files))
     items = [public_source(register_upload(file, wid)) for file in files]
     return ok(items=items), 201
 
@@ -134,27 +140,39 @@ def upload_source():
 @bp.post("/api/sources/database")
 @api_errors
 def connect_database():
-    item = register_database(body(), workspace_id())
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
+    item = register_database(body(), wid)
     return ok(item=item), 201
 
 
 @bp.post("/api/sources/http")
 @api_errors
 def connect_http():
-    item = register_http(body(), workspace_id())
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
+    item = register_http(body(), wid)
     return ok(item=item), 201
 
 
 @bp.post("/api/sources/google-sheets")
 @api_errors
 def connect_google_sheets():
-    return ok(item=register_google_sheet(body(), workspace_id())), 201
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
+    return ok(item=register_google_sheet(body(), wid)), 201
 
 
 @bp.post("/api/sources/lark-table")
 @api_errors
 def connect_lark_table():
-    return ok(item=register_lark_table(body(), workspace_id())), 201
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
+    return ok(item=register_lark_table(body(), wid)), 201
 
 
 @bp.get("/api/sources/<source_id>")
@@ -218,7 +236,9 @@ def archive_source(source_id: str):
 @bp.post("/api/sources/<source_id>/refresh")
 @api_errors
 def refresh(source_id: str):
-    return ok(item=public_source(refresh_source(require_source_access(source_id, action="refresh"))))
+    source = require_source_access(source_id, action="refresh")
+    assert_feature_enabled(db(), source["workspace_id"], "data_sources")
+    return ok(item=public_source(refresh_source(source)))
 
 
 @bp.get("/api/sources/<source_id>/schema")
@@ -245,7 +265,9 @@ def source_profile(source_id: str):
 @api_errors
 def clean_preview(source_id: str):
     payload = body()
-    _, frame = source_table(require_source_access(source_id, action="analyze"), payload.get("table"))
+    source = require_source_access(source_id, action="analyze")
+    assert_feature_enabled(db(), source["workspace_id"], "data_sources")
+    _, frame = source_table(source, payload.get("table"))
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     return ok(
         before=profile(frame),
@@ -260,6 +282,9 @@ def clean_preview(source_id: str):
 def clean_apply(source_id: str):
     payload = body()
     source = require_source_access(source_id, action="analyze")
+    wid = source.get("workspace_id", workspace_id())
+    assert_feature_enabled(db(), wid, "data_sources")
+    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
     _, frame = source_table(source, payload.get("table"))
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     derived_id = db().new_id("src")
@@ -269,7 +294,7 @@ def clean_apply(source_id: str):
         "sources",
         {
             "id": derived_id,
-            "workspace_id": source.get("workspace_id", workspace_id()),
+            "workspace_id": wid,
             "name": str(payload.get("name") or f"{source['name']} · 清洗版")[:120],
             "kind": "derived",
             "format": "csv",
@@ -280,7 +305,7 @@ def clean_apply(source_id: str):
             "status": "ready",
             **inherited_source_policy(source),
         },
-        workspace_id=source.get("workspace_id", workspace_id()),
+        workspace_id=wid,
     )
     return ok(item=public_source(item), operations=log), 201
 
@@ -289,6 +314,7 @@ def clean_apply(source_id: str):
 @api_errors
 def query():
     payload = body()
+    assert_feature_enabled(db(), workspace_id(), "data_sources")
     source_ids = payload.get("source_ids") or ([payload["source_id"]] if payload.get("source_id") else [])
     if not source_ids:
         raise ValueError("请选择数据源")
@@ -325,6 +351,7 @@ def list_semantic_models():
 @api_errors
 def create_semantic_model():
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "semantic_layer")
     return ok(item=save_model(db(), body(), wid, current_user_id())), 201
 
 
@@ -367,6 +394,8 @@ def list_semantic_metrics():
 @api_errors
 def create_semantic_metric():
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "semantic_layer")
+    assert_collection_limit(db(), wid, limit_key="semantic_metrics", collection="semantic_metrics")
     if str(body().get("status") or "draft") == "approved":
         require_workspace_access(wid, owner=True)
     return ok(item=save_metric(db(), body(), wid, current_user_id())), 201
@@ -394,12 +423,14 @@ def archive_semantic_metric(metric_id: str):
 @bp.post("/api/semantic/compile")
 @api_errors
 def compile_semantic_metric():
+    assert_feature_enabled(db(), workspace_id(), "semantic_layer")
     return ok(plan=compile_metric_query(db(), body(), workspace_id(), current_user_id()))
 
 
 @bp.post("/api/semantic/query")
 @api_errors
 def query_semantic_metric():
+    assert_feature_enabled(db(), workspace_id(), "semantic_layer")
     output = execute_metric_query(db(), body(), workspace_id(), current_user_id())
     result = {key: value for key, value in output["result"].items() if key != "path"}
     return ok(plan=output["plan"], result=result)
@@ -418,13 +449,20 @@ def upload_document():
     tags_raw = request.form.get("tags", "")
     tags = [item.strip() for item in tags_raw.split(",") if item.strip()]
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "knowledge_base")
+    assert_limit_available(
+        db(), wid, limit_key="knowledge_entries",
+        current_count=len(db().list("knowledge_documents", workspace_id=wid, limit=5000))
+        + len(db().list("knowledge_entries", workspace_id=wid, limit=5000)),
+    )
     return ok(item=add_document(request.files["file"], wid, tags)), 201
 
 
 @bp.patch("/api/knowledge/documents/<document_id>")
 @api_errors
 def update_document(document_id: str):
-    require_workspace_record("knowledge_documents", document_id)
+    document = require_workspace_record("knowledge_documents", document_id)
+    assert_feature_enabled(db(), document["workspace_id"], "knowledge_base")
     allowed = {key: value for key, value in body().items() if key in {"name", "tags", "enabled"}}
     return ok(item=public_document(db().patch("knowledge_documents", document_id, allowed)))
 
@@ -441,6 +479,7 @@ def archive_document(document_id: str):
 @bp.post("/api/knowledge/search")
 @api_errors
 def knowledge_search():
+    assert_feature_enabled(db(), workspace_id(), "knowledge_base")
     query_text = str(body().get("query") or "").strip()
     if not query_text:
         raise ValueError("检索词不能为空")
@@ -463,14 +502,22 @@ def list_knowledge_entries():
 @bp.post("/api/knowledge/entries")
 @api_errors
 def create_knowledge_entry():
-    return ok(item=_public_knowledge_entry(save_entry(body(), workspace_id()))), 201
+    wid = workspace_id()
+    assert_feature_enabled(db(), wid, "knowledge_base")
+    assert_limit_available(
+        db(), wid, limit_key="knowledge_entries",
+        current_count=len(db().list("knowledge_documents", workspace_id=wid, limit=5000))
+        + len(db().list("knowledge_entries", workspace_id=wid, limit=5000)),
+    )
+    return ok(item=_public_knowledge_entry(save_entry(body(), wid))), 201
 
 
 @bp.patch("/api/knowledge/entries/<entry_id>")
 @api_errors
 def update_knowledge_entry(entry_id: str):
-    require_workspace_record("knowledge_entries", entry_id)
-    return ok(item=_public_knowledge_entry(save_entry(body(), workspace_id(), entry_id)))
+    entry = require_workspace_record("knowledge_entries", entry_id)
+    assert_feature_enabled(db(), entry["workspace_id"], "knowledge_base")
+    return ok(item=_public_knowledge_entry(save_entry(body(), entry["workspace_id"], entry_id)))
 
 
 @bp.delete("/api/knowledge/entries/<entry_id>")
@@ -497,6 +544,7 @@ def create_knowledge_category():
     if not name:
         raise ValueError("知识分类名称不能为空")
     wid = workspace_id()
+    assert_feature_enabled(db(), wid, "knowledge_base")
     item = db().put(
         "knowledge_categories",
         {"id": db().new_id("kbcat"), "workspace_id": wid, "name": name[:100], "enabled": True},

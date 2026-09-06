@@ -2,7 +2,7 @@
 
 # 经纬分析工作台
 
-**从数据接入、可复核分析到自动化交付的本地优先企业数据工作空间**
+**从数据接入、可复核分析到自动化交付的标准化企业分析 SaaS**
 
 [![CI](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -16,7 +16,7 @@
 
 ---
 
-经纬分析工作台（Meridian Analytics Workbench）是一套 Vue 3 + Python 的一体化数据分析系统。它将数据目录、只读 SQL、统计建模、自然语言 Agent、业务知识、多顾问协作、审批工作流、分析看板和 Office 交付统一到同一个可治理工作空间中。
+经纬分析工作台（Meridian Analytics Workbench）是一套 Vue 3 + Python 的标准化企业分析 SaaS。它将数据连接、只读 SQL、语义指标、自然语言 Agent、业务口径、多顾问协作、审批工作流、决策看板和 Office 交付统一到同一个可治理工作空间中。
 
 项目面向需要“把问题变成数据证据，再把证据变成可交付结果”的分析团队。数据、中间结果、知识索引、审计记录与导出文件默认保存在本机 `storage/`；模型和外部工具按需连接。没有模型配置时，数据浏览和明确的确定性诊断仍可用，但正式自主分析会返回 `model_not_configured`，不会伪造完成结果。
 
@@ -24,8 +24,9 @@
 
 | 能力域 | 已实现能力 |
 | --- | --- |
+| SaaS 产品控制面 | 默认租户、套餐、订阅、权益与配额；产品总览页展示标准方法论、解决方案、开通路径和演示数据初始化 |
 | 正式自主分析 | 四段任务契约确认、唯一 AgentLoop、Chat Completions/Responses 协议、滚动计划、持久化 Action/预算/事件；通过 JSON/SSE 展示真实状态 |
-| 数据目录 | 上传 CSV、TSV、Excel、JSON/JSON Lines、Parquet；连接 SQLite、PostgreSQL、MySQL、SQL Server、HTTP JSON、Google Sheets 和飞书多维表格 |
+| 数据连接 | 上传 CSV、TSV、Excel、JSON/JSON Lines、Parquet；连接 SQLite、PostgreSQL、MySQL、SQL Server、HTTP JSON、Google Sheets 和飞书多维表格 |
 | 数据处理 | 数据预览、质量画像、缺失/重复/异常检查、文本规整、缺失填充、缩尾和派生数据集；清洗不覆盖原始数据 |
 | 语义指标 | 版本化语义模型、维度/度量绑定、固定口径过滤、owner 审批、确定性 SQL 编译与 `metric@version` 证据回放 |
 | 统计与建模 | 相关分析、十分位分层、K-Means、A/B 检验、线性/逻辑回归、决策树、随机森林、梯度提升、特征筛选、异常检测以及 ARIMA、SARIMA、VAR、Prophet 风格和神经网络预测 |
@@ -38,7 +39,7 @@
 
 ## 一次完整的分析如何发生
 
-1. 在“数据目录”上传文件或登记外部数据源，预览表结构并检查数据质量。
+1. 在“数据连接”上传文件或登记外部数据源，预览表结构并检查数据质量。
 2. 将数据源加入当前会话；Agent 只能看到本会话明确授权的数据。
 3. 在四段任务契约中确认目标、范围、查看维度和交付形式，再开始正式分析。
 4. Agent 动态查询、分析并执行独立验证；系统保留版本、计划、Action、证据与完整性状态。
@@ -57,17 +58,7 @@
 > [!NOTE]
 > SQL Server 连接需要系统已安装 Microsoft ODBC Driver 18。项目的 Docker 镜像已自动安装该驱动。
 
-### 桌面脚本启动
-
-克隆项目后，macOS 双击 `start.command`，Windows 双击 `start.bat`。脚本会检查 Python 版本、创建 `.venv`、按哈希锁定文件安装依赖，并在 `http://127.0.0.1:5001` 启动服务。
-
-macOS/Linux 也可以从终端运行：
-
-```bash
-./start.command
-```
-
-### 手动启动
+### 本地 Web 启动
 
 macOS/Linux：
 
@@ -93,29 +84,14 @@ python app.py
 
 启动后访问 <http://127.0.0.1:5001>。开发环境中，全新实例默认进入无账号的本地模式；生产环境会要求先创建第一位系统所有者，密码至少 12 位。
 
-### 可选：安装为用户级命令
-
-仓库提供用户级安装脚本。脚本会将项目克隆或快进更新到独立目录、重建虚拟环境并生成启动命令。两端都可通过 `MERIDIAN_REPOSITORY` 和 `MERIDIAN_INSTALL_ROOT` 调整来源与项目位置；macOS/Linux 还支持 `MERIDIAN_LAUNCHER_ROOT`。
-
-```bash
-./install.sh
-~/.local/bin/meridian-analytics
-```
-
-Windows PowerShell：
-
-```powershell
-.\install.ps1
-& "$HOME\meridian-analytics.bat"
-```
-
 ### 首次使用
 
-1. 在“数据目录”上传自有数据，或使用 [`deploy/samples/Sample-data.xlsx`](deploy/samples/Sample-data.xlsx) 快速体验。
-2. 勾选“用于当前会话”，回到“分析会话”直接提问。
-3. 如需模型规划，在“系统设置 → 模型服务”添加 OpenAI-Compatible 配置，并使用界面中的“测试”按钮做真实请求验收。
-4. 在“业务知识”补充指标口径和业务规则，减少模糊解读。
-5. 将高频分析固化为工作流，将查询图表组织为看板，或导出为可交付文件。
+1. 在“产品总览”查看当前租户、套餐权益、标准方法论、解决方案和开通进度。
+2. 点击“载入演示数据”，系统会接入 [`deploy/samples/Sample-data.xlsx`](deploy/samples/Sample-data.xlsx)，并自动沉淀业务口径与审批指标。
+3. 在“数据连接”上传自有数据或登记外部数据源，勾选“用于当前会话”。
+4. 在“业务口径”和“指标治理”维护指标定义、业务规则、语义模型和审批状态。
+5. 回到“可信分析”确认任务契约后提问；系统会保留查询、验证、证据和发布状态。
+6. 将高频分析固化为“报告工厂”工作流，或在“决策看板”形成可刷新、可导出的交付成果。
 
 ### 可选：深度学习能力
 
@@ -171,8 +147,7 @@ flowchart LR
 ├── skills/                      # 28 个内置分析/交付技能 SOP
 ├── scripts/                     # 构建、验收、仓库审计、备份与恢复
 ├── deploy/warehouse/            # 固定版本的 Trino/Iceberg/Spark-Livy 参考环境
-├── packaging/                   # 经密钥扫描的 PyInstaller 桌面打包
-├── tests/                       # API、安全、自动化、兼容性与打包测试
+├── tests/                       # API、安全、自动化与产品化测试
 ├── storage/                     # 本地运行数据（不纳入 Git）
 ├── Dockerfile / compose.yaml    # 单节点生产部署
 └── railway.json                 # Railway Dockerfile 部署配置
@@ -291,24 +266,6 @@ python scripts/restore.py storage/backups/meridian-YYYYMMDDTHHMMSSZ.tar.gz.enc \
 
 恢复命令会拒绝路径越界、链接或非法归档成员，并对数据库执行 `PRAGMA integrity_check`。验证通过后，再由运维流程将 `<destination>/storage` 替换为实际数据目录。
 
-## 桌面打包
-
-项目支持生成 PyInstaller onedir 桌面包。打包前会只将允许的源码树复制到 staging 目录，拒绝符号链接、数据库、`.env` 和可识别的私钥/API Key。
-
-```bash
-python -m pip install -r requirements-dev.txt -r packaging/requirements.txt
-./packaging/build_desktop.sh
-```
-
-Windows 使用：
-
-```powershell
-python -m pip install -r requirements-dev.txt -r packaging/requirements.txt
-.\packaging\build_desktop.ps1
-```
-
-产物输出到 `build/desktop/dist/`。桌面应用启动本机 Waitress 服务并自动打开浏览器；用户数据保存在操作系统的标准应用数据目录。
-
 ## 开发与验证
 
 ### 安装开发依赖
@@ -322,9 +279,9 @@ python -m pip install -r requirements-dev.txt
 ### 后端质量检查
 
 ```bash
-ruff check backend scripts packaging deploy/sandbox tests app.py
-ruff check --select S backend scripts packaging deploy/sandbox app.py
-python -m compileall -q backend scripts packaging deploy/sandbox app.py
+ruff check backend scripts deploy/sandbox tests app.py
+ruff check --select S backend scripts deploy/sandbox app.py
+python -m compileall -q backend scripts deploy/sandbox app.py
 pytest -q -m "not database_integration" \
   --cov=backend/agent --cov=backend/api --cov=backend/core --cov=backend/services \
   --cov-report=term --cov-fail-under=60

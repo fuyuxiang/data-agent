@@ -80,7 +80,7 @@ class _PromptCompletions:
 def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(client, monkeypatch):
     session = client.post("/api/sessions", json={"name": "临时指令"}).get_json()["item"]
     saved = client.post(
-        f"/api/session/{session['id']}/temp-prompt",
+        f"/api/sessions/{session['id']}/temp-prompt",
         json={"text": "<think>不应注入的思考</think>\n所有金额使用万元。", "raw": True},
     ).get_json()
     assert saved["enabled"] is True
@@ -108,7 +108,7 @@ def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(clien
     assert "所有金额使用万元" in system_prompt
     assert "不应注入的思考" not in system_prompt
 
-    disabled = client.post(f"/api/session/{session['id']}/temp-prompt/toggle").get_json()
+    disabled = client.post(f"/api/sessions/{session['id']}/temp-prompt/toggle").get_json()
     assert disabled["enabled"] is False
     created = client.post("/api/analyses", json={"session_id": session["id"], "objective": "再次汇报"}).get_json()["item"]
     confirmed = client.post(
@@ -123,8 +123,8 @@ def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(clien
     assert "所有金额使用万元" not in completions.calls[-1]["messages"][0]["content"]
 
     cleared = client.post(
-        f"/api/session/{session['id']}/temp-prompt", json={"text": "", "raw": True},
+        f"/api/sessions/{session['id']}/temp-prompt", json={"text": "", "raw": True},
     ).get_json()
     assert cleared["temp_prompt"] == ""
     assert cleared["enabled"] is False
-    assert client.post(f"/api/session/{session['id']}/temp-prompt/toggle").get_json()["warning"]
+    assert client.post(f"/api/sessions/{session['id']}/temp-prompt/toggle").get_json()["warning"]

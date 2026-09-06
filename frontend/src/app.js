@@ -1,22 +1,24 @@
 import { api, withWorkspace } from './api.js';
 import { Icon, Modal, StatusPill, ToastStack } from './components.js';
 import { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, KnowledgePanel, SemanticPanel, SettingsPanel, SourcesPanel } from './panels.js';
+import { ProductPanel } from './product-panel.js';
 
 const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
 const routes = [
-  { id: 'chat', label: '分析会话', icon: 'chat' },
-  { id: 'sources', label: '数据目录', icon: 'database' },
-  { id: 'knowledge', label: '业务知识', icon: 'book' },
-  { id: 'semantic', label: '指标中心', icon: 'chart' },
-  { id: 'automation', label: '自动化中心', icon: 'workflow' },
-  { id: 'dashboards', label: '分析看板', icon: 'dashboard' },
-  { id: 'feishu', label: '飞书机器人', icon: 'workflow' },
-  { id: 'settings', label: '系统设置', icon: 'settings' },
+  { id: 'chat', label: '可信分析', icon: 'chat' },
+  { id: 'product', label: '产品总览', icon: 'dashboard' },
+  { id: 'sources', label: '数据连接', icon: 'database' },
+  { id: 'knowledge', label: '业务口径', icon: 'book' },
+  { id: 'semantic', label: '指标治理', icon: 'chart' },
+  { id: 'automation', label: '报告工厂', icon: 'workflow' },
+  { id: 'dashboards', label: '决策看板', icon: 'dashboard' },
+  { id: 'feishu', label: '协同入口', icon: 'workflow' },
+  { id: 'settings', label: '管理设置', icon: 'settings' },
 ];
 
 const Root = {
-  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, Icon, KnowledgePanel, Modal, SemanticPanel, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
+  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, Icon, KnowledgePanel, Modal, ProductPanel, SemanticPanel, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
   setup() {
     const state = reactive({
       ready: false, authChecking: true, authRequired: false, registrationOpen: false,
@@ -24,6 +26,7 @@ const Root = {
       route: location.hash.slice(1) || 'chat', sidebarOpen: false,
       workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [], workspaceRole: '',
       sessions: [], activeSessionId: '', sources: [], providers: [], skills: [], analysisMethods: [], agentProfiles: [],
+      product: null, entitlements: null, onboarding: null,
       busy: false, busyLabel: '', toasts: [], jobsOpen: false, jobs: [], activeJobs: 0,
       commandOpen: false, commands: [], commandQuery: '', theme: document.documentElement.dataset.theme || 'light',
     });
@@ -68,6 +71,7 @@ const Root = {
         state.workspaceRole = data.active_membership?.role || (!state.user ? 'owner' : '');
         state.sessions = data.sessions; state.sources = data.sources; state.providers = data.providers;
         state.activeSessionId = data.active_session?.id || data.sessions[0]?.id || '';
+        state.product = data.product || null; state.entitlements = data.entitlements || data.product?.entitlements || null; state.onboarding = data.onboarding || data.product?.onboarding || null;
         state.skills = skills.items; state.analysisMethods = methods.items; state.agentProfiles = profiles.items; state.commands = commands.items;
         localStorage.setItem('meridian-workspace', state.workspaceId);
         await loadJobs(); state.ready = true;
@@ -113,6 +117,7 @@ const Root = {
       if(name==='new') return newSession(arg||'新分析会话');
       if(name==='data'||name==='sources'||name==='profile') return go('sources');
       if(name==='knowledge') return go('knowledge');
+      if(name==='product'||name==='plans') return go('product');
       if(name==='jobs') { state.jobsOpen=true; return loadJobs(); }
       if(name==='clear') { const session=activeSession();if(session)await api(`/api/sessions/${session.id}/clear`,{method:'POST'});toast('','会话上下文已清除');return; }
       if(name==='compact'){const session=activeSession();if(!session)return;await api(`/api/sessions/${session.id}/commands/compact/execute`,{method:'POST',body:{arguments:arg}});toast('','上下文已压缩');return;}
@@ -129,7 +134,7 @@ const Root = {
     };
     const loadJobs = async () => { try { const result=await api(withWorkspace('/api/jobs?limit=50',state.workspaceId));state.jobs=result.items;state.activeJobs=state.jobs.filter(item=>['queued','running','waiting_approval'].includes(item.status)).length; } catch{/* background refresh */} };
     const toggleTheme = () => { state.theme=state.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=state.theme;localStorage.setItem('meridian-theme',state.theme); };
-    const ctx = { state, toast, fail, run, activeSession, selectedSources, time, number, go, command };
+    const ctx = { state, toast, fail, run, activeSession, selectedSources, time, number, go, command, bootstrap };
 
     let jobTimer;
     const keydown = (event) => {
@@ -164,11 +169,12 @@ const Root = {
         <div class="workspace-switcher"><label>分析空间</label><select v-model="state.workspaceId" @change="switchWorkspace"><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }}</option></select></div>
         <nav class="main-nav"><button v-for="item in routes" :key="item.id" :class="{active:state.route===item.id}" @click="go(item.id)"><Icon :name="item.icon"/><span>{{ item.label }}</span><b v-if="item.id==='automation'&&state.activeJobs">{{ state.activeJobs }}</b></button></nav>
         <section class="sidebar-sessions"><header><span>最近会话</span><button @click="newSession()" title="新会话"><Icon name="plus"/></button></header><button v-for="session in state.sessions.slice(0,6)" :key="session.id" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button></section>
-        <footer class="sidebar-footer"><button @click="state.commandOpen=true"><span>⌘K</span>命令面板</button><button v-if="state.user" @click="logout"><span>{{ state.user.name }}</span>退出</button><div><i :class="{on:state.sources.length}"></i>{{ state.sources.length }} 个数据源已登记</div></footer>
+        <footer class="sidebar-footer"><button @click="state.commandOpen=true"><span>⌘K</span>命令面板</button><button v-if="state.user" @click="logout"><span>{{ state.user.name }}</span>退出</button><div><i :class="{on:state.sources.length}"></i>{{ state.sources.length }} 个数据源 · {{ state.entitlements?.plan?.name || '未开通' }}</div></footer>
       </aside>
       <main class="app-main">
         <div class="mobile-bar"><button class="icon-button" @click="state.sidebarOpen=true" aria-label="打开导航">☰</button><b>经纬分析工作台</b><button class="icon-button" @click="toggleTheme"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button></div>
         <ChatPanel v-if="state.route==='chat'" :ctx="ctx"/>
+        <ProductPanel v-else-if="state.route==='product'" :ctx="ctx" :key="state.workspaceId"/>
         <SourcesPanel v-else-if="state.route==='sources'" :ctx="ctx"/>
         <KnowledgePanel v-else-if="state.route==='knowledge'" :ctx="ctx" :key="state.workspaceId"/>
         <SemanticPanel v-else-if="state.route==='semantic'" :ctx="ctx" :key="state.workspaceId"/>

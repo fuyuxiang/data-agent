@@ -19,7 +19,7 @@ from .common import (
 
 
 log = logging.getLogger(__name__)
-bp = Blueprint("knowledge_compat", __name__)
+bp = Blueprint("knowledge", __name__)
 TEMP_PROMPT_MAX_CHARS = 4000
 
 
@@ -265,7 +265,7 @@ def notes_toggle(entry_id: str): return _toggle_entry(entry_id)
 
 
 @bp.get("/api/knowledge/search")
-def knowledge_search_compat():
+def knowledge_search_grouped():
     rows = search(request.args.get("q", ""), workspace_id(), 20)
     result = {"metrics": [], "rules": [], "notes": []}
     for row in rows:
@@ -306,13 +306,13 @@ def _temp_state(session: dict) -> dict:
     return {"temp_prompt": text, "enabled": bool(text and session.get("temp_prompt_enabled", bool(text))), "max_chars": TEMP_PROMPT_MAX_CHARS}
 
 
-@bp.get("/api/session/<session_id>/temp-prompt")
+@bp.get("/api/sessions/<session_id>/temp-prompt")
 @api_errors
 def temp_prompt_get(session_id: str):
     return jsonify(_temp_state(require_session_access(session_id)))
 
 
-@bp.post("/api/session/<session_id>/temp-prompt")
+@bp.post("/api/sessions/<session_id>/temp-prompt")
 @api_errors
 def temp_prompt_set(session_id: str):
     session = require_session_access(session_id)
@@ -358,7 +358,7 @@ def temp_prompt_set(session_id: str):
     return jsonify({**_temp_state(session), "warning": warning})
 
 
-@bp.post("/api/session/<session_id>/temp-prompt/toggle")
+@bp.post("/api/sessions/<session_id>/temp-prompt/toggle")
 @api_errors
 def temp_prompt_toggle(session_id: str):
     session = require_session_access(session_id)

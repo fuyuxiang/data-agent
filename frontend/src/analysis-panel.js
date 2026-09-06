@@ -11,6 +11,7 @@ export const AnalysisPanel = {
   data: () => ({
     prompt: '', selectedSkill: '', current: null, events: [], eventCursor: 0, result: null, evidence: null,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
+    demoLoading: false,
     artifacts: [], attachments: [],
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
     emailOpen: false, emailMode: 'eml', email: {
@@ -41,6 +42,18 @@ export const AnalysisPanel = {
     md: renderMarkdown,
     split(value) {
       return String(value || '').split(/[，,\n]/).map(item => item.trim()).filter(Boolean);
+    },
+    percent(value) { return Math.round(Number(value || 0) * 100); },
+    async seedDemo() {
+      if (this.demoLoading) return;
+      this.demoLoading = true;
+      try {
+        await api(withWorkspace('/api/onboarding/demo', this.state.workspaceId), { method: 'POST' });
+        await this.ctx.bootstrap();
+        this.ctx.toast('已接入样例数据、业务口径和审批指标，可直接发起经营分析', '演示空间已准备');
+      } catch (error) {
+        this.ctx.fail(error);
+      } finally { this.demoLoading = false; }
     },
     syncContract() {
       const value = this.contract?.payload || {};
@@ -259,6 +272,17 @@ export const AnalysisPanel = {
           <span class="eyebrow">受治理的自主分析</span>
           <h2>今天要从数据中确认什么？</h2>
           <p>选择授权来源并描述问题。系统先生成可编辑需求理解卡；确认后才会自主检索、查询、验证和交付。</p>
+          <section v-if="state.onboarding" class="onboarding-card">
+            <header>
+              <div><b>标准产品开通路径</b><small>{{ percent(state.onboarding.score) }}% 完成 · {{ state.entitlements?.plan?.name || '未开通' }}</small></div>
+              <button class="button button--small button--primary" :disabled="demoLoading" @click="seedDemo"><Icon name="database"/>{{ demoLoading ? '准备中' : '载入演示数据' }}</button>
+            </header>
+            <ol>
+              <li v-for="step in state.onboarding.steps" :key="step.id" :class="{done:step.done}">
+                <i></i><button @click="ctx.go(step.route)">{{ step.name }}</button><small>{{ step.done ? '已完成' : step.description }}</small>
+              </li>
+            </ol>
+          </section>
           <div class="prompt-grid">
             <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><Icon name="table"/><span><b>通用统计</b><small>结构、分布与质量</small></span></button>
             <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><Icon name="warning"/><span><b>异常诊断</b><small>差异、贡献与风险</small></span></button>
