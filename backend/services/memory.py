@@ -8,7 +8,7 @@ from typing import Any
 from flask import Flask, current_app
 
 from ..core.database import Database, utcnow
-from .jobs import get_job_manager
+from .jobs import get_job_manager, register_job_handler
 from .models import resolve_provider
 from .usage import ensure_quota, record_usage
 
@@ -172,63 +172,69 @@ def schedule_memory_extraction(
     if not _needs_extraction(user_message):
         return None
 
-    def work(progress, cancel):
-        progress(10, "识别可持久化信息")
-        if cancel.is_set():
-            return {"cancelled": True}
-        operations = _deterministic_ops(user_message)
-        provider, client = resolve_provider(provider_id, workspace_id)
-        if app.config.get("TESTING") and not app.config.get("MEMORY_EXTRACTION_IN_TESTS"):
-            client = None
-        if client:
-            quota = ensure_quota(_db(), workspace_id)
-            summaries = [
-                {key: item.get(key) for key in ("name", "type", "title")}
-                for item in _db().list("memories", workspace_id=workspace_id, limit=200)
-            ]
-            response = client.chat.completions.create(
-                model=provider["model"],
-                messages=[
-                    {"role": "system", "content": EXTRACTION_SYSTEM},
-                    {
-                        "role": "user",
-                        "content": json.dumps({
-                            "existing": summaries, "user": user_message[:12000],
-                            "assistant": assistant_message[:12000],
-                        }, ensure_ascii=False),
-                    },
-                ],
-                temperature=0,
-                max_tokens=max(1, min(1600, quota["remaining"])),
-            )
-            usage = getattr(response, "usage", None)
-            record_usage(_db(), workspace_id, {
-                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-                "model": provider["model"],
-            }, session_id=session_id, operation="memory_extraction")
-            parsed = _json_object(_content(response))
-            if isinstance(parsed.get("ops"), list):
-                operations = parsed["ops"]
-        progress(70, "写入长期记忆")
-        applied = _apply_ops(operations, workspace_id, user_id)
-        _db().put(
-            "memory_notices",
-            {
-                "id": _db().new_id("memnotice"), "workspace_id": workspace_id,
-                "session_id": session_id, "message": f"已更新 {len(applied)} 条长期记忆",
-                "memory_ids": [item["id"] for item in applied], "read": False,
-            },
-            workspace_id=workspace_id,
-        )
-        return {"applied": len(applied), "memory_ids": [item["id"] for item in applied]}
-
     with app.app_context():
-        return get_job_manager(app).submit(
-            workspace_id=workspace_id, session_id=session_id, kind="memory_extraction",
-            title=f"记忆提取：{user_message[:50]}", work=work,
+        return get_job_manager(app).submit_spec(
+            workspace_id=workspace_id, session_id=session_id, job_type="memory_extraction",
+            title=f"记忆提取：{user_message[:50]}",
+            spec={
+                "workspace_id": workspace_id, "session_id": session_id, "user_id": user_id,
+                "user_message": user_message[:12000], "assistant_message": assistant_message[:12000],
+                "provider_id": provider_id,
+            },
         )
+
+
+def _memory_job_handler(app, spec, progress, cancel):
+    workspace_id = str(spec["workspace_id"])
+    session_id = str(spec["session_id"])
+    user_id = str(spec["user_id"])
+    user_message = str(spec.get("user_message") or "")
+    assistant_message = str(spec.get("assistant_message") or "")
+    progress(10, "识别可持久化信息")
+    if cancel.is_set():
+        return {"cancelled": True}
+    operations = _deterministic_ops(user_message)
+    provider, client = resolve_provider(spec.get("provider_id"), workspace_id)
+    if app.config.get("TESTING") and not app.config.get("MEMORY_EXTRACTION_IN_TESTS"):
+        client = None
+    if client:
+        quota = ensure_quota(_db(), workspace_id)
+        summaries = [
+            {key: item.get(key) for key in ("name", "type", "title")}
+            for item in _db().list("memories", workspace_id=workspace_id, limit=200)
+        ]
+        response = client.chat.completions.create(
+            model=provider["model"],
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM},
+                {"role": "user", "content": json.dumps({
+                    "existing": summaries, "user": user_message,
+                    "assistant": assistant_message,
+                }, ensure_ascii=False)},
+            ],
+            temperature=0, max_tokens=max(1, min(1600, quota["remaining"])),
+        )
+        usage = getattr(response, "usage", None)
+        record_usage(_db(), workspace_id, {
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            "model": provider["model"],
+        }, session_id=session_id, operation="memory_extraction")
+        parsed = _json_object(_content(response))
+        if isinstance(parsed.get("ops"), list):
+            operations = parsed["ops"]
+    progress(70, "写入长期记忆")
+    applied = _apply_ops(operations, workspace_id, user_id)
+    _db().put("memory_notices", {
+        "id": _db().new_id("memnotice"), "workspace_id": workspace_id,
+        "session_id": session_id, "message": f"已更新 {len(applied)} 条长期记忆",
+        "memory_ids": [item["id"] for item in applied], "read": False,
+    }, workspace_id=workspace_id)
+    return {"applied": len(applied), "memory_ids": [item["id"] for item in applied]}
+
+
+register_job_handler("memory_extraction", _memory_job_handler)
 
 
 def consolidate_memories(workspace_id: str) -> dict:

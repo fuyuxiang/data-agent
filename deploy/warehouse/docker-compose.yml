@@ -1,0 +1,90 @@
+name: meridian-warehouse-reference
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: meridian
+      MINIO_ROOT_PASSWORD: meridian-reference-only
+    ports: ["9000:9000", "9001:9001"]
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio: {condition: service_started}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - until mc alias set local http://minio:9000 meridian meridian-reference-only; do sleep 2; done; mc mb --ignore-existing local/warehouse;
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    depends_on:
+      minio-init: {condition: service_completed_successfully}
+    environment:
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: meridian
+      AWS_SECRET_ACCESS_KEY: meridian-reference-only
+      AWS_REGION: us-east-1
+    ports: ["8181:8181"]
+
+  trino-coordinator:
+    image: trinodb/trino:466
+    volumes:
+      - ./trino/coordinator.properties:/etc/trino/config.properties:ro
+      - ./trino/node.properties:/etc/trino/node.properties:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/resource-groups.properties:/etc/trino/resource-groups.properties:ro
+      - ./trino/resource-groups.json:/etc/trino/resource-groups.json:ro
+    ports: ["8080:8080"]
+    depends_on: [iceberg-rest]
+
+  trino-worker-1: &trino-worker
+    image: trinodb/trino:466
+    volumes:
+      - ./trino/worker.properties:/etc/trino/config.properties:ro
+      - ./trino/node.properties:/etc/trino/node.properties:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino/catalog:/etc/trino/catalog:ro
+    depends_on: [trino-coordinator]
+
+  trino-worker-2:
+    <<: *trino-worker
+
+  spark-master:
+    image: apache/spark:3.5.3-java17-python3
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment: &spark-env
+      AWS_ACCESS_KEY_ID: meridian
+      AWS_SECRET_ACCESS_KEY: meridian-reference-only
+      AWS_REGION: us-east-1
+    ports: ["7077:7077", "8088:8080"]
+
+  spark-worker-1: &spark-worker
+    image: apache/spark:3.5.3-java17-python3
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+    depends_on: [spark-master]
+
+  spark-worker-2:
+    <<: *spark-worker
+
+  livy:
+    build:
+      context: ./livy
+      args:
+        LIVY_VERSION: 0.8.0-incubating
+    environment:
+      <<: *spark-env
+      SPARK_MASTER: spark://spark-master:7077
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      S3_ENDPOINT: http://minio:9000
+    volumes:
+      - ./jobs:/opt/meridian/jobs:ro
+    ports: ["8998:8998"]
+    depends_on: [spark-worker-1, spark-worker-2, iceberg-rest]

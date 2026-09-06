@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
-import shutil
-import subprocess
 import threading
 from typing import Any
 
@@ -224,38 +221,6 @@ def _execute_action(action: dict, payload: dict, workspace_id: str, database: Da
         result["output"] = response.text[:4096]
         if not 200 <= response.status_code < 300:
             result["status"] = "failed"
-    elif action_type == "command":
-        if not current_app.config.get("ALLOW_COMMAND_HOOKS", False):
-            raise PermissionError("命令 Hook 默认关闭；管理员可显式启用 ALLOW_COMMAND_HOOKS")
-        arguments = shlex.split(str(_expand(action.get("command") or "", payload)))
-        if not arguments:
-            raise ValueError("Hook 命令不能为空")
-        allowed = {
-            item.strip().lower() for item in os.getenv("MERIDIAN_COMMAND_HOOK_ALLOWLIST", "").split(",")
-            if item.strip()
-        }
-        if os.path.sep in arguments[0] or (os.altsep and os.altsep in arguments[0]):
-            raise PermissionError("Hook 命令必须通过受控 PATH 解析，不能使用自定义路径")
-        command_name = os.path.basename(arguments[0]).lower()
-        if command_name not in allowed:
-            raise PermissionError("Hook 命令不在 MERIDIAN_COMMAND_HOOK_ALLOWLIST 中")
-        executable = shutil.which(arguments[0])
-        if not executable:
-            raise FileNotFoundError(f"Hook 命令不存在：{arguments[0]}")
-        arguments[0] = executable
-        safe_environment = {
-            key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT")
-            if os.environ.get(key)
-        }
-        completed = subprocess.run(  # noqa: S603 -- opt-in owner-only command with allowlisted executable
-            arguments, shell=False, capture_output=True, text=True,
-            timeout=max(1, min(int(action.get("timeout", 10)), 60)), check=False,
-            env=safe_environment,
-        )
-        result["output"] = (completed.stdout or completed.stderr or "")[:4000]
-        result["returncode"] = completed.returncode
-        if completed.returncode:
-            result["status"] = "failed"
     elif action_type == "workflow":
         from .workflows import start_workflow
 
@@ -265,7 +230,7 @@ def _execute_action(action: dict, payload: dict, workspace_id: str, database: Da
         child_payload = {**payload, "hook_depth": int(payload.get("hook_depth", 0)) + 1}
         result["run"] = start_workflow(
             {**workflow, "definition": workflow.get("published_definition") or workflow["definition"]},
-            child_payload,
+            child_payload, actor_id=str(payload.get("actor_id") or "local-default"),
         )
     elif action_type == "connector":
         from ..api.integration import _send_connector

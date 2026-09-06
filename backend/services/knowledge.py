@@ -25,7 +25,8 @@ def _db() -> Database:
 def _extract(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md", ".html", ".json"}:
-        return path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return "\n".join(f"[line {index}] {line}" for index, line in enumerate(text.splitlines(), 1))
     if suffix == ".csv":
         try:
             frame = pd.read_csv(path)
@@ -33,14 +34,40 @@ def _extract(path: Path) -> str:
             frame = pd.read_csv(path, encoding="gb18030")
         return frame.to_csv(index=False)
     if suffix == ".docx":
-        return "\n".join(paragraph.text for paragraph in Document(path).paragraphs if paragraph.text.strip())
+        document = Document(path)
+        parts = [
+            f"[paragraph {index}] {paragraph.text}"
+            for index, paragraph in enumerate(document.paragraphs, 1) if paragraph.text.strip()
+        ]
+        for table_index, table in enumerate(document.tables, 1):
+            for row_index, row in enumerate(table.rows, 1):
+                for column_index, cell in enumerate(row.cells, 1):
+                    value = cell.text.strip()
+                    if value:
+                        parts.append(f"[table {table_index} cell R{row_index}C{column_index}] {value}")
+        return "\n".join(parts)
     if suffix == ".pdf":
         from pypdf import PdfReader
 
-        return "\n\n".join((page.extract_text() or "").strip() for page in PdfReader(path).pages)
+        parts = []
+        for index, page in enumerate(PdfReader(path).pages, 1):
+            text = (page.extract_text() or "").strip()
+            parts.append(
+                f"[page {index}] {text}" if text
+                else f"[page {index}] NO_EXTRACTABLE_TEXT; VISUAL_EVIDENCE_REQUIRED"
+            )
+        return "\n\n".join(parts)
     if suffix in {".xlsx", ".xls"}:
         sheets = pd.read_excel(path, sheet_name=None)
-        return "\n\n".join(f"[{name}]\n{frame.to_csv(index=False)}" for name, frame in sheets.items())
+        parts = []
+        for name, frame in sheets.items():
+            parts.append(f"[sheet {name} header] " + " | ".join(str(value) for value in frame.columns))
+            for row_index, row in frame.head(current_app.config["SETTINGS"].max_ingest_rows).iterrows():
+                parts.append(
+                    f"[sheet {name} row {int(row_index) + 2}] "
+                    + " | ".join(f"{column}={row[column]}" for column in frame.columns)
+                )
+        return "\n".join(parts)
     raise ValueError("该文档格式暂不支持文本解析")
 
 
@@ -114,6 +141,8 @@ def add_document(file: FileStorage, workspace_id: str, tags: list[str] | None = 
     target = current_app.config["SETTINGS"].knowledge_dir / f"{document_id}{suffix}"
     file.save(target)
     try:
+        if target.stat().st_size > 50 * 1024 * 1024:
+            raise ValueError("分析入口单文件不得超过 50MB")
         text = _extract(target)
     except Exception:
         target.unlink(missing_ok=True)
@@ -129,6 +158,10 @@ def add_document(file: FileStorage, workspace_id: str, tags: list[str] | None = 
             "filename": filename, "format": suffix.lstrip("."), "path": str(target), "text": text,
             "chunks": chunks, "chunk_index": _build_chunk_index(chunks, workspace_id), "tags": tags or [],
             "enabled": True, "characters": len(text), "chunk_count": len(chunks), "index_version": 2,
+            "evidence_locations": True,
+            "visual_only_pages": [
+                int(value) for value in re.findall(r"\[page (\d+)\] NO_EXTRACTABLE_TEXT", text)
+            ],
         },
         workspace_id=workspace_id,
     )
@@ -345,8 +378,14 @@ def _ranks(rows: list[dict], key: str) -> dict[str, int]:
     return {item["id"]: rank for rank, item in enumerate(ordered, 1)}
 
 
-def search(query: str, workspace_id: str, limit: int = 6) -> list[dict]:
+def search(
+    query: str, workspace_id: str, limit: int = 6,
+    document_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[dict]:
     rows = _search_rows(workspace_id)
+    if document_ids is not None:
+        allowed = {str(value) for value in document_ids}
+        rows = [row for row in rows if row.get("document_id") in allowed]
     if not rows or not query.strip():
         return []
     query_embedding = _embedding(query, workspace_id)

@@ -12,14 +12,15 @@ def test_legacy_session_chat_lifecycle_and_metrics(client):
     stream = client.post(f"/api/session/{sid}/chat", json={"message": "你好"})
     assert stream.status_code == 200
     text = stream.data.decode("utf-8")
-    assert "event: accepted" in text
+    assert "event: contract" in text
+    assert '"requires_confirmation": true' in text
     assert "event: done" in text
 
     current = client.get(f"/api/session/{sid}/load-current")
     assert current.status_code == 200
     payload = current.get_json()
-    assert payload["msg_count"] == 2
-    assert [item["role"] for item in payload["history"]] == ["user", "assistant"]
+    assert payload["msg_count"] == 1
+    assert [item["role"] for item in payload["history"]] == ["user"]
 
     suggestion = client.post(f"/api/session/{sid}/prompt-suggestion", json={"lang": "zh"})
     assert suggestion.status_code == 200
@@ -53,7 +54,7 @@ def test_legacy_saved_session_autosave_load_rename_delete(client):
     filename = saved.get_json()["filename"]
 
     listed = client.get("/api/saved-sessions").get_json()["items"]
-    assert any(item["filename"] == filename and item["msg_count"] == 2 for item in listed)
+    assert any(item["filename"] == filename and item["msg_count"] == 1 for item in listed)
 
     renamed = client.post(f"/api/saved-sessions/{filename}/rename", json={"name": "已重命名"})
     assert renamed.status_code == 200

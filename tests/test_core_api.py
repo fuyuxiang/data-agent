@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import time
 
 
 def test_bootstrap_and_capability_catalog(client):
@@ -106,7 +105,7 @@ def test_knowledge_skill_memory_and_session(client):
     assert loaded.status_code == 200
 
 
-def test_hybrid_knowledge_file_skills_and_automatic_memory(client):
+def test_hybrid_knowledge_file_skills_and_governed_memory(client):
     metric = client.post(
         "/api/knowledge/entries",
         json={
@@ -128,20 +127,12 @@ def test_hybrid_knowledge_file_skills_and_automatic_memory(client):
     assert regression["allowed_tools"] == ["get_schema", "query_data", "run_analysis", "generate_chart"]
     assert "线性回归" in regression["instruction"]
 
-    session = client.post("/api/sessions", json={"name": "记忆提取"}).get_json()["item"]
-    response = client.post(
-        f"/api/sessions/{session['id']}/messages",
-        json={"message": "请记住：以后所有图表标题默认使用中文。"},
-    )
-    assert response.status_code == 200
-    assert b"event: done" in response.data
-    deadline = time.time() + 5
-    memories = []
-    while time.time() < deadline:
-        memories = client.get("/api/memories").get_json()["items"]
-        if any("图表标题" in item.get("content", "") for item in memories):
-            break
-        time.sleep(0.05)
+    response = client.post("/api/memories", json={
+        "title": "图表语言偏好", "content": "以后所有图表标题默认使用中文。",
+        "scope": "user", "type": "user",
+    })
+    assert response.status_code == 201
+    memories = client.get("/api/memories").get_json()["items"]
     assert any("图表标题" in item.get("content", "") for item in memories), client.get("/api/jobs").get_json()
     assert client.get("/api/memories/search?q=图表标题").get_json()["items"]
 
@@ -154,58 +145,10 @@ def test_local_conversation_stream(client, source):
     )
     text = response.data.decode("utf-8")
     assert response.status_code == 200
-    assert "event: plan" in text
-    assert "event: table" in text
+    assert "event: contract" in text
+    assert '"requires_confirmation": true' in text
     assert "event: done" in text
-    assert client.get(f"/api/sessions/{session['id']}/messages").get_json()["items"][-1]["role"] == "assistant"
-
-
-def test_hooks_run_from_agent_lifecycle_and_can_reject_tools(client, source):
-    completed_hook = client.post(
-        "/api/hooks",
-        json={"name": "分析完成记录", "event": "analysis.completed", "action": {"type": "noop"}},
-    ).get_json()["item"]
-    post_hook = client.post(
-        "/api/hooks",
-        json={
-            "name": "查询复核提示", "event": "post_tool_use",
-            "condition": "tool == query_data && ok == true",
-            "action": {"type": "prompt", "message": "复核查询 $TOOL_NAME"},
-        },
-    ).get_json()["item"]
-    session = client.post(
-        "/api/sessions", json={"name": "Hook 生命周期", "source_ids": [source["id"]]},
-    ).get_json()["item"]
-    stream = client.post(
-        f"/api/sessions/{session['id']}/messages",
-        json={"message": "按 region 汇总 sales", "source_ids": [source["id"]]},
-    ).data.decode("utf-8")
-    assert "event: hook_event" in stream
-    assert "查询复核提示" in stream
-    hooks = {item["id"]: item for item in client.get("/api/hooks").get_json()["items"]}
-    assert hooks[completed_hook["id"]]["run_count"] == 1
-    assert hooks[post_hook["id"]]["run_count"] == 1
-    history = client.get("/api/hooks/history").get_json()["items"]
-    assert {item["event"] for item in history} >= {"post_tool_use", "analysis.completed"}
-
-    rejected_hook = client.post(
-        "/api/hooks",
-        json={
-            "name": "禁止查询", "event": "pre_tool_use", "condition": "tool == query_data",
-            "reject": True, "action": {"type": "prompt", "message": "策略拒绝 $TOOL_NAME"},
-        },
-    ).get_json()["item"]
-    rejected_session = client.post(
-        "/api/sessions", json={"name": "Hook 拒绝", "source_ids": [source["id"]]},
-    ).get_json()["item"]
-    rejected_stream = client.post(
-        f"/api/sessions/{rejected_session['id']}/messages",
-        json={"message": "查询 sales", "source_ids": [source["id"]]},
-    ).data.decode("utf-8")
-    assert "策略拒绝 query_data" in rejected_stream
-    assert "event: table" not in rejected_stream
-    rejected = next(item for item in client.get("/api/hooks").get_json()["items"] if item["id"] == rejected_hook["id"])
-    assert rejected["run_count"] == 1
+    assert client.get(f"/api/sessions/{session['id']}/messages").get_json()["items"][-1]["role"] == "user"
 
 
 def test_identity_password_not_exposed(client):

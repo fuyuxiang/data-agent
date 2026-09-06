@@ -61,7 +61,7 @@ def test_query_limit_is_rewritten_and_enforced(client, source):
     assert result.get_json()["result"]["rows"] == 3
 
 
-def test_agent_mutations_and_mcp_require_session_policy(app):
+def test_retired_agent_mutations_cannot_be_reenabled_by_session_policy(app):
     database = app.extensions["meridian_db"]
     session = database.put(
         "sessions", {"id": "policy-session", "workspace_id": "default", "name": "policy"},
@@ -77,7 +77,8 @@ def test_agent_mutations_and_mcp_require_session_policy(app):
             assert "configure_hooks" not in names
             database.patch("sessions", session["id"], {"agent_allow_mutations": True})
             names = {item["function"]["name"] for item in tool_schemas(context)}
-            assert "workspace_write_file" in names
+            assert "workspace_write_file" not in names
+            assert "configure_hooks" not in names
     finally:
         app.config["TESTING"] = old_testing
 
@@ -105,7 +106,7 @@ def test_daily_quota_blocks_model_turn_before_provider_call(app, client, monkeyp
     completions = Completions()
     fake = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(
-        "backend.services.agent_runtime.resolve_provider",
+        "backend.services.advanced_agent.resolve_provider",
         lambda _provider_id=None, _workspace_id="default": ({"model": "fake"}, fake),
     )
     app.config["SETTINGS"] = replace(app.config["SETTINGS"], daily_token_limit=1)
@@ -116,10 +117,21 @@ def test_daily_quota_blocks_model_turn_before_provider_call(app, client, monkeyp
         workspace_id="default",
     )
     session = client.post("/api/sessions", json={"name": "quota"}).get_json()["item"]
-    stream = client.post(
-        f"/api/sessions/{session['id']}/messages", json={"message": "分析"},
-    ).data.decode("utf-8")
-    assert "今日模型 Token 额度已用尽" in stream
+    run = client.post(
+        "/api/analyses", json={"session_id": session["id"], "objective": "分析"},
+    ).get_json()["item"]
+    confirmed = client.post(
+        f"/api/analyses/{run['id']}/contract/confirm", json={"expected_version": 1},
+    ).get_json()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{confirmed['job']['id']}").get_json()["item"]
+        if job["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+    current = client.get(f"/api/analyses/{run['id']}").get_json()["item"]
+    assert current["execution_status"] == "failed"
+    assert current["stop_reason"] == "daily_model_budget_exceeded"
     assert not completions.calls
 
 
@@ -532,25 +544,28 @@ def test_database_urls_enforce_transport_security(app, monkeypatch):
 
 
 def test_job_manager_has_a_bounded_queue(app):
-    from backend.services.jobs import JobManager
+    from backend.services.jobs import JobManager, register_job_handler
 
     started = threading.Event()
     release = threading.Event()
     manager = JobManager(app, max_workers=1, max_pending=0)
 
-    def blocking(_progress, _cancel):
+    def blocking(_app, _spec, _progress, _cancel):
         started.set()
         release.wait(3)
         return {"ok": True}
 
+    register_job_handler("bounded_queue_test", blocking)
     try:
-        job = manager.submit(
-            workspace_id="default", session_id=None, kind="test", title="first", work=blocking,
+        job = manager.submit_spec(
+            workspace_id="default", session_id=None, job_type="bounded_queue_test",
+            title="first", spec={"case": 1},
         )
         assert started.wait(1)
         with pytest.raises(ValueError, match="队列已满"):
-            manager.submit(
-                workspace_id="default", session_id=None, kind="test", title="second", work=blocking,
+            manager.submit_spec(
+                workspace_id="default", session_id=None, job_type="bounded_queue_test",
+                title="second", spec={"case": 2},
             )
         release.set()
         deadline = time.time() + 3
@@ -565,6 +580,9 @@ def test_job_manager_has_a_bounded_queue(app):
 def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch):
     from backend.services import jobs
 
+    jobs.register_job_handler(
+        "started_hook_failure_test", lambda _app, _spec, _progress, _cancel: {"ok": True},
+    )
     manager = jobs.JobManager(app, max_workers=1, max_pending=0)
 
     def failing_started_hook(event, *_args, **_kwargs):
@@ -574,9 +592,9 @@ def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch)
 
     monkeypatch.setattr(jobs, "dispatch_hooks", failing_started_hook)
     try:
-        first = manager.submit(
-            workspace_id="default", session_id=None, kind="test", title="first",
-            work=lambda _progress, _cancel: {"ok": True},
+        first = manager.submit_spec(
+            workspace_id="default", session_id=None, job_type="started_hook_failure_test",
+            title="first", spec={"case": 1},
         )
         deadline = time.time() + 3
         while time.time() < deadline:
@@ -584,9 +602,9 @@ def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch)
             if current and current["status"] == "failed":
                 break
             time.sleep(0.02)
-        second = manager.submit(
-            workspace_id="default", session_id=None, kind="test", title="second",
-            work=lambda _progress, _cancel: {"ok": True},
+        second = manager.submit_spec(
+            workspace_id="default", session_id=None, job_type="started_hook_failure_test",
+            title="second", spec={"case": 2},
         )
         assert second["status"] == "queued"
     finally:

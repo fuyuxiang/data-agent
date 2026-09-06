@@ -1,15 +1,32 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
+from typing import Any, Callable
 
 from flask import Flask
 
 from ..core.database import Database, utcnow
 from .hooks import dispatch_hooks
+
+
+JobHandler = Callable[[Flask, dict[str, Any], Callable[[float, str], None], threading.Event], dict]
+_HANDLERS: dict[str, JobHandler] = {}
+
+
+def register_job_handler(job_type: str, handler: JobHandler) -> None:
+    """Register a restart-safe handler. The durable job stores only its typed spec."""
+    name = str(job_type).strip()
+    if not name or not callable(handler):
+        raise ValueError("invalid job handler")
+    previous = _HANDLERS.get(name)
+    if previous is not None and previous is not handler:
+        raise RuntimeError(f"duplicate job handler: {name}")
+    _HANDLERS[name] = handler
 
 
 class JobManager:
@@ -47,130 +64,183 @@ class JobManager:
                 self._workspace_outstanding.pop(workspace_id, None)
 
     def _recover_orphans(self) -> None:
-        """Convert process-owned in-flight jobs into explicit recoverable state after restart."""
-        for job in self.db.list("jobs", workspace_id=None, limit=5000):
-            if job.get("status") not in {"queued", "running"}:
-                continue
-            recovered = self.db.patch(
-                "jobs", job["id"],
-                {
-                    "status": "failed", "message": "服务重启中断了执行",
-                    "error": "service_restarted", "recoverable": job.get("kind", "").startswith("workflow"),
-                    "finished_at": utcnow(),
-                },
-            )
-            self.db.job_event(job["id"], "recovered_after_restart", recovered or job)
-            for run in self.db.list("workflow_runs", workspace_id=job.get("workspace_id"), limit=5000):
-                if run.get("job_id") != job["id"] or run.get("status") not in {"queued", "running"}:
-                    continue
-                self.db.patch(
-                    "workflow_runs", run["id"],
-                    {
-                        "status": "paused", "pause_requested": False, "recoverable": True,
-                        "paused_at": utcnow(), "recovery_reason": "service_restarted",
-                    },
+        """Requeue durable specs; external handlers must reconcile before resubmitting work."""
+        with self.db.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM typed_jobs WHERE status IN ('queued','running','waiting_external') "
+                "ORDER BY created_at LIMIT 5000",
+            ).fetchall()
+            for row in rows:
+                status = "cancelled" if row["cancel_requested"] else "queued" if row["job_type"] in _HANDLERS else "blocked"
+                error = None if status == "queued" else "handler_unavailable"
+                connection.execute(
+                    "UPDATE typed_jobs SET status=?, error_code=?, lease_owner=NULL, "
+                    "lease_expires_at=NULL, updated_at=? WHERE id=?",
+                    (status, error, utcnow(), row["id"]),
                 )
+        for row in rows:
+            payload = dict(row)
+            if payload.get("cancel_requested"):
+                self._mirror(payload["id"], status="cancelled", message="已取消")
+            elif payload["job_type"] in _HANDLERS:
+                self._reserve(payload["workspace_id"])
+                cancel = threading.Event()
+                with self._lock:
+                    self.cancel_flags[payload["id"]] = cancel
+                self.executor.submit(self._run_spec, payload["id"], payload["workspace_id"], cancel, True)
+            else:
+                self._mirror(payload["id"], status="blocked", message="任务处理器不可用", error="handler_unavailable")
 
-    def submit(
+    def submit_spec(
         self,
         *,
         workspace_id: str,
         session_id: str | None,
-        kind: str,
+        job_type: str,
         title: str,
-        work: Callable[[Callable[[float, str], None], threading.Event], dict],
+        spec: dict[str, Any],
+        run_id: str | None = None,
     ) -> dict:
+        if job_type not in _HANDLERS:
+            raise ValueError(f"unregistered job type: {job_type}")
+        if not isinstance(spec, dict):
+            raise ValueError("job spec must be an object")
+        encoded = json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 256_000:
+            raise ValueError("job spec exceeds 256KB")
         self._reserve(workspace_id)
         job_id = self.db.new_id("job")
+        now = utcnow()
         cancel = threading.Event()
         try:
-            job = self.db.put(
-                "jobs",
-                {
-                    "id": job_id,
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "kind": kind,
-                    "title": title,
-                    "status": "queued",
-                    "progress": 0,
-                    "message": "等待执行",
-                    "result": None,
-                    "error": None,
-                    "cancel_requested": False,
-                },
-                workspace_id=workspace_id,
-            )
+            with self.db.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO typed_jobs(id,workspace_id,run_id,job_type,spec,spec_hash,status,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (job_id, workspace_id, run_id, job_type, encoded,
+                     hashlib.sha256(encoded.encode("utf-8")).hexdigest(), "queued", now, now),
+                )
+            job = self.db.put("jobs", {
+                "id": job_id, "workspace_id": workspace_id, "session_id": session_id,
+                "run_id": run_id, "kind": job_type, "title": title, "status": "queued",
+                "progress": 0, "message": "等待执行", "result": None, "error": None,
+                "cancel_requested": False, "typed": True,
+            }, workspace_id=workspace_id)
             with self._lock:
                 self.cancel_flags[job_id] = cancel
             self.db.job_event(job_id, "queued", job)
             with self.app.app_context():
                 dispatch_hooks("job.queued", job, workspace_id, database=self.db)
-            self.executor.submit(self._run, job_id, workspace_id, work, cancel)
+            self.executor.submit(self._run_spec, job_id, workspace_id, cancel, False)
             return job
         except Exception:
             with self._lock:
                 self.cancel_flags.pop(job_id, None)
-            if self.db.get("jobs", job_id):
-                self.db.patch("jobs", job_id, {
-                    "status": "failed", "message": "任务提交失败", "error": "submission_failed",
-                    "finished_at": utcnow(),
-                })
             self._release(workspace_id)
             raise
 
-    def _run(self, job_id: str, workspace_id: str, work, cancel: threading.Event) -> None:
+    def _typed_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.db.connect() as connection:
+            row = connection.execute("SELECT * FROM typed_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["spec"] = json.loads(result["spec"])
+        result["result"] = json.loads(result["result"]) if result.get("result") else None
+        return result
+
+    def _mirror(self, job_id: str, **values: Any) -> dict | None:
+        mapping = {"error_code": "error"}
+        payload = {mapping.get(key, key): value for key, value in values.items()}
+        return self.db.patch("jobs", job_id, payload)
+
+    def _run_spec(self, job_id: str, workspace_id: str, cancel: threading.Event, recovered: bool) -> None:
         with self.app.app_context():
-            job = self.db.patch("jobs", job_id, {"status": "running", "started_at": utcnow(), "message": "正在执行"})
+            typed = self._typed_job(job_id)
+            if not typed:
+                self._release(workspace_id)
+                return
+            if typed.get("cancel_requested"):
+                cancel.set()
+            handler = _HANDLERS.get(typed["job_type"])
+            if handler is None:
+                self._finish_typed(job_id, "blocked", None, "handler_unavailable")
+                self._release(workspace_id)
+                return
+            with self.db.transaction() as connection:
+                row = connection.execute("SELECT lease_epoch FROM typed_jobs WHERE id=?", (job_id,)).fetchone()
+                epoch = int(row["lease_epoch"]) + 1
+                connection.execute(
+                    "UPDATE typed_jobs SET status='running',lease_owner=?,lease_epoch=?,updated_at=? WHERE id=?",
+                    (f"pid-{os.getpid()}", epoch, utcnow(), job_id),
+                )
+            job = self._mirror(job_id, status="running", started_at=utcnow(),
+                               message="恢复并校验外部状态" if recovered else "正在执行")
             self.db.job_event(job_id, "running", job or {})
+            try:
+                dispatch_hooks("job.started", job or {"id": job_id}, workspace_id, database=self.db)
+            except Exception as exc:
+                self._finish_typed(job_id, "failed", None, type(exc).__name__)
+                failed = self._mirror(
+                    job_id, status="failed", message="启动 Hook 执行失败", error=str(exc),
+                    trace=traceback.format_exc(limit=12), finished_at=utcnow(),
+                )
+                self.db.job_event(job_id, "failed", failed or {})
+                with self._lock:
+                    self.cancel_flags.pop(job_id, None)
+                self._release(workspace_id)
+                return
 
             def progress(value: float, message: str) -> None:
-                current = self.db.patch("jobs", job_id, {"progress": max(0, min(100, round(value, 1))), "message": message})
+                current = self._mirror(job_id, progress=max(0, min(100, round(value, 1))), message=message)
                 self.db.job_event(job_id, "progress", current or {})
 
             try:
-                dispatch_hooks(
-                    "job.started", job or {"id": job_id},
-                    (job or {}).get("workspace_id", "default"), database=self.db,
+                result = handler(self.app, typed["spec"], progress, cancel)
+                status = "cancelled" if cancel.is_set() else "completed"
+                self._finish_typed(job_id, status, result, None)
+                final = self._mirror(
+                    job_id, status=status, progress=100 if status == "completed" else 0,
+                    message="执行完成" if status == "completed" else "已取消",
+                    result=result, finished_at=utcnow(),
                 )
-                result = work(progress, cancel)
-                if cancel.is_set():
-                    final = self.db.patch("jobs", job_id, {"status": "cancelled", "message": "已取消", "finished_at": utcnow()})
-                else:
-                    final = self.db.patch("jobs", job_id, {"status": "completed", "progress": 100, "message": "执行完成", "result": result, "finished_at": utcnow()})
-                self.db.job_event(job_id, final["status"], final)
-                dispatch_hooks(
-                    f"job.{final['status']}", final,
-                    final.get("workspace_id", "default"), database=self.db,
-                )
+                self.db.job_event(job_id, status, final or {})
+                dispatch_hooks(f"job.{status}", final or {"id": job_id}, workspace_id, database=self.db)
             except Exception as exc:
-                final = self.db.patch(
-                    "jobs",
-                    job_id,
-                    {
-                        "status": "failed",
-                        "message": "执行失败",
-                        "error": str(exc),
-                        "trace": traceback.format_exc(limit=12),
-                        "finished_at": utcnow(),
-                    },
+                self._finish_typed(job_id, "failed", None, type(exc).__name__)
+                final = self._mirror(
+                    job_id, status="failed", message="执行失败", error=str(exc),
+                    trace=traceback.format_exc(limit=12), finished_at=utcnow(),
                 )
                 self.db.job_event(job_id, "failed", final or {})
-                dispatch_hooks(
-                    "job.failed", final or {"id": job_id, "error": str(exc)},
-                    (final or {}).get("workspace_id", "default"), database=self.db,
-                )
+                dispatch_hooks("job.failed", final or {"id": job_id}, workspace_id, database=self.db)
             finally:
                 with self._lock:
                     self.cancel_flags.pop(job_id, None)
                 self._release(workspace_id)
 
+    def _finish_typed(self, job_id: str, status: str, result: dict | None, error_code: str | None) -> None:
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE typed_jobs SET status=?,result=?,error_code=?,lease_owner=NULL,"
+                "lease_expires_at=NULL,updated_at=?,finished_at=? WHERE id=?",
+                (status, json.dumps(result, ensure_ascii=False) if result is not None else None,
+                 error_code, utcnow(), utcnow(), job_id),
+            )
+
     def cancel(self, job_id: str) -> bool:
         with self._lock:
             flag = self.cancel_flags.get(job_id)
-            if not flag:
-                return False
-            flag.set()
+            if flag:
+                flag.set()
+        typed = self._typed_job(job_id)
+        if not typed or typed.get("status") in {"completed", "failed", "cancelled", "blocked"}:
+            return False
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE typed_jobs SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelling' ELSE status END,updated_at=? WHERE id=?",
+                (utcnow(), job_id),
+            )
         self.db.patch("jobs", job_id, {"cancel_requested": True, "message": "正在取消"})
         self.db.job_event(job_id, "cancel_requested", {"id": job_id})
         return True

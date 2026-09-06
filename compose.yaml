@@ -18,11 +18,17 @@ services:
       MERIDIAN_MAX_ANALYSIS_CELLS: ${MERIDIAN_MAX_ANALYSIS_CELLS:-2000000}
       MERIDIAN_MAX_PENDING_JOBS: ${MERIDIAN_MAX_PENDING_JOBS:-100}
       MERIDIAN_MAX_WORKSPACE_JOBS: ${MERIDIAN_MAX_WORKSPACE_JOBS:-25}
+      MERIDIAN_SANDBOX_PROXY_URL: http://sandbox-proxy:8090
+      MERIDIAN_SANDBOX_PROXY_TOKEN: ${MERIDIAN_SANDBOX_PROXY_TOKEN:?MERIDIAN_SANDBOX_PROXY_TOKEN must be set}
+      MERIDIAN_SANDBOX_IMAGE: ${MERIDIAN_SANDBOX_IMAGE:-meridian-sandbox:py311-20260906}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
     volumes:
       - meridian-data:/app/storage
+    depends_on:
+      sandbox-proxy:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
@@ -42,5 +48,45 @@ services:
         max-size: 10m
         max-file: "5"
 
+  sandbox-proxy:
+    build:
+      context: .
+      dockerfile: deploy/sandbox/proxy.Dockerfile
+    environment:
+      MERIDIAN_SANDBOX_PROXY_TOKEN: ${MERIDIAN_SANDBOX_PROXY_TOKEN:?MERIDIAN_SANDBOX_PROXY_TOKEN must be set}
+      MERIDIAN_SANDBOX_STORAGE_VOLUME: ${MERIDIAN_SANDBOX_STORAGE_VOLUME:-meridian-data}
+      MERIDIAN_SANDBOX_IMAGE: ${MERIDIAN_SANDBOX_IMAGE:-meridian-sandbox:py311-20260906}
+      MERIDIAN_SANDBOX_MEMORY_MB: ${MERIDIAN_SANDBOX_MEMORY_MB:-512}
+      MERIDIAN_SANDBOX_CPUS: ${MERIDIAN_SANDBOX_CPUS:-1}
+      MERIDIAN_SANDBOX_PIDS: ${MERIDIAN_SANDBOX_PIDS:-128}
+      MERIDIAN_SANDBOX_TIMEOUT_SECONDS: ${MERIDIAN_SANDBOX_TIMEOUT_SECONDS:-120}
+    volumes:
+      - meridian-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${MERIDIAN_SANDBOX_PROXY_MEMORY_LIMIT:-256m}
+    cpus: ${MERIDIAN_SANDBOX_PROXY_CPU_LIMIT:-1.0}
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  sandbox-image:
+    image: ${MERIDIAN_SANDBOX_IMAGE:-meridian-sandbox:py311-20260906}
+    build:
+      context: deploy/sandbox
+    profiles: ["sandbox-build"]
+    command: ["true"]
+
 volumes:
   meridian-data:
+    name: ${MERIDIAN_SANDBOX_STORAGE_VOLUME:-meridian-data}

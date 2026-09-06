@@ -6,6 +6,8 @@ import sys
 import time
 import types
 
+import pytest
+
 
 def test_session_sources_toggle_preview_and_warehouse(client):
     response = client.post(
@@ -122,7 +124,13 @@ def test_database_scope_and_saved_credentials_are_server_enforced(client, app):
         from backend.services.datasets import source_frames
 
         source = app.extensions["meridian_db"].get("sources", source_id)
-        assert set(source_frames(source)) == {"sales"}
+        with pytest.raises(ValueError, match="隐式拉取"):
+            source_frames(source)
+    queried = client.post(
+        "/api/query", json={"source_ids": [source_id], "sql": "SELECT * FROM sales"},
+    )
+    assert queried.status_code == 200
+    assert queried.get_json()["result"]["rows"] == 1
     bad = client.post(
         f"/api/session/welcome/sources/{source_id}/analysis-tables",
         json={"tables": ["does_not_exist"]},

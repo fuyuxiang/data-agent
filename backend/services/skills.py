@@ -129,6 +129,10 @@ def load_skills(workspace_id: str) -> tuple[list[dict], list[dict]]:
     for record in reversed(_db().list("skills", workspace_id=workspace_id, limit=5000)):
         if not record.get("enabled", True):
             continue
+        # Database-backed skills are executable only after the governed publish gate.
+        # Records created before governance existed retain their legacy behavior until edited.
+        if record.get("status") and record.get("status") != "published":
+            continue
         name = str(record.get("slug") or record.get("name") or record["id"])
         merged[name] = {
             **record, "name": name, "display_name": record.get("display_name") or record.get("name") or name,

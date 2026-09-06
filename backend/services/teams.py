@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-import json
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from typing import Any
 
 from flask import current_app
 
+from ..agent.contracts import TaskContract
+from ..agent.loop import AgentLoop
+from ..agent.model import build_model_adapter
+from ..agent.store import RunStore
 from ..core.database import Database, utcnow
-from .agent_tools import AgentToolContext, execute_tool, model_text, tool_schemas
-from .jobs import get_job_manager
+from .advanced_agent import _source_authorized, available_formal_tools, build_executor
+from .jobs import get_job_manager, register_job_handler
 from .models import resolve_provider
+from .results.manifests import ResultService
 from .usage import ensure_quota, record_usage
 
 
@@ -41,23 +44,6 @@ def _allowed_tools(member: dict, profile: dict | None) -> set[str]:
     return output & DEFAULT_MEMBER_TOOLS
 
 
-def _message_value(message: Any, key: str, default=None):
-    return message.get(key, default) if isinstance(message, dict) else getattr(message, key, default)
-
-
-def _usage(response: Any, model: str) -> dict:
-    usage = getattr(response, "usage", None)
-    getter = usage.get if isinstance(usage, dict) else lambda key, default=0: getattr(usage, key, default)
-    result = {
-        "model": model,
-        "prompt_tokens": int(getter("prompt_tokens", 0) or 0),
-        "completion_tokens": int(getter("completion_tokens", 0) or 0),
-        "total_tokens": int(getter("total_tokens", 0) or 0),
-    }
-    result["total_tokens"] = result["total_tokens"] or result["prompt_tokens"] + result["completion_tokens"]
-    return result
-
-
 def _consume_mailbox(team: dict, member_name: str) -> list[dict]:
     messages = []
     for item in reversed(_db().list("team_messages", workspace_id=team["workspace_id"], limit=5000)):
@@ -75,31 +61,6 @@ def _consume_mailbox(team: dict, member_name: str) -> list[dict]:
     return messages
 
 
-def _local_member_result(member: dict, task: str, context: AgentToolContext) -> dict:
-    evidence = []
-    summaries = []
-    if context.source_ids:
-        schema, _ = execute_tool("get_schema", {}, context)
-        evidence.append({"tool": "get_schema", "ok": True})
-        summaries.append(f"已检查 {len(schema.get('sources', []))} 个数据源的结构。")
-        for source_id in context.source_ids[:3]:
-            result, _ = execute_tool("profile_data", {"source_id": source_id}, context)
-            evidence.append({"tool": "profile_data", "ok": True, "source_id": source_id})
-            profile = result.get("profile", {})
-            summaries.append(
-                f"{result.get('source', {}).get('name', source_id)}：{profile.get('rows', 0)} 行，"
-                f"质量分 {profile.get('quality_score', '未知')}。"
-            )
-    else:
-        summaries.append("当前任务没有绑定数据源，无法形成数据证据；已保留为待模型分析项。")
-    role = member.get("role") or member.get("name") or "分析顾问"
-    return {
-        "member": member.get("name") or role, "role": role, "task": task,
-        "content": "\n".join(summaries), "mode": "local", "tool_evidence": evidence,
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": "local"},
-    }
-
-
 def run_team_member(
     team: dict,
     member: dict,
@@ -110,116 +71,83 @@ def run_team_member(
     cancel,
     result_max_tokens: int = 0,
     timeout_seconds: int = 300,
+    parent_run_id: str | None = None,
+    child_budget: dict[str, Any] | None = None,
+    actor_id: str | None = None,
 ) -> dict:
     profile = _db().get("agent_profiles", str(member.get("profile_id") or ""))
     effective = {**(profile or {}), **member}
     provider, client = resolve_provider(effective.get("provider_id"), team["workspace_id"])
-    context = AgentToolContext(
-        database=_db(), workspace_id=team["workspace_id"], session_id=session_id,
-        source_ids=source_ids,
-    )
-    if source_ids:
-        context.sources()
-    if not client:
-        return _local_member_result(effective, task, context)
-    allowed = _allowed_tools(effective, profile)
-    schemas = [item for item in tool_schemas(context) if item["function"]["name"] in allowed]
     name = effective.get("name") or effective.get("role") or "分析顾问"
+    if not provider or not client:
+        raise RuntimeError(f"团队成员 {name} 没有可用的模型配置")
+    database = _db()
+    session = database.get("sessions", session_id) or {}
+    actor_id = str(actor_id or session.get("owner_id") or "local-default")
+    requested = _allowed_tools(effective, profile) | {"validate_result", "update_plan"}
+    available = set(available_formal_tools(database, team["workspace_id"], session_id, source_ids))
+    allowed = sorted(requested & available)
+    store = RunStore(database)
+    run, _created = store.create_run(
+        workspace_id=team["workspace_id"], session_id=session_id, actor_id=actor_id,
+        source_scope=source_ids, allowed_tool_ids=allowed, provider_id=effective.get("provider_id"),
+        parent_run_id=parent_run_id, run_kind="team_member",
+        budget=child_budget or {
+            **RunStore.default_budget(),
+            "model_tokens": max(4_000, int(result_max_tokens or 1200) * 12),
+        },
+    )
+    contract = TaskContract.from_payload({
+        "objective": task, "coverage": "团队任务中分配的子问题与已授权来源",
+        "dimensions": ["分配子问题", "证据冲突", "数据限制"],
+        "deliverables": ["team_member_response"], "source_scope": source_ids,
+    })
+    store.add_contract(run["id"], contract, expected_version=0, confirmed_by=actor_id)
+    store.add_plan(run["id"], {
+        "tasks": [{"id": "member_analysis", "title": task[:200], "status": "open", "depends_on": []}],
+    }, reason="delegated_by_parent", expected_version=0)
     mailbox = _consume_mailbox(team, str(name))
     mailbox_text = "\n".join(
         f"- {item.get('sender', '成员')}: {item.get('content', '')}" for item in mailbox
     )
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                f"你是团队成员“{name}”，职责：{effective.get('role') or '独立分析'}。"
-                "你必须用可用工具核对数据，不得编造字段和数值；明确事实、假设、风险和建议。"
-                f"\n附加指令：{effective.get('instructions') or '无'}"
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"任务：{task}\n共享上下文：{shared_context[:16000]}\n未读团队消息：{mailbox_text or '无'}",
-        },
-    ]
-    tool_evidence = []
-    usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": provider["model"]}
-    consecutive_errors = 0
-    deadline = time.monotonic() + max(10, min(300, int(timeout_seconds or 300)))
-    for _turn in range(12):
-        if cancel.is_set():
-            raise RuntimeError("团队任务已取消")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"团队成员 {name} 超过执行时限")
-        quota = ensure_quota(_db(), team["workspace_id"])
-        max_tokens = min(
-            int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
-            quota["remaining"],
-        )
-        if result_max_tokens:
-            max_tokens = min(max_tokens, result_max_tokens)
-        request_client = client
-        if callable(getattr(client, "with_options", None)):
-            request_client = client.with_options(timeout=max(1.0, min(60.0, remaining)))
-        response = request_client.chat.completions.create(
-            model=provider["model"], messages=messages, tools=schemas, tool_choice="auto",
-            temperature=float(provider.get("temperature", 0.2)), max_tokens=max(1, max_tokens),
-        )
-        current_usage = _usage(response, provider["model"])
-        record_usage(
-            _db(), team["workspace_id"], current_usage,
-            session_id=session_id, operation="team_member",
-        )
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            usage_total[key] += current_usage[key]
-        message = response.choices[0].message
-        content = str(_message_value(message, "content", "") or "")
-        raw_calls = _message_value(message, "tool_calls", []) or []
-        calls = []
-        for call in raw_calls:
-            function = _message_value(call, "function", {})
-            calls.append({
-                "id": str(_message_value(call, "id", _db().new_id("call"))), "type": "function",
-                "function": {
-                    "name": str(_message_value(function, "name", "")),
-                    "arguments": str(_message_value(function, "arguments", "{}") or "{}"),
-                },
-            })
-        if not calls:
-            if not content.strip():
-                raise RuntimeError(f"团队成员 {name} 未返回结果")
-            return {
-                "member": name, "role": effective.get("role") or name, "task": task,
-                "content": content.strip(), "mode": "model", "tool_evidence": tool_evidence,
-                "usage": usage_total,
-            }
-        messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
-        for call in calls:
-            tool_name = call["function"]["name"]
-            if tool_name not in allowed:
-                result, ok = {"ok": False, "error": "团队成员无权调用该工具"}, False
-            else:
-                try:
-                    arguments = json.loads(call["function"]["arguments"])
-                    if not isinstance(arguments, dict):
-                        raise ValueError("工具参数必须是对象")
-                    result, _events = execute_tool(tool_name, arguments, context)
-                    ok = True
-                    consecutive_errors = 0
-                except Exception as exc:
-                    result, ok = {"ok": False, "error": str(exc)}, False
-                    consecutive_errors += 1
-            tool_evidence.append({
-                "tool": tool_name, "ok": ok,
-                "result_id": result.get("id") if isinstance(result, dict) else None,
-                "error": result.get("error") if isinstance(result, dict) else None,
-            })
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": model_text(result)})
-        if consecutive_errors >= 3:
-            raise RuntimeError(f"团队成员 {name} 连续工具调用失败")
-    raise RuntimeError(f"团队成员 {name} 达到最大推理轮数")
+    history = [{
+        "role": "user",
+        "content": (
+            f"你是团队成员“{name}”，职责：{effective.get('role') or '独立分析'}。"
+            "必须用工具核对数据，区分事实、假设、风险和建议。"
+            f"\n附加指令：{effective.get('instructions') or '无'}"
+            f"\n任务：{task}\n共享上下文：{shared_context[:16000]}"
+            f"\n未读团队消息：{mailbox_text or '无'}"
+        ),
+    }]
+    loop = AgentLoop(
+        store=store, model=build_model_adapter(client, provider),
+        tools=build_executor(database, store.get_run(run["id"]) or run),
+        finalizer=ResultService(database, authorize=lambda current: _source_authorized(database, current)).finalize,
+        context_window=int(provider.get("context_window") or 32_768),
+        max_output_tokens=min(
+            int(provider.get("max_output_tokens") or 4_096), int(result_max_tokens or 1_200),
+        ),
+        max_iterations=12, max_run_seconds=max(10, min(300, int(timeout_seconds or 300))),
+    )
+    result = loop.run(
+        run["id"], runner_id=f"team-member:{run['id']}", history=history,
+        child_tools=set(allowed), should_cancel=cancel.is_set,
+    )
+    if not result.answer:
+        raise RuntimeError(f"团队成员 {name} 未产生可交付回答：{result.stop_reason}")
+    completed_run = store.get_run(run["id"]) or run
+    tool_evidence = [{
+        "tool": item["tool_id"], "ok": item["status"] == "succeeded",
+        "result_id": ((item.get("result") or {}).get("value") or {}).get("result_id"),
+        "error": item.get("error_code"),
+    } for item in store.actions(run["id"])]
+    return {
+        "member": name, "role": effective.get("role") or name, "task": task,
+        "content": result.answer, "mode": "agent_loop", "agent_run_id": run["id"],
+        "outcome": result.outcome, "publication_id": result.publication_id,
+        "tool_evidence": tool_evidence, "usage": completed_run["usage"],
+    }
 
 
 def _validate_assignments(team: dict, assignments: list[dict]) -> list[dict]:
@@ -292,6 +220,7 @@ def start_team_plan(team: dict, plan: dict, payload: dict | None = None) -> tupl
         "source_ids": payload.get("source_ids") or plan.get("source_ids") or [],
         "session_id": payload.get("session_id"), "context": payload.get("context", ""),
         "plan_id": plan["id"],
+        "actor_id": payload.get("actor_id"),
         "timeout_seconds": payload.get("timeout_seconds"),
         "max_concurrency": payload.get("max_concurrency"),
         "result_max_tokens": payload.get("result_max_tokens"),
@@ -302,7 +231,7 @@ def start_team_plan(team: dict, plan: dict, payload: dict | None = None) -> tupl
 
 def delegate_once(
     *, team: dict | None, member: dict | None, prompt: str, description: str,
-    workspace_id: str, source_ids: list[str], session_id: str,
+    workspace_id: str, source_ids: list[str], session_id: str, actor_id: str | None = None,
 ) -> dict:
     """Execute one delegated sub-agent synchronously so the parent can consume its evidence."""
     effective_member = member or {
@@ -315,7 +244,7 @@ def delegate_once(
     }
     result = run_team_member(
         effective_team, effective_member, prompt, description, source_ids,
-        session_id, threading.Event(),
+        session_id, threading.Event(), actor_id=actor_id,
     )
     review = _quality_review(effective_team, [result], source_ids)
     return {"result": result, "review": review}
@@ -328,6 +257,8 @@ def _quality_review(team: dict, responses: list[dict], source_ids: list[str]) ->
             issues.append(f"{response.get('member')} 执行失败：{response['error']}")
         if source_ids and not any(item.get("ok") for item in response.get("tool_evidence", [])):
             issues.append(f"{response.get('member')} 未提供可复核的数据/知识工具证据")
+        if source_ids and not response.get("publication_id"):
+            issues.append(f"{response.get('member')} 的结论未通过正式结果发布门禁")
         if any(not item.get("ok") for item in response.get("tool_evidence", [])):
             issues.append(f"{response.get('member')} 存在失败的工具调用")
     return {
@@ -343,26 +274,36 @@ def _synthesize(team: dict, task: str, responses: list[dict]) -> str:
     )
     provider, client = resolve_provider(lead.get("provider_id"), team["workspace_id"])
     material = "\n\n".join(f"### {item['member']}\n{item.get('content') or item.get('error')}" for item in responses)
-    if not client:
-        return material
+    if not provider or not client:
+        raise RuntimeError("团队负责人没有可用的模型配置")
     quota = ensure_quota(_db(), team["workspace_id"])
     max_tokens = min(
         int(provider.get("max_output_tokens") or current_app.config["SETTINGS"].default_max_output_tokens),
         quota["remaining"],
     )
-    response = client.chat.completions.create(
-        model=provider["model"],
-        messages=[
+    response = build_model_adapter(client, provider).complete(
+        [
             {"role": "system", "content": "你是团队负责人。综合成员结论，保留证据差异，禁止新增未经验证的数字。"},
             {"role": "user", "content": f"总任务：{task}\n成员结果：\n{material[:30000]}"},
         ],
-        temperature=float(provider.get("temperature", 0.2)), max_tokens=max(1, max_tokens),
+        [], max_output_tokens=max(1, max_tokens),
     )
     record_usage(
-        _db(), team["workspace_id"], _usage(response, provider["model"]),
+        _db(), team["workspace_id"], {**response.usage, "model": provider["model"]},
         operation="team_synthesis",
     )
-    return str(response.choices[0].message.content or material)
+    if not response.content:
+        raise RuntimeError("团队负责人未返回可交付的综合结论")
+    return response.content
+
+
+def _team_limits(payload: dict, current: dict | None, task_count: int) -> dict:
+    existing = dict((current or {}).get("limits") or {})
+    return {
+        "timeout_seconds": max(10, min(300, int(payload.get("timeout_seconds") or existing.get("timeout_seconds") or 300))),
+        "max_concurrency": max(1, min(8, int(payload.get("max_concurrency") or existing.get("max_concurrency") or min(6, task_count)))),
+        "result_max_tokens": max(400, min(2500, int(payload.get("result_max_tokens") or existing.get("result_max_tokens") or 1200))),
+    }
 
 
 def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = None) -> tuple[dict, dict]:
@@ -371,148 +312,182 @@ def start_team_run(team: dict, payload: dict, *, existing_run: dict | None = Non
         raise ValueError("协作任务不能为空")
     source_ids = [str(item) for item in payload.get("source_ids") or (existing_run or {}).get("source_ids") or []]
     for source_id in source_ids:
-        source = _db().get("sources", source_id)
-        if not source or source.get("workspace_id", "default") != team["workspace_id"]:
+        source = _db().get("sources", source_id, workspace_id=team["workspace_id"])
+        if not source:
             raise PermissionError("团队任务引用的数据源不属于当前工作空间")
     if existing_run:
-        existing_limits = dict(existing_run.get("limits") or {})
-        limits = {
-            "timeout_seconds": max(10, min(300, int(
-                payload.get("timeout_seconds") or existing_limits.get("timeout_seconds") or 300,
-            ))),
-            "max_concurrency": max(1, min(8, int(
-                payload.get("max_concurrency") or existing_limits.get("max_concurrency") or 6,
-            ))),
-            "result_max_tokens": max(400, min(2500, int(
-                payload.get("result_max_tokens") or existing_limits.get("result_max_tokens") or 1200,
-            ))),
-        }
-        run = _db().patch("team_runs", existing_run["id"], {"limits": limits}) or existing_run
-    else:
-        assignments = payload.get("assignments")
-        if not assignments:
-            assignments = [
-                {
-                    "task_id": f"task_{index}", "member_name": member.get("name") or member.get("role"),
-                    "prompt": task, "description": member.get("role") or task, "depends_on": [],
-                }
-                for index, member in enumerate(team["members"], 1)
-            ]
-        tasks = _validate_assignments(team, assignments)
-        limits = {
-            "timeout_seconds": max(10, min(300, int(payload.get("timeout_seconds") or 300))),
-            "max_concurrency": max(1, min(8, int(payload.get("max_concurrency") or min(6, len(tasks))))),
-            "result_max_tokens": max(400, min(2500, int(payload.get("result_max_tokens") or 1200))),
-        }
-        run = _db().put(
-            "team_runs",
-            {
-                "id": _db().new_id("teamrun"), "workspace_id": team["workspace_id"], "team_id": team["id"],
-                "task": task, "context": str(payload.get("context") or "")[:12000], "source_ids": source_ids,
-                "session_id": str(payload.get("session_id") or ""), "status": "queued", "tasks": tasks,
-                "responses": [], "review": None, "summary": "", "limits": limits,
-                "plan_id": str(payload.get("plan_id") or ""),
-            },
+        run = _db().patch(
+            "team_runs", existing_run["id"],
+            {"limits": _team_limits(payload, existing_run, len(existing_run.get("tasks") or []))},
             workspace_id=team["workspace_id"],
+        ) or existing_run
+    else:
+        assignments = payload.get("assignments") or [{
+            "task_id": f"task_{index}", "member_name": member.get("name") or member.get("role"),
+            "prompt": task, "description": member.get("role") or task, "depends_on": [],
+        } for index, member in enumerate(team["members"], 1)]
+        tasks = _validate_assignments(team, assignments)
+        session_id = str(payload.get("session_id") or "")
+        session = _db().get("sessions", session_id) or {}
+        actor_id = str(payload.get("actor_id") or session.get("owner_id") or "local-default")
+        parent_store = RunStore(_db())
+        parent, _ = parent_store.create_run(
+            workspace_id=team["workspace_id"], session_id=session_id or f"team:{team['id']}",
+            actor_id=actor_id, source_scope=source_ids,
+            allowed_tool_ids=available_formal_tools(_db(), team["workspace_id"], session_id, source_ids),
+            run_kind="team", budget=RunStore.default_budget(),
         )
+        parent_store.add_contract(parent["id"], TaskContract.from_payload({
+            "objective": task, "coverage": "已确认团队计划与选定数据范围",
+            "dimensions": [item["description"] for item in tasks],
+            "deliverables": ["team_synthesis"], "source_scope": source_ids,
+        }), expected_version=0, confirmed_by=actor_id)
+        parent_store.add_plan(parent["id"], {"tasks": [{
+            "id": item["id"], "title": item["description"], "status": "open",
+            "depends_on": item["depends_on"],
+        } for item in tasks]}, reason="team_plan_confirmed", expected_version=0)
+        run = _db().put("team_runs", {
+            "id": _db().new_id("teamrun"), "workspace_id": team["workspace_id"], "team_id": team["id"],
+            "agent_run_id": parent["id"], "task": task,
+            "actor_id": actor_id,
+            "context": str(payload.get("context") or "")[:12000], "source_ids": source_ids,
+            "session_id": session_id, "status": "queued", "tasks": tasks,
+            "responses": [], "review": None, "summary": "",
+            "limits": _team_limits(payload, None, len(tasks)), "plan_id": str(payload.get("plan_id") or ""),
+        }, workspace_id=team["workspace_id"])
     app = current_app._get_current_object()
-
-    def work(progress, cancel):
-        with app.app_context():
-            stored = _db().patch("team_runs", run["id"], {"status": "running", "started_at": utcnow()}) or run
-            tasks_by_id = {item["id"]: item for item in stored["tasks"]}
-            members = {str(item.get("name") or item.get("role")): item for item in team["members"]}
-            responses: list[dict] = list(stored.get("responses") or [])
-            completed = {item["id"] for item in stored["tasks"] if item.get("status") == "completed"}
-            while len(completed) < len(tasks_by_id):
-                if cancel.is_set():
-                    stored["status"] = "cancelled"
-                    break
-                ready = [
-                    item for item in tasks_by_id.values()
-                    if item["status"] == "pending" and set(item["depends_on"]) <= completed
-                ]
-                if not ready:
-                    failed = [item for item in tasks_by_id.values() if item["status"] == "failed"]
-                    stored["status"] = "partial_failed" if failed else "failed"
-                    break
-
-                def execute(item: dict) -> tuple[dict, dict]:
-                    with app.app_context():
-                        dependency_context = "\n".join(
-                            str(tasks_by_id[dependency].get("result", {}).get("content", ""))
-                            for dependency in item["depends_on"]
-                        )
-                        result = run_team_member(
-                            team, members[item["member_name"]], item["prompt"],
-                            f"{stored['context']}\n{dependency_context}", source_ids,
-                            stored.get("session_id") or stored["id"], cancel,
-                            int((stored.get("limits") or {}).get("result_max_tokens") or 1200),
-                            int((stored.get("limits") or {}).get("timeout_seconds") or 300),
-                        )
-                        return item, result
-
-                with ThreadPoolExecutor(
-                    max_workers=min(
-                        int((stored.get("limits") or {}).get("max_concurrency") or 6), len(ready),
-                    ),
-                    thread_name_prefix="meridian-team",
-                ) as pool:
-                    futures = {pool.submit(execute, item): item for item in ready}
-                    for future in as_completed(futures):
-                        item = futures[future]
-                        try:
-                            _, response = future.result()
-                            item.update({"status": "completed", "result": response, "finished_at": utcnow()})
-                            responses.append(response)
-                            completed.add(item["id"])
-                        except Exception as exc:
-                            item.update({"status": "failed", "error": str(exc), "finished_at": utcnow()})
-                            responses.append({
-                                "member": item["member_name"], "task": item["prompt"],
-                                "content": "", "error": str(exc), "tool_evidence": [],
-                            })
-                        progress(
-                            len([value for value in tasks_by_id.values() if value["status"] in {"completed", "failed"}])
-                            / len(tasks_by_id) * 85,
-                            f"团队任务 {item['id']}：{item['status']}",
-                        )
-                        stored.update({"tasks": list(tasks_by_id.values()), "responses": responses})
-                        _db().put("team_runs", stored, workspace_id=team["workspace_id"])
-            if stored.get("status") == "cancelled":
-                final = _db().put("team_runs", stored, workspace_id=team["workspace_id"])
-                if final.get("plan_id"):
-                    _db().patch(
-                        "team_plans", final["plan_id"], {"status": "cancelled", "run_id": final["id"]},
-                        workspace_id=team["workspace_id"],
-                    )
-                return {"status": "cancelled", "run_id": final["id"]}
-            review = _quality_review(team, responses, source_ids)
-            summary = _synthesize(team, task, responses)
-            failed = any(item["status"] == "failed" for item in tasks_by_id.values())
-            status = "partial_failed" if failed else ("needs_review" if review["status"] == "blocked" else "completed")
-            stored.update({
-                "status": status, "tasks": list(tasks_by_id.values()), "responses": responses,
-                "review": review, "summary": summary, "finished_at": utcnow(),
-                "budget": {
-                    key: sum(int(item.get("usage", {}).get(key, 0)) for item in responses)
-                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-                },
-            })
-            _db().put("team_runs", stored, workspace_id=team["workspace_id"])
-            if stored.get("plan_id"):
-                _db().patch(
-                    "team_plans", stored["plan_id"], {"status": status, "run_id": stored["id"]},
-                    workspace_id=team["workspace_id"],
-                )
-            return {"run_id": stored["id"], "status": status, "responses": responses, "review": review, "summary": summary}
-
-    job = get_job_manager(app).submit(
-        workspace_id=team["workspace_id"], session_id=run.get("session_id"), kind="team",
-        title=f"协作分析：{team['name']}", work=work,
+    job = get_job_manager(app).submit_spec(
+        workspace_id=team["workspace_id"], session_id=run.get("session_id"), job_type="team_run",
+        title=f"协作分析：{team['name']}", spec={"team_run_id": run["id"]},
+        run_id=run.get("agent_run_id"),
     )
-    _db().patch("team_runs", run["id"], {"job_id": job["id"]})
+    _db().patch("team_runs", run["id"], {"job_id": job["id"]}, workspace_id=team["workspace_id"])
     return _db().get("team_runs", run["id"]), job
+
+
+def _team_job_handler(app, spec, progress, cancel):
+    stored = _db().get("team_runs", str(spec.get("team_run_id") or ""))
+    if not stored:
+        raise FileNotFoundError("团队运行不存在")
+    team = _db().get("teams", stored["team_id"], workspace_id=stored["workspace_id"])
+    if not team:
+        raise FileNotFoundError("团队不存在")
+    stored = _db().patch(
+        "team_runs", stored["id"], {"status": "running", "started_at": utcnow()},
+        workspace_id=stored["workspace_id"],
+    ) or stored
+    tasks_by_id = {item["id"]: item for item in stored["tasks"]}
+    members = {str(item.get("name") or item.get("role")): item for item in team["members"]}
+    source_ids = list(stored.get("source_ids") or [])
+    responses: list[dict] = list(stored.get("responses") or [])
+    completed = {item["id"] for item in stored["tasks"] if item.get("status") == "completed"}
+    parent = RunStore(_db()).get_run(str(stored.get("agent_run_id") or ""))
+    parent_budget = dict((parent or {}).get("budget") or RunStore.default_budget())
+    task_count = max(1, len(tasks_by_id))
+    child_budget = {
+        key: None if value is None else max(1, float(value) / task_count)
+        for key, value in parent_budget.items()
+    }
+    while len(completed) < len(tasks_by_id):
+        if cancel.is_set():
+            stored["status"] = "cancelled"
+            break
+        ready = [item for item in tasks_by_id.values() if item["status"] == "pending" and set(item["depends_on"]) <= completed]
+        if not ready:
+            stored["status"] = "partial_failed" if any(item["status"] == "failed" for item in tasks_by_id.values()) else "failed"
+            break
+
+        def execute(item: dict) -> tuple[dict, dict]:
+            with app.app_context():
+                dependency_context = "\n".join(
+                    str(tasks_by_id[dependency].get("result", {}).get("content", ""))
+                    for dependency in item["depends_on"]
+                )
+                result = run_team_member(
+                    team, members[item["member_name"]], item["prompt"],
+                    f"{stored['context']}\n{dependency_context}", source_ids,
+                    stored.get("session_id") or stored["id"], cancel,
+                    int((stored.get("limits") or {}).get("result_max_tokens") or 1200),
+                    int((stored.get("limits") or {}).get("timeout_seconds") or 300),
+                    parent_run_id=stored.get("agent_run_id"),
+                    child_budget=child_budget,
+                    actor_id=str(stored.get("actor_id") or (parent or {}).get("actor_id") or "local-default"),
+                )
+                return item, result
+
+        with ThreadPoolExecutor(
+            max_workers=min(int((stored.get("limits") or {}).get("max_concurrency") or 6), len(ready)),
+            thread_name_prefix="meridian-team",
+        ) as pool:
+            futures = {pool.submit(execute, item): item for item in ready}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    _, response = future.result()
+                    item.update({"status": "completed", "result": response, "finished_at": utcnow()})
+                    responses.append(response)
+                    completed.add(item["id"])
+                except Exception as exc:
+                    item.update({"status": "failed", "error": str(exc), "finished_at": utcnow()})
+                    responses.append({
+                        "member": item["member_name"], "task": item["prompt"],
+                        "content": "", "error": str(exc), "tool_evidence": [],
+                    })
+                progress(
+                    len([value for value in tasks_by_id.values() if value["status"] in {"completed", "failed"}])
+                    / len(tasks_by_id) * 85, f"团队任务 {item['id']}：{item['status']}",
+                )
+                stored.update({"tasks": list(tasks_by_id.values()), "responses": responses})
+                _db().put("team_runs", stored, workspace_id=team["workspace_id"])
+    parent_store = RunStore(_db())
+    if stored.get("status") == "cancelled":
+        final = _db().put("team_runs", stored, workspace_id=team["workspace_id"])
+        if final.get("agent_run_id"):
+            parent_store.update_status(final["agent_run_id"], "cancelled", outcome="cancelled", stop_reason="team_cancelled")
+        if final.get("plan_id"):
+            _db().patch("team_plans", final["plan_id"], {"status": "cancelled", "run_id": final["id"]}, workspace_id=team["workspace_id"])
+        return {"status": "cancelled", "run_id": final["id"]}
+    review = _quality_review(team, responses, source_ids)
+    summary = _synthesize(team, stored["task"], responses)
+    failed = any(item["status"] == "failed" for item in tasks_by_id.values())
+    parent_final = {"published": False, "quality_status": "blocked"}
+    if parent:
+        parent_evidence = [{
+            "tool": "team_member_publication",
+            "status": "SUCCEEDED" if response.get("publication_id") else "FAILED",
+            "refs": [str(response["publication_id"])] if response.get("publication_id") else [],
+            "completeness": "complete" if response.get("publication_id") else "unknown",
+            "validation_status": "PASS" if response.get("publication_id") else "not_evaluated",
+        } for response in responses]
+        parent_final = ResultService(
+            _db(), authorize=lambda current: _source_authorized(_db(), current),
+        ).finalize(parent["id"], summary, parent_evidence)
+    status = (
+        "partial_failed" if failed else "completed"
+        if review["status"] == "passed" and parent_final.get("published")
+        else "needs_review"
+    )
+    stored.update({
+        "status": status, "tasks": list(tasks_by_id.values()), "responses": responses,
+        "review": review, "summary": summary, "finished_at": utcnow(),
+        "result_manifest_id": parent_final.get("manifest_id"),
+        "publication_id": parent_final.get("publication_id"),
+        "budget": {key: sum(int(item.get("usage", {}).get(key, 0)) for item in responses) for key in ("model_tokens", "tool_calls")},
+    })
+    _db().put("team_runs", stored, workspace_id=team["workspace_id"])
+    if stored.get("agent_run_id"):
+        parent_store.update_status(
+            stored["agent_run_id"], "finished" if status == "completed" else "failed",
+            outcome="complete" if status == "completed" else "partial",
+            quality_status="passed" if status == "completed" else str(parent_final.get("quality_status") or "failed"),
+            stop_reason=f"team_{status}",
+        )
+    if stored.get("plan_id"):
+        _db().patch("team_plans", stored["plan_id"], {"status": status, "run_id": stored["id"]}, workspace_id=team["workspace_id"])
+    return {"run_id": stored["id"], "status": status, "responses": responses, "review": review, "summary": summary}
+
+
+register_job_handler("team_run", _team_job_handler)
 
 
 def retry_team_run(run: dict, task_ids: list[str] | None = None) -> dict:

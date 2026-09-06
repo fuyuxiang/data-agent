@@ -1,0 +1,339 @@
+{
+  "schema_version": 1,
+  "profile": "release",
+  "status": "BLOCKED",
+  "results": [
+    {
+      "id": "python-compile",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "compileall",
+        "-q",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "app.py"
+      ],
+      "duration_seconds": 0.136,
+      "output": ""
+    },
+    {
+      "id": "ruff",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "ruff",
+        "check",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "tests",
+        "app.py"
+      ],
+      "duration_seconds": 0.033,
+      "output": "All checks passed!\n"
+    },
+    {
+      "id": "ruff-security",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "ruff",
+        "check",
+        "--select",
+        "S",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "app.py"
+      ],
+      "duration_seconds": 0.036,
+      "output": "All checks passed!\n"
+    },
+    {
+      "id": "pytest",
+      "status": "PASS",
+      "detail": "exit=0; 102 passed, 2 deselected in 77.86s",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "pytest",
+        "-q",
+        "-m",
+        "not database_integration",
+        "--cov=backend/agent",
+        "--cov=backend/api",
+        "--cov=backend/core",
+        "--cov=backend/services",
+        "--cov-report=term",
+        "--cov-fail-under=60"
+      ],
+      "duration_seconds": 82.044,
+      "output": "........................................................................ [ 70%]\n..............................                                           [100%]\n================================ tests coverage ================================\n______________ coverage: platform darwin, python 3.11.11-final-0 _______________\n\nName                                            Stmts   Miss  Cover\n-------------------------------------------------------------------\nbackend/agent/__init__.py                           4      0   100%\nbackend/agent/context.py                           42      0   100%\nbackend/agent/contracts.py                        130      2    98%\nbackend/agent/loop.py                             152     44    71%\nbackend/agent/model.py                            154     11    93%\nbackend/agent/store.py                            319     54    83%\nbackend/agent/tools.py                            130      4    97%\nbackend/api/__init__.py                            22      0   100%\nbackend/api/analyses.py                           287    132    54%\nbackend/api/analysis.py                            61      8    87%\nbackend/api/automation.py                         785    329    58%\nbackend/api/catalog.py                            345    103    70%\nbackend/api/common.py                              72     10    86%\nbackend/api/compat_core.py                        414    307    26%\nbackend/api/compat_legacy.py                      763    185    76%\nbackend/api/conversation.py                       144     70    51%\nbackend/api/datasource_compat.py                  422     79    81%\nbackend/api/delivery.py                           237    120    49%\nbackend/api/feishu_bot.py                         127     24    81%\nbackend/api/identity.py                           162     31    81%\nbackend/api/integration.py                        291    173    41%\nbackend/api/knowledge_compat.py                   245     63    74%\nbackend/api/lifecycle.py                          127     33    74%\nbackend/api/system_compat.py                      175    119    32%\nbackend/api/warehouse.py                          121     69    43%\nbackend/api/workspace.py                          486    249    49%\nbackend/core/__init__.py                            2      0   100%\nbackend/core/database.py                          266     38    86%\nbackend/core/instance_lock.py                      25      7    72%\nbackend/core/observability.py                      19     19     0%\nbackend/core/settings.py                           65      7    89%\nbackend/services/__init__.py                        0      0   100%\nbackend/services/advanced_agent.py                303     98    68%\nbackend/services/agent_tools.py                   743    589    21%\nbackend/services/analytics.py                     400    168    58%\nbackend/services/charts.py                        545    124    77%\nbackend/services/dashboard_refresh.py              90     36    60%\nbackend/services/data_plane/__init__.py             5      0   100%\nbackend/services/data_plane/contracts.py          113     29    74%\nbackend/services/data_plane/factory.py             26     11    58%\nbackend/services/data_plane/livy.py               152     32    79%\nbackend/services/data_plane/router.py              33     17    48%\nbackend/services/data_plane/sandbox.py            146     30    79%\nbackend/services/data_plane/sandbox_client.py      90      8    91%\nbackend/services/data_plane/trino.py              212     30    86%\nbackend/services/datasets.py                      721    255    65%\nbackend/services/embeddings.py                    204    134    34%\nbackend/services/exports.py                       282    108    62%\nbackend/services/feishu.py                        169    151    11%\nbackend/services/feishu_bot.py                    165     84    49%\nbackend/services/hooks.py                         175     70    60%\nbackend/services/jobs.py                          184     44    76%\nbackend/services/knowledge.py                     283     82    71%\nbackend/services/lifecycle.py                     223     63    72%\nbackend/services/mcp.py                           340    141    59%\nbackend/services/memory.py                        167    120    28%\nbackend/services/models.py                         68     19    72%\nbackend/services/results/__init__.py                2      0   100%\nbackend/services/results/delivery.py              196    168    14%\nbackend/services/results/manifests.py              79     19    76%\nbackend/services/results/rendering.py              80      9    89%\nbackend/services/scheduler.py                     203    143    30%\nbackend/services/security.py                      141     60    57%\nbackend/services/skills.py                        125     47    62%\nbackend/services/sql_security.py                   58     12    79%\nbackend/services/teams.py                         263     67    75%\nbackend/services/training_device.py                25     22    12%\nbackend/services/usage.py                          28      7    75%\nbackend/services/validation/__init__.py             2      0   100%\nbackend/services/validation/engine.py              54      6    89%\nbackend/services/workflows.py                     731    188    74%\nbackend/services/workspace_tools.py               157    132    16%\n-------------------------------------------------------------------\nTOTAL                                           14577   5613    61%\nRequired test coverage of 60% reached. Total coverage: 61.49%\n102 passed, 2 deselected in 77.86s (0:01:17)\n"
+    },
+    {
+      "id": "agent-core-coverage",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "coverage",
+        "report",
+        "--include=backend/agent/*",
+        "--fail-under=85"
+      ],
+      "duration_seconds": 0.451,
+      "output": "Name                         Stmts   Miss  Cover\n------------------------------------------------\nbackend/agent/__init__.py        4      0   100%\nbackend/agent/context.py        42      0   100%\nbackend/agent/contracts.py     130      2    98%\nbackend/agent/loop.py          152     44    71%\nbackend/agent/model.py         154     11    93%\nbackend/agent/store.py         319     54    83%\nbackend/agent/tools.py         130      4    97%\n------------------------------------------------\nTOTAL                          931    115    88%\n"
+    },
+    {
+      "id": "database-integration",
+      "status": "BLOCKED",
+      "detail": "真实 PostgreSQL/MySQL 验证未配置：MERIDIAN_TEST_POSTGRES_URL, MERIDIAN_TEST_MYSQL_URL",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "python-dependency-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "pip-audit",
+        "-r",
+        "requirements.lock",
+        "--no-deps",
+        "--disable-pip"
+      ],
+      "duration_seconds": 2.073,
+      "output": "WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies\nWARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes\nNo known vulnerabilities found\n"
+    },
+    {
+      "id": "sandbox-proxy-dependency-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "pip-audit",
+        "-r",
+        "deploy/sandbox/requirements-proxy.txt",
+        "--no-deps",
+        "--disable-pip"
+      ],
+      "duration_seconds": 1.118,
+      "output": "WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies\nWARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes\nNo known vulnerabilities found\n"
+    },
+    {
+      "id": "frontend-check",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "duration_seconds": 0.928,
+      "output": "\n> meridian-analytics-workbench@1.0.0 check\n> node scripts/check-vendor.mjs && node --check frontend/src/app.js && node --check frontend/src/api.js && node --check frontend/src/components.js && node --check frontend/src/analysis-panel.js && node --check frontend/src/panels.js\n\nVerified pinned browser dependency versions and public APIs.\n"
+    },
+    {
+      "id": "frontend-build",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "duration_seconds": 0.484,
+      "output": "\n> meridian-analytics-workbench@1.0.0 build\n> node scripts/build.mjs\n\nBuilt static frontend with 15 precompiled templates at /Users/fuyuxiang/Documents/100-主业/130-东方国信/13.代码仓库/data-agent/frontend/dist\n"
+    },
+    {
+      "id": "frontend-dependency-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "audit",
+        "--audit-level=high"
+      ],
+      "duration_seconds": 2.323,
+      "output": "found 0 vulnerabilities\n"
+    },
+    {
+      "id": "production-compose-config",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "docker",
+        "compose",
+        "config",
+        "-q"
+      ],
+      "duration_seconds": 0.641,
+      "output": ""
+    },
+    {
+      "id": "warehouse-compose-config",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "docker",
+        "compose",
+        "-f",
+        "deploy/warehouse/docker-compose.yml",
+        "config",
+        "-q"
+      ],
+      "duration_seconds": 0.331,
+      "output": ""
+    },
+    {
+      "id": "eval-contracts",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "scripts/validate_eval_contracts.py"
+      ],
+      "duration_seconds": 0.111,
+      "output": "{\"status\": \"PASS\", \"task_count\": 36, \"external_count\": 9, \"note\": \"仅验证评估合同结构，未把任务标为已执行\"}\n"
+    },
+    {
+      "id": "sandbox-integration",
+      "status": "BLOCKED",
+      "detail": "failed to connect to the docker API at unix:///Users/fuyuxiang/.docker/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/fuyuxiang/.docker/run/docker.sock: connect: no such file or directory",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "browser-integration",
+      "status": "PASS",
+      "detail": "exit=0; 2 passed",
+      "command": [
+        "npm",
+        "run",
+        "test:browser"
+      ],
+      "duration_seconds": 16.82,
+      "output": "\n> meridian-analytics-workbench@1.0.0 test:browser\n> npm run build && playwright test\n\n\n> meridian-analytics-workbench@1.0.0 build\n> node scripts/build.mjs\n\nBuilt static frontend with 15 precompiled templates at /Users/fuyuxiang/Documents/100-主业/130-东方国信/13.代码仓库/data-agent/frontend/dist\n\n\n\nRunning 2 tests using 1 worker\n\n[1/2] tests/browser/analysis.spec.mjs:4:1 › creates an analysis contract and manages a real indexed attachment\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n[2/2] tests/browser/analysis.spec.mjs:24:1 › opens grounded evidence and downloads a published artifact\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  2 passed (15.0s)\n[WebServer] WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.\n[WebServer]  * Running on http://127.0.0.1:5013\n[WebServer] Press CTRL+C to quit\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:04] \"GET /api/ready HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET / HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /vendor/marked.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /vendor/echarts-china.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /src/styles.css HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /vendor/echarts.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /src/theme.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /vendor/vue.global.prod.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /vendor/purify.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /src/app.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /src/renders.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:06] \"GET /src/api.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /src/panels.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /src/components.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /src/analysis-panel.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/auth/me HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analysis/methods HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/commands HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/agent-profiles?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/bootstrap?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/skills?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/jobs?limit=50&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses?session_id=welcome&limit=50&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"POST /api/analyses HTTP/1.1\" 201 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928/events?after=0&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"POST /api/analyses/run_90d60335e1f74928/attachments HTTP/1.1\" 201 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928/events?after=2&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"DELETE /api/analyses/run_90d60335e1f74928/attachments/attachment_e3245f05fd224898 HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:07] \"GET /api/analyses/run_90d60335e1f74928/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/analyses/run_90d60335e1f74928?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/analyses/run_90d60335e1f74928/events?after=3&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET / HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/theme.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/styles.css HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /vendor/vue.global.prod.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /vendor/echarts.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /vendor/echarts-china.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /vendor/marked.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /vendor/purify.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/renders.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/app.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/api.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/components.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/panels.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /src/analysis-panel.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/auth/me HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/analysis/methods HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/agent-profiles?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/commands HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/bootstrap?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/skills?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:50:08] \"GET /api/jobs?limit=50&workspace_id=default HTTP/1.1\" 200 -\n"
+    },
+    {
+      "id": "repository-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "scripts/audit_repository.py",
+        "--check"
+      ],
+      "duration_seconds": 0.855,
+      "output": "\" D frontend/drawio/templates/business/business_model_2.xml\",\n      \" D frontend/drawio/templates/business/business_model_canvas_1.png\",\n      \" D frontend/drawio/templates/business/business_model_canvas_1.xml\",\n      \" D frontend/drawio/templates/business/ishikawa_1.png\",\n      \" D frontend/drawio/templates/business/ishikawa_1.xml\",\n      \" D frontend/drawio/templates/business/ishikawa_2.png\",\n      \" D frontend/drawio/templates/business/ishikawa_2.xml\",\n      \" D frontend/drawio/templates/business/pert_1.png\",\n      \" D frontend/drawio/templates/business/pert_1.xml\",\n      \" D frontend/drawio/templates/business/pert_2.png\",\n      \" D frontend/drawio/templates/business/pert_2.xml\",\n      \" D frontend/drawio/templates/business/swimlane.png\",\n      \" D frontend/drawio/templates/business/swimlane.xml\",\n      \" D frontend/drawio/templates/business/timeline_1.png\",\n      \" D frontend/drawio/templates/business/timeline_1.xml\",\n      \" D frontend/drawio/templates/business/timeline_2.png\",\n      \" D frontend/drawio/templates/business/timeline_2.xml\",\n      \" D frontend/drawio/templates/business/timeline_3.png\",\n      \" D frontend/drawio/templates/business/timeline_3.xml\",\n      \" D frontend/drawio/templates/business/timeline_4.png\",\n      \" D frontend/drawio/templates/business/timeline_4.xml\",\n      \" D frontend/drawio/templates/charts/bar_chart_1.png\",\n      \" D frontend/drawio/templates/charts/bar_chart_1.xml\",\n      \" D frontend/drawio/templates/charts/coc.png\",\n      \" D frontend/drawio/templates/charts/coc.xml\",\n      \" D frontend/drawio/templates/charts/org_chart_1.png\",\n      \" D frontend/drawio/templates/charts/org_chart_1.xml\",\n      \" D frontend/drawio/templates/charts/org_chart_2.png\",\n      \" D frontend/drawio/templates/charts/org_chart_2.xml\",\n      \" D frontend/drawio/templates/charts/processbar.png\",\n      \" D frontend/drawio/templates/charts/processbar.xml\",\n      \" D frontend/drawio/templates/charts/work_breakdown_structure.png\",\n      \" D frontend/drawio/templates/charts/work_breakdown_structure.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_1.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_1.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_10.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_10.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_2.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_2.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_3.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_3.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_3d.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_3d.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_4.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_4.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_5.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_5.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_6.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_6.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_7.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_7.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_8.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_8.xml\",\n      \" D frontend/drawio/templates/cloud/aws/aws_9.png\",\n      \" D frontend/drawio/templates/cloud/aws/aws_9.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_1.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_1.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_2.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_2.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_3.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_3.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_4.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_4.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_5.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_5.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_6.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_6.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_7.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_7.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_8.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_8.xml\",\n      \" D frontend/drawio/templates/cloud/azure/azure_9.png\",\n      \" D frontend/drawio/templates/cloud/azure/azure_9.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_backup_and_archive_api_hosting.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_backup_and_archive_api_hosting.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_big_data_complex_event_processing.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_big_data_complex_event_processing.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_dev_test_continuous_delivery_with_spinnaker.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_dev_test_continuous_delivery_with_spinnaker.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_digital_marketing_dmp_data_warehouse.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_digital_marketing_dmp_data_warehouse.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_financial_services_monte_carlo_simulations.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_financial_services_monte_carlo_simulations.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_gaming_backend_database.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_gaming_backend_database.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_general_app_engine_and_cloud_endpoints.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_general_app_engine_and_cloud_endpoints.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_internet_of_things_mqtt_to_pubsub_broker.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_internet_of_things_mqtt_to_pubsub_broker.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_lifesciences_genomics_secondary_analysis.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_lifesciences_genomics_secondary_analysis.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_media_hybrid_rendering.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_media_hybrid_rendering.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_retail_beacons_and_targeted_marketing.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_retail_beacons_and_targeted_marketing.xml\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_websites_content_hosting.png\",\n      \" D frontend/drawio/templates/cloud/gcp/gcp_websites_content_hosting.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_bda_reference_architecture.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_bda_reference_architecture.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_blockchain.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_blockchain.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_cognitive_conversation.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_cognitive_conversation.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_cognitive_discovery.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_cognitive_discovery.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_iot_architecture.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_iot_architecture.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_microservices.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_microservices.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_private_cloud.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_private_cloud.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_vcenter_server_platform.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_vcenter_server_platform.xml\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_vpc_architecture.png\",\n      \" D frontend/drawio/templates/cloud/ibm/ibm_vpc_architecture.xml\",\n      \" D frontend/drawio/templates/engineering/cabinet.png\",\n      \" D frontend/drawio/templates/engineering/cabinet.xml\",\n      \" D frontend/drawio/templates/engineering/electrical_1.png\",\n      \" D frontend/drawio/templates/engineering/electrical_1.xml\",\n      \" D frontend/drawio/templates/engineering/electrical_2.png\",\n      \" D frontend/drawio/templates/engineering/electrical_2.xml\",\n      \" D frontend/drawio/templates/flowcharts/cross_functional_flowchart_1.png\",\n      \" D frontend/drawio/templates/flowcharts/cross_functional_flowchart_1.xml\",\n      \" D frontend/drawio/templates/flowcharts/cross_functional_flowchart_2.png\",\n      \" D frontend/drawio/templates/flowcharts/cross_functional_flowchart_2.xml\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_1.png\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_1.xml\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_2.png\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_2.xml\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_3.png\",\n      \" D frontend/drawio/templates/flowcharts/data_flow_3.xml\",\n      \" D frontend/drawio/templates/flowcharts/epc.png\",\n      \" D frontend/drawio/templates/flowcharts/epc.xml\",\n      \" D frontend/drawio/templates/flowcharts/flowchart_1.png\",\n      \" D frontend/drawio/templates/flowcharts/flowchart_1.xml\",\n      \" D frontend/drawio/templates/flowcharts/flowchart_2.png\",\n      \" D frontend/drawio/templates/flowcharts/flowchart_2.xml\",\n      \" D frontend/drawio/templates/flowcharts/workflow_1.png\",\n      \" D frontend/drawio/templates/flowcharts/workflow_1.xml\",\n      \" D frontend/drawio/templates/index.xml\",\n      \" D frontend/drawio/templates/layout/blog_wireframe.png\",\n      \" D frontend/drawio/templates/layout/blog_wireframe.xml\",\n      \" D frontend/drawio/templates/layout/bootstrap.png\",\n      \" D frontend/drawio/templates/layout/bootstrap.xml\",\n      \" D frontend/drawio/templates/layout/wireframe_1.png\",\n      \" D frontend/drawio/templates/layout/wireframe_1.xml\",\n      \" D frontend/drawio/templates/layout/wireframe_2.png\",\n      \" D frontend/drawio/templates/layout/wireframe_2.xml\",\n      \" D frontend/drawio/templates/maps/concept_map_1.png\",\n      \" D frontend/drawio/templates/maps/concept_map_1.xml\",\n      \" D frontend/drawio/templates/maps/concept_map_2.png\",\n      \" D frontend/drawio/templates/maps/concept_map_2.xml\",\n      \" D frontend/drawio/templates/maps/living_beings_mind_map.png\",\n      \" D frontend/drawio/templates/maps/living_beings_mind_map.xml\",\n      \" D frontend/drawio/templates/maps/mind_map.png\",\n      \" D frontend/drawio/templates/maps/mind_map.xml\",\n      \" D frontend/drawio/templates/maps/site_map.png\",\n      \" D frontend/drawio/templates/maps/site_map.xml\",\n      \" D frontend/drawio/templates/network/active_directory.png\",\n      \" D frontend/drawio/templates/network/active_directory.xml\",\n      \" D frontend/drawio/templates/network/arista.png\",\n      \" D frontend/drawio/templates/network/arista.xml\",\n      \" D frontend/drawio/templates/network/cisco_1.png\",\n      \" D frontend/drawio/templates/network/cisco_1.xml\",\n      \" D frontend/drawio/templates/network/cisco_2.png\",\n      \" D frontend/drawio/templates/network/cisco_2.xml\",\n      \" D frontend/drawio/templates/network/citrix.png\",\n      \" D frontend/drawio/templates/network/citrix.xml\",\n      \" D frontend/drawio/templates/network/enterprise_1.png\",\n      \" D frontend/drawio/templates/network/enterprise_1.xml\",\n      \" D frontend/drawio/templates/network/fortinet.png\",\n      \" D frontend/drawio/templates/network/fortinet.xml\",\n      \" D frontend/drawio/templates/network/internet.png\",\n      \" D frontend/drawio/templates/network/internet.xml\",\n      \" D frontend/drawio/templates/network/lan.png\",\n      \" D frontend/drawio/templates/network/lan.xml\",\n      \" D frontend/drawio/templates/network/network.png\",\n      \" D frontend/drawio/templates/network/network.xml\",\n      \" D frontend/drawio/templates/network/telecomm.png\",\n      \" D frontend/drawio/templates/network/telecomm.xml\",\n      \" D frontend/drawio/templates/network/veeam.png\",\n      \" D frontend/drawio/templates/network/veeam.xml\",\n      \" D frontend/drawio/templates/network/wireless_home_network.png\",\n      \" D frontend/drawio/templates/network/wireless_home_network.xml\",\n      \" D frontend/drawio/templates/other/block.png\",\n      \" D frontend/drawio/templates/other/block.xml\",\n      \" D frontend/drawio/templates/other/cycle_1.png\",\n      \" D frontend/drawio/templates/other/cycle_1.xml\",\n      \" D frontend/drawio/templates/other/decision_tree.png\",\n      \" D frontend/drawio/templates/other/decision_tree.xml\",\n      \" D frontend/drawio/templates/other/delivery_diagram.png\",\n      \" D frontend/drawio/templates/other/delivery_diagram.xml\",\n      \" D frontend/drawio/templates/other/educational.png\",\n      \" D frontend/drawio/templates/other/educational.xml\",\n      \" D frontend/drawio/templates/other/floor_plan.png\",\n      \" D frontend/drawio/templates/other/floor_plan.xml\",\n      \" D frontend/drawio/templates/other/infographic_1.png\",\n      \" D frontend/drawio/templates/other/infographic_1.xml\",\n      \" D frontend/drawio/templates/other/infographic_2.png\",\n      \" D frontend/drawio/templates/other/infographic_2.xml\",\n      \" D frontend/drawio/templates/other/infographic_3.png\",\n      \" D frontend/drawio/templates/other/infographic_3.xml\",\n      \" D frontend/drawio/templates/other/infographic_4.png\",\n      \" D frontend/drawio/templates/other/infographic_4.xml\",\n      \" D frontend/drawio/templates/other/lan_plan.png\",\n      \" D frontend/drawio/templates/other/lan_plan.xml\",\n      \" D frontend/drawio/templates/other/water_cycle.png\",\n      \" D frontend/drawio/templates/other/water_cycle.xml\",\n      \" D frontend/drawio/templates/software/class_1.png\",\n      \" D frontend/drawio/templates/software/class_1.xml\",\n      \" D frontend/drawio/templates/software/class_2.png\",\n      \" D frontend/drawio/templates/software/class_2.xml\",\n      \" D frontend/drawio/templates/software/component.png\",\n      \" D frontend/drawio/templates/software/component.xml\",\n      \" D frontend/drawio/templates/software/data_flow_1.png\",\n      \" D frontend/drawio/templates/software/data_flow_1.xml\",\n      \" D frontend/drawio/templates/software/database_1.png\",\n      \" D frontend/drawio/templates/software/database_1.xml\",\n      \" D frontend/drawio/templates/software/database_2.png\",\n      \" D frontend/drawio/templates/software/database_2.xml\",\n      \" D frontend/drawio/templates/software/database_3.png\",\n      \" D frontend/drawio/templates/software/database_3.xml\",\n      \" D frontend/drawio/templates/software/eip.png\",\n      \" D frontend/drawio/templates/software/eip.xml\",\n      \" D frontend/drawio/templates/software/entity_relationship.png\",\n      \" D frontend/drawio/templates/software/entity_relationship.xml\",\n      \" D frontend/drawio/templates/software/git_flow_1.png\",\n      \" D frontend/drawio/templates/software/git_flow_1.xml\",\n      \" D frontend/drawio/templates/software/git_flow_2.png\",\n      \" D frontend/drawio/templates/software/git_flow_2.xml\",\n      \" D frontend/drawio/templates/software/git_flow_3.png\",\n      \" D frontend/drawio/templates/software/git_flow_3.xml\",\n      \" D frontend/drawio/templates/tables/authority_matrix.png\",\n      \" D frontend/drawio/templates/tables/authority_matrix.xml\",\n      \" D frontend/drawio/templates/tables/gantt_1.png\",\n      \" D frontend/drawio/templates/tables/gantt_1.xml\",\n      \" D frontend/drawio/templates/tables/gantt_2.png\",\n      \" D frontend/drawio/templates/tables/gantt_2.xml\",\n      \" D frontend/drawio/templates/tables/gantt_3.png\",\n      \" D frontend/drawio/templates/tables/gantt_3.xml\",\n      \" D frontend/drawio/templates/uml/activity_diagram_1.png\",\n      \" D frontend/drawio/templates/uml/activity_diagram_1.xml\",\n      \" D frontend/drawio/templates/uml/activity_diagram_2.png\",\n      \" D frontend/drawio/templates/uml/activity_diagram_2.xml\",\n      \" D frontend/drawio/templates/uml/sequence_1.png\",\n      \" D frontend/drawio/templates/uml/sequence_1.xml\",\n      \" D frontend/drawio/templates/uml/sequence_2.png\",\n      \" D frontend/drawio/templates/uml/sequence_2.xml\",\n      \" D frontend/drawio/templates/uml/state_machine.png\",\n      \" D frontend/drawio/templates/uml/state_machine.xml\",\n      \" D frontend/drawio/templates/uml/sysml.png\",\n      \" D frontend/drawio/templates/uml/sysml.xml\",\n      \" D frontend/drawio/templates/uml/uml_1.png\",\n      \" D frontend/drawio/templates/uml/uml_1.xml\",\n      \" D frontend/drawio/templates/uml/uml_2.png\",\n      \" D frontend/drawio/templates/uml/uml_2.xml\",\n      \" D frontend/drawio/templates/venn/spider_1.png\",\n      \" D frontend/drawio/templates/venn/spider_1.xml\",\n      \" D frontend/drawio/templates/venn/spider_2.png\",\n      \" D frontend/drawio/templates/venn/spider_2.xml\",\n      \" D frontend/drawio/templates/venn/venn_1.png\",\n      \" D frontend/drawio/templates/venn/venn_1.xml\",\n      \" D frontend/drawio/templates/venn/venn_2.png\",\n      \" D frontend/drawio/templates/venn/venn_2.xml\",\n      \" D frontend/drawio/templates/venn/venn_3.png\",\n      \" D frontend/drawio/templates/venn/venn_3.xml\",\n      \" D frontend/drawio/templates/venn/venn_4.png\",\n      \" D frontend/drawio/templates/venn/venn_4.xml\",\n      \" D frontend/drawio/templates/venn/venn_5.png\",\n      \" D frontend/drawio/templates/venn/venn_5.xml\",\n      \" D frontend/drawio/templates/venn/venn_6.png\",\n      \" D frontend/drawio/templates/venn/venn_6.xml\",\n      \" D frontend/drawio/templates/wireframes/blog_1.png\",\n      \" D frontend/drawio/templates/wireframes/blog_1.xml\",\n      \" D frontend/drawio/templates/wireframes/bootstrap_1.png\",\n      \" D frontend/drawio/templates/wireframes/bootstrap_1.xml\",\n      \" D frontend/drawio/templates/wireframes/home_page_1.png\",\n      \" D frontend/drawio/templates/wireframes/home_page_1.xml\",\n      \" D frontend/drawio/templates/wireframes/home_page_2.png\",\n      \" D frontend/drawio/templates/wireframes/home_page_2.xml\",\n      \" D frontend/drawio/templates/wireframes/home_page_hero_video_1.png\",\n      \" D frontend/drawio/templates/wireframes/home_page_hero_video_1.xml\",\n      \" D frontend/drawio/vsdxImporter.html\",\n      \" D frontend/drawio/workbox-05b6c01b.js\",\n      \" D frontend/drawio/workbox-05b6c01b.js.map\",\n      \" M frontend/src/app.js\",\n      \" M frontend/src/components.js\",\n      \" M frontend/src/panels.js\",\n      \" M frontend/src/styles.css\",\n      \" D meridian_remote_runner.py\",\n      \" M package.json\",\n      \" M packaging/build_staging.py\",\n      \" M requirements.lock\",\n      \" M requirements.txt\",\n      \" M scripts/build.mjs\",\n      \" M scripts/check-vendor.mjs\",\n      \" D tests/test_agent_runtime.py\",\n      \" D tests/test_agent_tool_catalog.py\",\n      \" M tests/test_automation.py\",\n      \" D tests/test_business_canvas.py\",\n      \" M tests/test_core_api.py\",\n      \" M tests/test_datasource_compat.py\",\n      \" M tests/test_knowledge_import_and_prompt.py\",\n      \" M tests/test_legacy_compat_api.py\",\n      \" M tests/test_packaging.py\",\n      \" M tests/test_production_hardening.py\",\n      \" D tests/test_remote_gpu.py\",\n      \" M tests/test_workflow_runtime_parity.py\",\n      \"?? artifacts/\",\n      \"?? backend/agent/\",\n      \"?? backend/api/analyses.py\",\n      \"?? backend/api/warehouse.py\",\n      \"?? backend/services/advanced_agent.py\",\n      \"?? backend/services/data_plane/\",\n      \"?? backend/services/results/\",\n      \"?? backend/services/validation/\",\n      \"?? deploy/sandbox/\",\n      \"?? deploy/warehouse/\",\n      \"?? docs/\",\n      \"?? evals/\",\n      \"?? frontend/src/analysis-panel.js\",\n      \"?? package-lock.json\",\n      \"?? playwright.config.mjs\",\n      \"?? scripts/audit_repository.py\",\n      \"?? scripts/generate_acceptance_matrix.py\",\n      \"?? scripts/run_browser_fixture.py\",\n      \"?? scripts/validate_eval_contracts.py\",\n      \"?? scripts/verify_advanced_agent.py\",\n      \"?? tests/browser/\",\n      \"?? tests/test_advanced_agent.py\",\n      \"?? tests/test_data_plane_runtime.py\"\n    ]\n  }\n}\n"
+    },
+    {
+      "id": "audit-negative-fixture",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "scripts/audit_repository.py",
+        "--self-test-negative"
+      ],
+      "duration_seconds": 1.051,
+      "output": "{\n  \"negative_fixture_detected\": true,\n  \"checks\": [\n    {\n      \"id\": \"C07-C08-retired-files\",\n      \"status\": \"PASS\",\n      \"detail\": \"draw.io、GPU/SSH 与旧 Agent runtime 已从工作树移除\",\n      \"evidence\": []\n    },\n    {\n      \"id\": \"C02-single-loop\",\n      \"status\": \"FAIL\",\n      \"detail\": \"可执行源码不包含第二套 Agent 多轮循环\",\n      \"evidence\": [\n        \"scripts/__audit_negative_fixture__.py:1\"\n      ]\n    },\n    {\n      \"id\": \"C09-no-host-mutation-tools\",\n      \"status\": \"FAIL\",\n      \"detail\": \"退役宿主改写、Shell/Git、draw.io 与自改 Hook 名称不可注册\",\n      \"evidence\": [\n        \"scripts/__audit_negative_fixture__.py:1\"\n      ]\n    },\n    {\n      \"id\": \"C04-typed-jobs\",\n      \"status\": \"PASS\",\n      \"detail\": \"JobManager 仅接受持久化 typed JobSpec\",\n      \"evidence\": []\n    },\n    {\n      \"id\": \"C10-no-testing-bypass\",\n      \"status\": \"PASS\",\n      \"detail\": \"生产授权路径不读取 Flask TESTING 开关\",\n      \"evidence\": []\n    },\n    {\n      \"id\": \"C11-retired-routes\",\n      \"status\": \"FAIL\",\n      \"detail\": \"退役路由不再注册或被前端调用\",\n      \"evidence\": [\n        \"scripts/__audit_negative_fixture__.py:1\"\n      ]\n    },\n    {\n      \"id\": \"C19-build-clean\",\n      \"status\": \"PASS\",\n      \"detail\": \"构建、镜像和桌面打包不再包含退役资源\",\n      \"evidence\": []\n    },\n    {\n      \"id\": \"C14-dependencies\",\n      \"status\": \"PASS\",\n      \"detail\": \"SSH 专属直接依赖已移除\",\n      \"evidence\": [\n        \"requirements.txt\"\n      ]\n    },\n    {\n      \"id\": \"C05-remote-dataframe-guard\",\n      \"status\": \"PASS\",\n      \"detail\": \"远端来源进入旧 DataFrame 路径时 fail closed\",\n      \"evidence\": [\n        \"backend/services/datasets.py\"\n      ]\n    },\n    {\n      \"id\": \"R08-no-app-docker-access\",\n      \"status\": \"PASS\",\n      \"detail\": \"Web/Agent 路径仅通过有限鉴权代理提交 sandbox JobSpec\",\n      \"evidence\": []\n    },\n    {\n      \"id\": \"R08-proxy-only-docker-socket\",\n      \"status\": \"PASS\",\n      \"detail\": \"Docker socket 只挂载到 sandbox-proxy，不挂载到 Web/Agent 容器\",\n      \"evidence\": [\n        \"compose.yaml\"\n      ]\n    },\n    {\n      \"id\": \"C23-negative-detector\",\n      \"status\": \"PASS\",\n      \"detail\": \"审计器内置负样本模式必须使至少一项检查失败\",\n      \"evidence\": [\n        \"scripts/audit_repository.py --self-test-negative\"\n      ]\n    }\n  ]\n}\n"
+    },
+    {
+      "id": "trino-cluster",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8080/v1/info: HTTP Error 502: Bad Gateway",
+      "command": null,
+      "duration_seconds": 0.024,
+      "output": ""
+    },
+    {
+      "id": "trino-workers",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8080/v1/node: HTTP Error 502: Bad Gateway",
+      "command": null,
+      "duration_seconds": 0.004,
+      "output": ""
+    },
+    {
+      "id": "livy-batches",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8998/batches?from=0&size=1: HTTP Error 502: Bad Gateway",
+      "command": null,
+      "duration_seconds": 0.003,
+      "output": ""
+    },
+    {
+      "id": "warehouse-e2e-evidence",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_WAREHOUSE_EVIDENCE 未指定；不能证明 Iceberg 物化、2 workers/2 executors、取消恢复与四图邮件链路",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "target-platform",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_TARGET_PLATFORM_EVIDENCE 未配置；不会用参考 Trino 自动替代客户目标平台",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "scale",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_SCALE_EVIDENCE 未配置；不以合成字节字段冒充 PB/EB 实测",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "live-model",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_LIVE_MODEL_EVIDENCE 未配置；必须对至少 12 个任务各运行 3 次真实模型评估",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "notification",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_NOTIFICATION_EVIDENCE 未配置；必须由真实外部环境产生",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "migration-restore",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_MIGRATION_EVIDENCE 未配置；必须由真实外部环境产生",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "acceptance-matrix-structure",
+      "status": "PASS",
+      "detail": "已解析 173 / 173 个唯一验收项；异常：[]",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "acceptance-matrix-gates",
+      "status": "BLOCKED",
+      "detail": "实现状态=['IMPLEMENTED']；验证状态=['BLOCKED_EXTERNAL', 'PASS_LOCAL']",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    }
+  ]
+}

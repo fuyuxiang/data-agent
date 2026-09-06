@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -88,21 +89,37 @@ def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(clien
     completions = _PromptCompletions()
     fake = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(
-        "backend.services.agent_runtime.resolve_provider",
-        lambda _provider_id=None, _workspace_id="default": ({"model": "fake", "temperature": 0}, fake),
+        "backend.services.advanced_agent.resolve_provider",
+        lambda _provider_id=None, _workspace_id="default": (
+            {"model": "fake", "temperature": 0, "protocol": "chat_completions"}, fake,
+        ),
     )
-    response = client.post(f"/api/sessions/{session['id']}/messages", json={"message": "汇报"})
-    assert response.status_code == 200
-    assert response.data
+    created = client.post("/api/analyses", json={"session_id": session["id"], "objective": "汇报"}).get_json()["item"]
+    confirmed = client.post(
+        f"/api/analyses/{created['id']}/contract/confirm", json={"expected_version": 1},
+    ).get_json()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{confirmed['job']['id']}").get_json()["item"]
+        if job["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
     system_prompt = completions.calls[-1]["messages"][0]["content"]
     assert "所有金额使用万元" in system_prompt
     assert "不应注入的思考" not in system_prompt
 
     disabled = client.post(f"/api/session/{session['id']}/temp-prompt/toggle").get_json()
     assert disabled["enabled"] is False
-    response = client.post(f"/api/sessions/{session['id']}/messages", json={"message": "再次汇报"})
-    assert response.status_code == 200
-    assert response.data
+    created = client.post("/api/analyses", json={"session_id": session["id"], "objective": "再次汇报"}).get_json()["item"]
+    confirmed = client.post(
+        f"/api/analyses/{created['id']}/contract/confirm", json={"expected_version": 1},
+    ).get_json()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{confirmed['job']['id']}").get_json()["item"]
+        if job["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
     assert "所有金额使用万元" not in completions.calls[-1]["messages"][0]["content"]
 
     cleared = client.post(

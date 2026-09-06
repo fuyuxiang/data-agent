@@ -13,12 +13,8 @@ import time
 from email.message import EmailMessage
 from flask import Blueprint, current_app, request
 
-from ..core.database import utcnow
 from ..services.mcp import get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
-from ..services.remote_gpu import (
-    TunnelError, inspect_host_key, open_ssh_client, trust_host_key,
-)
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
 from .common import (
     api_errors, body, current_user_id, db, ok, require_system_owner,
@@ -358,9 +354,7 @@ def receive_integration_event():
             SecretVault(current_app.config["VAULT_KEY"])
             .open(integration.get("credential", ""), {}).get("token") or ""
         )
-    if not expected and (
-        current_app.config.get("TESTING") or os.getenv("MERIDIAN_ALLOW_GLOBAL_INTEGRATION_TOKEN", "0") == "1"
-    ):
+    if not expected and os.getenv("MERIDIAN_ALLOW_GLOBAL_INTEGRATION_TOKEN", "0") == "1":
         expected = os.getenv("MERIDIAN_INTEGRATION_TOKEN", "")
     if not expected:
         return {"ok": False, "error": "未配置入站集成令牌"}, 503
@@ -413,106 +407,10 @@ def _local_compute() -> dict:
 
 @bp.get("/api/compute/status")
 def compute_status():
-    return ok(local=_local_compute(), nodes=[_public_compute(item) for item in db().list("compute_nodes", workspace_id=workspace_id())])
-
-
-def _public_compute(item: dict) -> dict:
-    value = dict(item)
-    value.pop("credential", None)
-    value["has_credential"] = bool(item.get("credential"))
-    value["host_key_trusted"] = bool(db().get(
-        "ssh_host_keys", f"hostkey_{item['id']}", workspace_id=str(item.get("workspace_id") or "default"),
-    ))
-    return value
-
-
-@bp.post("/api/compute/nodes")
-@api_errors
-def create_compute_node():
-    payload = body()
-    if not payload.get("host") or not payload.get("username"):
-        raise ValueError("远程计算节点需要 host 和 username")
-    port = int(payload.get("port", 22))
-    if not 1 <= port <= 65535:
-        raise ValueError("端口必须在 1-65535 之间")
-    validate_outbound_url(f"https://{payload['host']}:{port}")
-    auth_method = str(payload.get("auth_method") or "agent")
-    if auth_method not in {"agent", "password", "private_key"}:
-        raise ValueError("auth_method 必须是 agent、password 或 private_key")
-    if auth_method == "password" and not payload.get("password"):
-        raise ValueError("密码认证必须提供 password")
-    if auth_method == "private_key" and not payload.get("private_key"):
-        raise ValueError("私钥认证必须提供 private_key")
-    wid = workspace_id()
-    credential = SecretVault(current_app.config["VAULT_KEY"]).seal({"password": payload.get("password", ""), "private_key": payload.get("private_key", "")})
-    item = db().put(
-        "compute_nodes",
-        {
-            "id": db().new_id("node"), "workspace_id": wid, "name": str(payload.get("name") or payload["host"])[:100],
-            "host": str(payload["host"]), "port": port, "username": str(payload["username"])[:128],
-            "connection_type": "ssh", "auth_method": auth_method,
-            "credential": credential, "status": "configured", "enabled": True,
-        },
-        workspace_id=wid,
-    )
-    return ok(item=_public_compute(item)), 201
-
-
-@bp.post("/api/compute/nodes/<node_id>/host-key")
-@api_errors
-def compute_node_host_key(node_id: str):
-    node = require_workspace_record("compute_nodes", node_id)
     try:
-        return ok(host_key=inspect_host_key(node))
-    except TunnelError as exc:
-        raise ConnectionError(str(exc)) from exc
+        from ..services.data_plane.factory import sandbox_client
 
-
-@bp.post("/api/compute/nodes/<node_id>/trust-host-key")
-@api_errors
-def compute_node_trust_host_key(node_id: str):
-    node = require_workspace_record("compute_nodes", node_id)
-    payload = body()
-    try:
-        trusted = trust_host_key(
-            db(), node, str(payload.get("key_type") or ""), str(payload.get("key_base64") or ""),
-        )
-    except TunnelError as exc:
-        raise ValueError(str(exc)) from exc
-    return ok(fingerprint=trusted["fingerprint"])
-
-
-@bp.post("/api/compute/nodes/<node_id>/test")
-@api_errors
-def test_compute_node(node_id: str):
-    node = require_workspace_record("compute_nodes", node_id)
-    secret = SecretVault(current_app.config["VAULT_KEY"]).open(node.get("credential", ""), {})
-    trusted = db().get("ssh_host_keys", f"hostkey_{node_id}", workspace_id=node["workspace_id"])
-    try:
-        client = open_ssh_client(
-            node, trusted, password=secret.get("password") or None,
-            private_key=secret.get("private_key") or None,
-        )
-        try:
-            _, stdout, stderr = client.exec_command("python3 --version && uname -srm", timeout=10)
-            output = stdout.read(65_536).decode("utf-8", errors="replace").strip()
-            error = stderr.read(4096).decode("utf-8", errors="replace").strip()
-            if stdout.channel.recv_exit_status() != 0:
-                raise ConnectionError(error or "远程计算节点预检失败")
-        finally:
-            client.close()
-    except TunnelError as exc:
-        raise ConnectionError(str(exc)) from exc
-    node.update({"status": "online", "last_tested_at": utcnow(), "system": output})
-    db().put("compute_nodes", node, workspace_id=node["workspace_id"])
-    return ok(result={"status": "online", "system": output})
-
-
-@bp.delete("/api/compute/nodes/<node_id>")
-@api_errors
-def delete_compute_node(node_id: str):
-    node = require_workspace_record("compute_nodes", node_id)
-    db().archive("ssh_host_keys", f"hostkey_{node_id}", workspace_id=node["workspace_id"])
-    if not db().archive("compute_nodes", node_id, workspace_id=node["workspace_id"]):
-        raise FileNotFoundError("计算节点不存在")
-    return ok(archived=True)
+        sandbox = sandbox_client().capability()
+    except Exception as exc:
+        sandbox = {"available": False, "host_fallback": False, "error": str(exc)}
+    return ok(local=_local_compute(), sandbox=sandbox, nodes=[])

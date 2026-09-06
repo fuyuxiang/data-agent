@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "profile": "ci",
+  "status": "BLOCKED",
+  "results": [
+    {
+      "id": "python-compile",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "compileall",
+        "-q",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "app.py"
+      ],
+      "duration_seconds": 0.204,
+      "output": ""
+    },
+    {
+      "id": "ruff",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "ruff",
+        "check",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "tests",
+        "app.py"
+      ],
+      "duration_seconds": 0.036,
+      "output": "All checks passed!\n"
+    },
+    {
+      "id": "ruff-security",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "ruff",
+        "check",
+        "--select",
+        "S",
+        "backend",
+        "scripts",
+        "packaging",
+        "deploy/sandbox",
+        "app.py"
+      ],
+      "duration_seconds": 0.04,
+      "output": "All checks passed!\n"
+    },
+    {
+      "id": "pytest",
+      "status": "PASS",
+      "detail": "exit=0; 102 passed, 2 deselected in 80.34s",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "pytest",
+        "-q",
+        "-m",
+        "not database_integration",
+        "--cov=backend/agent",
+        "--cov=backend/api",
+        "--cov=backend/core",
+        "--cov=backend/services",
+        "--cov-report=term",
+        "--cov-fail-under=60"
+      ],
+      "duration_seconds": 83.967,
+      "output": "........................................................................ [ 70%]\n..............................                                           [100%]\n================================ tests coverage ================================\n______________ coverage: platform darwin, python 3.11.11-final-0 _______________\n\nName                                            Stmts   Miss  Cover\n-------------------------------------------------------------------\nbackend/agent/__init__.py                           4      0   100%\nbackend/agent/context.py                           42      0   100%\nbackend/agent/contracts.py                        130      2    98%\nbackend/agent/loop.py                             152     44    71%\nbackend/agent/model.py                            154     11    93%\nbackend/agent/store.py                            319     54    83%\nbackend/agent/tools.py                            130      4    97%\nbackend/api/__init__.py                            22      0   100%\nbackend/api/analyses.py                           287    132    54%\nbackend/api/analysis.py                            61      8    87%\nbackend/api/automation.py                         785    329    58%\nbackend/api/catalog.py                            345    103    70%\nbackend/api/common.py                              72     10    86%\nbackend/api/compat_core.py                        414    307    26%\nbackend/api/compat_legacy.py                      763    185    76%\nbackend/api/conversation.py                       144     70    51%\nbackend/api/datasource_compat.py                  422     79    81%\nbackend/api/delivery.py                           237    120    49%\nbackend/api/feishu_bot.py                         127     24    81%\nbackend/api/identity.py                           162     31    81%\nbackend/api/integration.py                        291    173    41%\nbackend/api/knowledge_compat.py                   245     63    74%\nbackend/api/lifecycle.py                          127     33    74%\nbackend/api/system_compat.py                      175    119    32%\nbackend/api/warehouse.py                          121     69    43%\nbackend/api/workspace.py                          486    249    49%\nbackend/core/__init__.py                            2      0   100%\nbackend/core/database.py                          266     38    86%\nbackend/core/instance_lock.py                      25      7    72%\nbackend/core/observability.py                      19     19     0%\nbackend/core/settings.py                           65      7    89%\nbackend/services/__init__.py                        0      0   100%\nbackend/services/advanced_agent.py                303     98    68%\nbackend/services/agent_tools.py                   743    589    21%\nbackend/services/analytics.py                     400    168    58%\nbackend/services/charts.py                        545    124    77%\nbackend/services/dashboard_refresh.py              90     36    60%\nbackend/services/data_plane/__init__.py             5      0   100%\nbackend/services/data_plane/contracts.py          113     29    74%\nbackend/services/data_plane/factory.py             26     11    58%\nbackend/services/data_plane/livy.py               152     32    79%\nbackend/services/data_plane/router.py              33     17    48%\nbackend/services/data_plane/sandbox.py            146     30    79%\nbackend/services/data_plane/sandbox_client.py      90      8    91%\nbackend/services/data_plane/trino.py              212     30    86%\nbackend/services/datasets.py                      721    255    65%\nbackend/services/embeddings.py                    204    134    34%\nbackend/services/exports.py                       282    108    62%\nbackend/services/feishu.py                        169    151    11%\nbackend/services/feishu_bot.py                    165     84    49%\nbackend/services/hooks.py                         175     70    60%\nbackend/services/jobs.py                          184     44    76%\nbackend/services/knowledge.py                     283     82    71%\nbackend/services/lifecycle.py                     223     63    72%\nbackend/services/mcp.py                           340    141    59%\nbackend/services/memory.py                        167    120    28%\nbackend/services/models.py                         68     19    72%\nbackend/services/results/__init__.py                2      0   100%\nbackend/services/results/delivery.py              196    168    14%\nbackend/services/results/manifests.py              79     19    76%\nbackend/services/results/rendering.py              80      9    89%\nbackend/services/scheduler.py                     203    143    30%\nbackend/services/security.py                      141     60    57%\nbackend/services/skills.py                        125     47    62%\nbackend/services/sql_security.py                   58     12    79%\nbackend/services/teams.py                         263     67    75%\nbackend/services/training_device.py                25     22    12%\nbackend/services/usage.py                          28      7    75%\nbackend/services/validation/__init__.py             2      0   100%\nbackend/services/validation/engine.py              54      6    89%\nbackend/services/workflows.py                     731    188    74%\nbackend/services/workspace_tools.py               157    132    16%\n-------------------------------------------------------------------\nTOTAL                                           14577   5613    61%\nRequired test coverage of 60% reached. Total coverage: 61.49%\n102 passed, 2 deselected in 80.34s (0:01:20)\n"
+    },
+    {
+      "id": "agent-core-coverage",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "-m",
+        "coverage",
+        "report",
+        "--include=backend/agent/*",
+        "--fail-under=85"
+      ],
+      "duration_seconds": 0.392,
+      "output": "Name                         Stmts   Miss  Cover\n------------------------------------------------\nbackend/agent/__init__.py        4      0   100%\nbackend/agent/context.py        42      0   100%\nbackend/agent/contracts.py     130      2    98%\nbackend/agent/loop.py          152     44    71%\nbackend/agent/model.py         154     11    93%\nbackend/agent/store.py         319     54    83%\nbackend/agent/tools.py         130      4    97%\n------------------------------------------------\nTOTAL                          931    115    88%\n"
+    },
+    {
+      "id": "database-integration",
+      "status": "BLOCKED",
+      "detail": "真实 PostgreSQL/MySQL 验证未配置：MERIDIAN_TEST_POSTGRES_URL, MERIDIAN_TEST_MYSQL_URL",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "python-dependency-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "pip-audit",
+        "-r",
+        "requirements.lock",
+        "--no-deps",
+        "--disable-pip"
+      ],
+      "duration_seconds": 1.937,
+      "output": "WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies\nWARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes\nNo known vulnerabilities found\n"
+    },
+    {
+      "id": "frontend-check",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "duration_seconds": 0.958,
+      "output": "\n> meridian-analytics-workbench@1.0.0 check\n> node scripts/check-vendor.mjs && node --check frontend/src/app.js && node --check frontend/src/api.js && node --check frontend/src/components.js && node --check frontend/src/analysis-panel.js && node --check frontend/src/panels.js\n\nVerified pinned browser dependency versions and public APIs.\n"
+    },
+    {
+      "id": "frontend-build",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "duration_seconds": 0.484,
+      "output": "\n> meridian-analytics-workbench@1.0.0 build\n> node scripts/build.mjs\n\nBuilt static frontend with 15 precompiled templates at /Users/fuyuxiang/Documents/100-主业/130-东方国信/13.代码仓库/data-agent/frontend/dist\n"
+    },
+    {
+      "id": "frontend-dependency-audit",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "npm",
+        "audit",
+        "--audit-level=high"
+      ],
+      "duration_seconds": 2.213,
+      "output": "found 0 vulnerabilities\n"
+    },
+    {
+      "id": "production-compose-config",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "docker",
+        "compose",
+        "config",
+        "-q"
+      ],
+      "duration_seconds": 0.326,
+      "output": ""
+    },
+    {
+      "id": "warehouse-compose-config",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "docker",
+        "compose",
+        "-f",
+        "deploy/warehouse/docker-compose.yml",
+        "config",
+        "-q"
+      ],
+      "duration_seconds": 0.332,
+      "output": ""
+    },
+    {
+      "id": "eval-contracts",
+      "status": "PASS",
+      "detail": "exit=0",
+      "command": [
+        "/usr/local/opt/python@3.11/bin/python3.11",
+        "scripts/validate_eval_contracts.py"
+      ],
+      "duration_seconds": 0.111,
+      "output": "{\"status\": \"PASS\", \"task_count\": 36, \"external_count\": 9, \"note\": \"仅验证评估合同结构，未把任务标为已执行\"}\n"
+    },
+    {
+      "id": "sandbox-integration",
+      "status": "BLOCKED",
+      "detail": "failed to connect to the docker API at unix:///Users/fuyuxiang/.docker/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/fuyuxiang/.docker/run/docker.sock: connect: no such file or directory",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    },
+    {
+      "id": "browser-integration",
+      "status": "PASS",
+      "detail": "exit=0; 2 passed",
+      "command": [
+        "npm",
+        "run",
+        "test:browser"
+      ],
+      "duration_seconds": 10.864,
+      "output": "\n> meridian-analytics-workbench@1.0.0 test:browser\n> npm run build && playwright test\n\n\n> meridian-analytics-workbench@1.0.0 build\n> node scripts/build.mjs\n\nBuilt static frontend with 15 precompiled templates at /Users/fuyuxiang/Documents/100-主业/130-东方国信/13.代码仓库/data-agent/frontend/dist\n\n\n\nRunning 2 tests using 1 worker\n\n[1/2] tests/browser/analysis.spec.mjs:4:1 › creates an analysis contract and manages a real indexed attachment\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n[2/2] tests/browser/analysis.spec.mjs:24:1 › opens grounded evidence and downloads a published artifact\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  2 passed (9.1s)\n[WebServer] WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.\n[WebServer]  * Running on http://127.0.0.1:5013\n[WebServer] Press CTRL+C to quit\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:28] \"GET /api/ready HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET / HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/theme.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /vendor/echarts-china.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /vendor/marked.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /vendor/vue.global.prod.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /vendor/purify.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/styles.css HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /vendor/echarts.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/renders.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/app.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/api.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/components.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/panels.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /src/analysis-panel.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/auth/me HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analysis/methods HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/commands HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/agent-profiles?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/bootstrap?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/skills?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/jobs?limit=50&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses?session_id=welcome&limit=50&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"POST /api/analyses HTTP/1.1\" 201 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/events?after=0&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"POST /api/analyses/run_d69124aa3cb64a56/attachments HTTP/1.1\" 201 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/events?after=2&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"DELETE /api/analyses/run_d69124aa3cb64a56/attachments/attachment_5efb15938f424a46 HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/events?after=3&limit=500&workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56/attachments?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:30] \"GET /api/analyses/run_d69124aa3cb64a56?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET / HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/theme.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /vendor/vue.global.prod.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/styles.css HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /vendor/echarts-china.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /vendor/marked.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /vendor/echarts.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /vendor/purify.min.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/renders.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/app.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/components.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/panels.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/api.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /src/analysis-panel.js HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/auth/me HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/commands HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/agent-profiles?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/analysis/methods HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/bootstrap?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/skills?workspace_id=default HTTP/1.1\" 200 -\n[WebServer] 127.0.0.1 - - [06/Sep/2026 19:45:31] \"GET /api/jobs?limit=50&workspace_id=default HTTP/1.1\" 200 -\n"
+    }
+  ]
+}

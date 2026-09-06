@@ -26,3 +26,7 @@
 ## pyecharts
 
 `pyecharts` 2.1.x 用于点密度地图的地名坐标解析，按 [MIT License](https://github.com/pyecharts/pyecharts/blob/master/LICENSE) 发布。其坐标库是图表定位辅助数据，不取代正式地图审核。
+
+## Playwright
+
+`@playwright/test` 仅用于真实浏览器验收，按 Apache License 2.0 发布；版本和完整性哈希由 `package-lock.json` 锁定。测试浏览器不打包进应用运行镜像。

@@ -176,6 +176,7 @@ def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: di
             "path": str(path),
             "size": path.stat().st_size,
             "metadata": metadata or {},
+            "verification_status": "unverified",
             "status": "ready",
             "created_at": utcnow(),
         },

@@ -6,9 +6,13 @@
   "scripts": {
     "dev": "python3 app.py",
     "build": "node scripts/build.mjs",
-    "check": "node scripts/check-vendor.mjs && node --check frontend/src/app.js && node --check frontend/src/api.js && node --check frontend/src/components.js && node --check frontend/src/panels.js"
+    "check": "node scripts/check-vendor.mjs && node --check frontend/src/app.js && node --check frontend/src/api.js && node --check frontend/src/components.js && node --check frontend/src/analysis-panel.js && node --check frontend/src/panels.js",
+    "test:browser": "npm run build && playwright test"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
   }
 }

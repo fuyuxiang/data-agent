@@ -147,21 +147,11 @@ EXTRA_TOOLS = [
     _function("generate_dashboard", "Create a refreshable dashboard from widget query results or SQL.", {"name": {"type": "string"}, "description": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}, "color_scheme": {"type": "string"}}, ["name", "widgets"]),
     _function("ask_user", "Ask the user for missing information; the question is surfaced as a structured event.", {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 6}, "choices": {"type": "array", "items": {"type": "string"}}, "multi_select": {"type": "boolean"}}, ["question"]),
     _function("browse_webpage", "Read bounded text from an explicitly provided public HTTP(S) page.", {"url": {"type": "string"}, "max_chars": {"type": "integer"}}, ["url"]),
-    _function("configure_hooks", "Create, replace, or merge workspace lifecycle hooks.", {"settings": {"type": "object"}, "hooks": {"type": "array", "items": {"type": "object"}}, "merge": {"type": "boolean"}, "reason": {"type": "string"}, "confirm_command_hooks": {"type": "boolean"}}),
     _function("list_feishu_bitable_tables", "List tables in a Feishu Bitable using configured application credentials.", {"bitable": {"type": "string"}}, ["bitable"]),
     _function("load_feishu_bitable", "Load a bounded Feishu Bitable snapshot as an analyzable source.", {"bitable": {"type": "string"}, "table_id": {"type": "string"}, "source_name": {"type": "string"}, "max_records": {"type": "integer"}}, ["bitable"]),
-    _function("create_feishu_bitable", "Create a Feishu Bitable after explicit external-write confirmation.", {"name": {"type": "string"}, "table_name": {"type": "string"}, "fields": {"type": "array", "items": {"type": "string"}}, "records": {"type": "array", "items": {"type": "object"}}, "folder_token": {"type": "string"}, "confirm": {"type": "boolean"}}, ["name", "table_name", "fields", "confirm"]),
-    _function("append_feishu_bitable_records", "Append exact records after explicit external-write confirmation.", {"bitable": {"type": "string"}, "table_id": {"type": "string"}, "records": {"type": "array", "items": {"type": "object"}}, "confirm": {"type": "boolean"}}, ["bitable", "table_id", "records", "confirm"]),
-    _function("update_feishu_bitable_record", "Update one exact record after explicit external-write confirmation.", {"bitable": {"type": "string"}, "table_id": {"type": "string"}, "record_id": {"type": "string"}, "fields": {"type": "object"}, "confirm": {"type": "boolean"}}, ["bitable", "table_id", "record_id", "fields", "confirm"]),
     _function("workspace_glob", "Page through safe workspace file metadata.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "max_results": {"type": "integer"}, "cursor": {"type": "integer"}}, ["pattern"]),
     _function("workspace_grep", "Regex-search bounded UTF-8 workspace text files.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}, "max_results": {"type": "integer"}}, ["pattern"]),
     _function("workspace_read_file", "Read a bounded workspace text, document, PDF, or spreadsheet file.", {"file_path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "sheet_name": {"type": "string"}}, ["file_path"]),
-    _function("workspace_write_file", "Write UTF-8 content under outputs or a mounted user workspace.", {"file_path": {"type": "string"}, "content": {"type": "string"}}, ["file_path", "content"]),
-    _function("workspace_edit_file", "Replace one unique string in a previously read file.", {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, ["file_path", "old_string", "new_string"]),
-    _function("workspace_delete_file", "Delete exactly one writable file after explicit confirmation.", {"file_path": {"type": "string"}, "confirm": {"type": "boolean"}}, ["file_path", "confirm"]),
-    _function("workspace_move_file", "Move one file within writable workspace roots.", {"source_path": {"type": "string"}, "destination_path": {"type": "string"}, "confirm_overwrite": {"type": "boolean"}}, ["source_path", "destination_path"]),
-    _function("workspace_command", "Run a fixed shell-free workspace operation.", {"operation": {"type": "string", "enum": ["checksum", "json_validate", "git_status", "git_diff", "git_log", "python_compile"]}, "path": {"type": "string"}, "timeout": {"type": "integer"}}, ["operation"]),
-    _function("workspace_bash", "Run a restricted shell-free command whitelist.", {"command": {"type": "string"}, "timeout": {"type": "integer"}, "confirm": {"type": "boolean"}}, ["command"]),
     _function("structured_output", "Validate and return machine-readable output.", {"output": {}, "required_fields": {"type": "array", "items": {"type": "string"}}}, ["output"]),
     _function("load_analysis_skill", "Load a named analysis Skill SOP.", {"name": {"type": "string"}}, ["name"]),
     _function("task_create", "Create a persistent workspace task.", {"title": {"type": "string"}, "description": {"type": "string"}, "assignee": {"type": "string"}, "blocks": {"type": "array", "items": {"type": "string"}}, "blocked_by": {"type": "array", "items": {"type": "string"}}}, ["title"]),
@@ -183,38 +173,6 @@ EXTRA_TOOLS = [
     _function("workflow_status", "Get durable workflow run status and events.", {"run_id": {"type": "string"}}, ["run_id"]),
     _function("read_tool_result", "Read or search a recoverable oversized tool result.", {"artifact_id": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "query": {"type": "string"}}, ["artifact_id"]),
     _function("plan_complete", "Return a completed coordinator plan.", {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}}, ["summary", "steps"]),
-    _function(
-        "display_diagram",
-        "Display a validated draw.io diagram. Prefer template_id + content for known business frameworks.",
-        {
-            "xml": {"type": "string"}, "title": {"type": "string"},
-            "template_id": {
-                "type": "string",
-                "enum": ["business_model_canvas", "bcg_matrix", "swot_analysis", "value_proposition"],
-            },
-            "content": {"type": "object", "additionalProperties": {"type": "string"}},
-            "project_id": {"type": "string"},
-        },
-    ),
-    _function(
-        "edit_diagram", "Edit draw.io cells by stable cell id after calling get_diagram.",
-        {
-            "project_id": {"type": "string"},
-            "operations": {
-                "type": "array", "items": {
-                    "type": "object", "properties": {
-                        "operation": {"type": "string", "enum": ["update", "add", "delete"]},
-                        "cell_id": {"type": "string"}, "new_xml": {"type": "string"},
-                    }, "required": ["operation", "cell_id"],
-                },
-            },
-        }, ["project_id", "operations"],
-    ),
-    _function("get_diagram", "Read current draw.io XML before editing it.", {"project_id": {"type": "string"}}, ["project_id"]),
-    _function(
-        "get_shape_library", "Read exact draw.io shape syntax instead of guessing it.",
-        {"library": {"type": "string"}}, ["library"],
-    ),
 ]
 
 DEFAULT_EXTRA_TOOL_NAMES = frozenset({
@@ -223,9 +181,9 @@ DEFAULT_EXTRA_TOOL_NAMES = frozenset({
     "generate_ppt", "set_ppt_color_scheme", "propose_dashboard_outline",
     "generate_dashboard", "ask_user", "browse_webpage", "list_feishu_bitable_tables",
     "load_feishu_bitable", "workspace_glob", "workspace_grep", "workspace_read_file",
-    "workspace_command", "structured_output", "load_analysis_skill", "task_get", "task_list",
+    "structured_output", "load_analysis_skill", "task_get", "task_list",
     "team_list", "team_status", "workflow_list", "workflow_status", "read_tool_result",
-    "plan_complete", "display_diagram", "get_diagram", "get_shape_library",
+    "plan_complete",
 })
 
 
@@ -244,9 +202,10 @@ class AgentToolContext:
     read_paths: set[str] = field(default_factory=set)
     ppt_color_scheme: dict = field(default_factory=dict)
     outlines: list[dict] = field(default_factory=list)
-    diagram_ids: list[str] = field(default_factory=list)
     dashboard_ids: list[str] = field(default_factory=list)
     tool_result_ids: list[str] = field(default_factory=list)
+    knowledge_document_ids: list[str] | None = None
+    actor_id: str = ""
 
     def sources(self) -> list[dict]:
         sources = [self.database.get("sources", source_id) for source_id in self.source_ids]
@@ -276,8 +235,6 @@ def _mcp_function_name(server_id: str, tool_name: str, used: set[str]) -> str:
 
 
 def _agent_policy(context: AgentToolContext) -> tuple[bool, bool]:
-    if current_app.config.get("TESTING"):
-        return True, True
     session = context.database.get("sessions", context.session_id) or {}
     return bool(session.get("agent_allow_mutations")), bool(session.get("agent_allow_mcp"))
 
@@ -508,7 +465,10 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         raise PermissionError(f"会话策略未授权 Agent 调用工具：{name}")
     events: list[tuple[str, dict]] = []
     if name == "query_knowledge":
-        rows = search_knowledge(str(args.get("question") or ""), context.workspace_id, int(args.get("limit", 5)))
+        rows = search_knowledge(
+            str(args.get("question") or ""), context.workspace_id, int(args.get("limit", 5)),
+            context.knowledge_document_ids,
+        )
         context.knowledge_references.extend(
             {"document_id": item["document_id"], "chunk": item["chunk"]} for item in rows
         )
@@ -678,6 +638,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
                 "id": context.database.new_id("chart"), "workspace_id": context.workspace_id,
                 "name": spec["title"], "spec": spec, "result_id": result_id or None,
                 "session_id": context.session_id,
+                "actor_id": context.actor_id,
             },
             workspace_id=context.workspace_id,
         )
@@ -719,6 +680,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             "items": search_memories(
                 query, context.workspace_id,
                 max(1, min(int(args.get("limit", 12)), 20)),
+                context.actor_id,
             ),
         }, events
     if name == "search_mcp_tools":
@@ -899,54 +861,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             text = re.sub(r"\s+", " ", text)
         limit = max(100, min(int(args.get("max_chars", 12000)), 20000))
         return {"url": response.url, "status": response.status_code, "content": text[:limit]}, events
-    if name == "configure_hooks":
-        settings = args.get("settings")
-        if settings is not None and not isinstance(settings, dict):
-            raise ValueError("settings 必须是对象")
-        hooks = (settings or {}).get("hooks") if settings is not None else args.get("hooks")
-        if not isinstance(hooks, list) or not hooks or len(hooks) > 20:
-            raise ValueError("settings.hooks/hooks 需要 1–20 个配置")
-        merge = bool(args.get("merge", True))
-        current_hooks = context.database.list("hooks", workspace_id=context.workspace_id, limit=5000)
-        current_by_id = {str(item["id"]): item for item in current_hooks}
-        if not merge:
-            for item in current_hooks:
-                context.database.archive("hooks", item["id"], workspace_id=context.workspace_id)
-        created = []
-        for value in hooks:
-            if not isinstance(value, dict) or not value.get("event") or not isinstance(value.get("action"), dict):
-                raise ValueError("Hook 需要 event 和 action")
-            action = dict(value["action"])
-            if str(action.get("type") or "").lower() == "command" and args.get("confirm_command_hooks") is not True:
-                raise PermissionError("命令 Hook 需要 confirm_command_hooks=true，且运行时仍受管理员允许列表限制")
-            requested_id = str(value.get("id") or "").strip()[:128]
-            previous = current_by_id.get(requested_id, {}) if merge and requested_id else {}
-            created.append(context.database.put(
-                "hooks",
-                {
-                    **previous,
-                    "id": requested_id or context.database.new_id("hook"), "workspace_id": context.workspace_id,
-                    "name": str(value.get("name") or value["event"])[:100],
-                    "event": str(value["event"])[:100], "condition": value.get("condition", {}),
-                    "action": action,
-                    "enabled": bool((settings or {}).get("enabled", True) and value.get("enabled", True)),
-                    "once": bool(value.get("once", False)), "once_scope": value.get("once_scope", "session"),
-                    "run_count": int(previous.get("run_count", 0)),
-                    "execution_keys": list(previous.get("execution_keys") or []),
-                },
-                workspace_id=context.workspace_id,
-            ))
-        return {
-            "items": created, "merge": merge, "hook_count": len(created),
-            "hook_ids": [item["id"] for item in created],
-            "reason": str(args.get("reason") or "")[:500],
-            "command_hooks_enabled": any(item["action"].get("type") == "command" for item in created),
-        }, events
-    if name in {
-        "list_feishu_bitable_tables", "load_feishu_bitable", "create_feishu_bitable",
-        "append_feishu_bitable_records", "update_feishu_bitable_record",
-    }:
-        from .feishu import append_records, create_bitable, list_tables, read_records, update_record
+    if name in {"list_feishu_bitable_tables", "load_feishu_bitable"}:
+        from .feishu import list_tables, read_records
 
         credentials = _feishu_credentials(context)
         if name == "list_feishu_bitable_tables":
@@ -972,29 +888,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             }) or source
             context.source_ids.append(source["id"])
             return {"source": _public_record(source), **{key: loaded[key] for key in ("url", "record_count", "limited")}}, events
-        if args.get("confirm") is not True:
-            raise PermissionError("飞书外部写入需要 confirm=true")
-        if name == "create_feishu_bitable":
-            result = create_bitable(
-                credentials, name=str(args.get("name") or ""), table_name=str(args.get("table_name") or ""),
-                fields=args.get("fields") or [], records=args.get("records") or [],
-                folder_token=str(args.get("folder_token") or ""),
-            )
-        elif name == "append_feishu_bitable_records":
-            result = append_records(
-                credentials, args.get("bitable"), args.get("table_id"), args.get("records") or [],
-            )
-        else:
-            result = update_record(
-                credentials, args.get("bitable"), args.get("table_id"),
-                args.get("record_id"), args.get("fields"),
-            )
-        context.database.audit(
-            f"agent.{name}", workspace_id=context.workspace_id,
-            object_type="external_write", object_id=str(result.get("table_id") or result.get("app_token") or ""),
-            detail={key: value for key, value in result.items() if key not in {"records"}},
-        )
-        return result, events
     if name.startswith("workspace_"):
         files = WorkspaceFiles(context.database, context.workspace_id, context.read_paths, context.session_id)
         if name == "workspace_glob":
@@ -1003,18 +896,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             return files.grep(args.get("pattern", ""), args.get("path", ""), args.get("include", "**/*"), args.get("max_results", 50)), events
         if name == "workspace_read_file":
             return files.read(args["file_path"], offset=args.get("offset", 0), limit=args.get("limit", 400), sheet_name=args.get("sheet_name", "")), events
-        if name == "workspace_write_file":
-            return files.write(args["file_path"], args.get("content", "")), events
-        if name == "workspace_edit_file":
-            return files.edit(args["file_path"], args.get("old_string", ""), args.get("new_string", "")), events
-        if name == "workspace_delete_file":
-            return files.delete(args["file_path"], args.get("confirm") is True), events
-        if name == "workspace_move_file":
-            return files.move(args["source_path"], args["destination_path"], args.get("confirm_overwrite") is True), events
-        if name == "workspace_command":
-            return files.command(args["operation"], args.get("path", ""), args.get("timeout", 30)), events
-        if name == "workspace_bash":
-            return files.bash(args["command"], timeout=args.get("timeout", 30), confirm=args.get("confirm") is True), events
     if name == "structured_output":
         output = args.get("output")
         missing = [field for field in args.get("required_fields") or [] if not isinstance(output, dict) or field not in output]
@@ -1107,7 +988,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             return delegate_once(
                 team=None, member=None, prompt=str(args.get("prompt") or ""),
                 description=str(args.get("description") or ""), workspace_id=context.workspace_id,
-                source_ids=context.source_ids, session_id=context.session_id,
+                source_ids=context.source_ids, session_id=context.session_id, actor_id=context.actor_id,
             ), events
         team = next((item for item in teams if item.get("name") == args.get("team_name") or item.get("name") == args.get("name")), None)
         if not team:
@@ -1155,7 +1036,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             return delegate_once(
                 team=team, member=member or team["members"][0], prompt=str(args.get("prompt") or ""),
                 description=str(args.get("description") or ""), workspace_id=context.workspace_id,
-                source_ids=context.source_ids, session_id=context.session_id,
+                source_ids=context.source_ids, session_id=context.session_id, actor_id=context.actor_id,
             ), events
         if name == "team_plan_create":
             return create_team_plan(team, {
@@ -1167,6 +1048,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             plan, run, job = start_team_plan(team, plan, {
                 "source_ids": args.get("source_ids") or context.source_ids,
                 "session_id": context.session_id,
+                "actor_id": context.actor_id,
                 "timeout_seconds": args.get("timeout_seconds"),
                 "max_concurrency": args.get("max_concurrency"),
                 "result_max_tokens": args.get("result_max_tokens"),
@@ -1207,6 +1089,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             "task": args.get("goal"), "assignments": args.get("assignments"),
             "source_ids": args.get("source_ids") or context.source_ids,
             "session_id": context.session_id,
+            "actor_id": context.actor_id,
             "timeout_seconds": args.get("timeout_seconds"),
             "max_concurrency": args.get("max_concurrency"),
             "result_max_tokens": args.get("result_max_tokens"),
@@ -1286,7 +1169,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             raise ValueError("工作流尚未发布")
         run = start_workflow(
             {**workflow, "definition": workflow.get("published_definition") or workflow["definition"]},
-            args.get("inputs") or {},
+            args.get("inputs") or {}, actor_id=context.actor_id,
         )
         return {"run": run}, events
     if name == "read_tool_result":
@@ -1315,43 +1198,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         }, events
     if name == "plan_complete":
         return {"status": "completed", "summary": str(args.get("summary") or ""), "steps": args.get("steps") or []}, events
-    if name in {"display_diagram", "edit_diagram", "get_diagram", "get_shape_library"}:
-        from . import business_canvas
-
-        if name == "get_shape_library":
-            return {"ok": True, **business_canvas.get_shape_library(str(args.get("library") or ""))}, events
-        if name == "get_diagram":
-            project_id = str(args.get("project_id") or args.get("diagram_id") or "")
-            item = business_canvas.get_project(context.database, project_id, context.workspace_id)
-            return {
-                "ok": True, "project_id": project_id, "xml": item.get("diagram_xml", ""),
-                "template_id": item.get("template_id", ""),
-            }, events
-        if name == "edit_diagram":
-            result = business_canvas.edit_diagram(
-                context.database,
-                str(args.get("project_id") or args.get("diagram_id") or ""),
-                context.workspace_id,
-                args.get("operations") or [],
-            )
-            item = result["project"]
-        else:
-            result = business_canvas.display_diagram(
-                context.database, workspace_id=context.workspace_id, session_id=context.session_id,
-                title=str(args.get("title") or args.get("name") or "Diagram"),
-                template_id=str(args.get("template_id") or ""),
-                content=args.get("content") if isinstance(args.get("content"), dict) else None,
-                xml=str(args.get("xml") or ""),
-                project_id=str(args.get("project_id") or ""),
-            )
-            item = result["project"]
-        events.append(("diagram", {
-            "id": item["id"], "project_id": item["id"], "name": item["title"],
-            "title": item["title"], "template_id": item["template_id"],
-        }))
-        if item["id"] not in context.diagram_ids:
-            context.diagram_ids.append(item["id"])
-        return {"ok": True, **result}, events
     if name in context.mcp_names:
         server_id, raw_name = context.mcp_names[name]
         server = context.database.get("mcp_servers", server_id)

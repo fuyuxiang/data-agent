@@ -91,6 +91,215 @@ class Database:
             description TEXT NOT NULL,
             applied_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            idempotency_key TEXT,
+            parent_run_id TEXT,
+            run_kind TEXT NOT NULL DEFAULT 'analysis',
+            execution_status TEXT NOT NULL,
+            outcome TEXT NOT NULL DEFAULT 'unknown',
+            quality_status TEXT NOT NULL DEFAULT 'not_evaluated',
+            stop_reason TEXT,
+            contract_version INTEGER NOT NULL DEFAULT 0,
+            plan_version INTEGER NOT NULL DEFAULT 0,
+            policy_version TEXT NOT NULL,
+            source_scope TEXT NOT NULL DEFAULT '[]',
+            allowed_tool_ids TEXT NOT NULL DEFAULT '[]',
+            provider_id TEXT,
+            skill_id TEXT,
+            budget TEXT NOT NULL DEFAULT '{}',
+            usage TEXT NOT NULL DEFAULT '{}',
+            lease_owner TEXT,
+            lease_epoch INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at TEXT,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(parent_run_id) REFERENCES agent_runs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_updated
+            ON agent_runs(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_session_updated
+            ON agent_runs(session_id, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency
+            ON agent_runs(workspace_id, actor_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS task_contract_revisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            confirmed_by TEXT,
+            confirmed_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, version),
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS plan_revisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, version),
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS agent_decisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            model_protocol TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            finish_reason TEXT,
+            content TEXT,
+            tool_calls TEXT NOT NULL DEFAULT '[]',
+            usage TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, sequence),
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS agent_actions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            logical_action_id TEXT NOT NULL,
+            tool_id TEXT NOT NULL,
+            arguments TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_code TEXT,
+            result TEXT,
+            external_job_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(run_id, logical_action_id),
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(decision_id) REFERENCES agent_decisions(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS action_attempts (
+            id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            lease_epoch INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT,
+            error_code TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            UNIQUE(action_id, attempt_number),
+            FOREIGN KEY(action_id) REFERENCES agent_actions(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS run_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence
+            ON run_events(run_id, sequence);
+        CREATE TABLE IF NOT EXISTS budget_reservations (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            action_id TEXT,
+            kind TEXT NOT NULL,
+            amount REAL NOT NULL,
+            unit TEXT NOT NULL,
+            status TEXT NOT NULL,
+            actual REAL,
+            created_at TEXT NOT NULL,
+            settled_at TEXT,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS typed_jobs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT,
+            job_type TEXT NOT NULL,
+            spec TEXT NOT NULL,
+            spec_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT,
+            error_code TEXT,
+            external_job_id TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_epoch INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_typed_jobs_status_created
+            ON typed_jobs(status, created_at);
+        CREATE TABLE IF NOT EXISTS dataset_refs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS validation_results (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            rule_version TEXT NOT NULL,
+            subject_ref TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS result_manifests (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, version),
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS claims (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            manifest_id TEXT NOT NULL,
+            claim_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(manifest_id) REFERENCES result_manifests(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS publications (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            manifest_id TEXT NOT NULL,
+            contract_version INTEGER NOT NULL,
+            policy_version TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(manifest_id) REFERENCES result_manifests(id)
+        );
         """
         with self.transaction() as connection:
             connection.executescript(schema)
@@ -118,6 +327,10 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(2,?,?)",
                 ("scope messages to their owning workspace", utcnow()),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(3,?,?)",
+                ("durable governed agent runs, actions, jobs, evidence and publications", utcnow()),
             )
         self._seed()
 
@@ -300,6 +513,31 @@ class Database:
                 value["archived_at"] = row["archived_at"]
             result.append(value)
         return result
+
+    def page(
+        self, collection: str, *, workspace_id: str, limit: int = 100,
+        cursor: str = "", search: str = "", category: str = "",
+    ) -> dict[str, Any]:
+        size = max(1, min(int(limit), 500))
+        where = ["collection=?", "workspace_id=?", "archived_at IS NULL"]
+        args: list[Any] = [collection, workspace_id]
+        if cursor:
+            where.append("id>?")
+            args.append(cursor)
+        if search:
+            where.append("lower(payload) LIKE ?")
+            args.append(f"%{str(search).lower()[:200]}%")
+        if category:
+            where.append("COALESCE(json_extract(payload,'$.category'),'')=?")
+            args.append(str(category)[:100])
+        args.append(size + 1)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT id,payload FROM records WHERE {' AND '.join(where)} ORDER BY id LIMIT ?",  # noqa: S608
+                args,
+            ).fetchall()
+        items = [json.loads(row["payload"]) for row in rows[:size]]
+        return {"items": items, "next_cursor": rows[size - 1]["id"] if len(rows) > size else None}
 
     def patch(
         self, collection: str, record_id: str, changes: dict[str, Any], *,

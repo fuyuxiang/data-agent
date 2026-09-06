@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+from backend.agent.contracts import TaskContract
+from backend.agent.store import RunStore
 from backend.services import workflows
 
 
@@ -22,10 +24,24 @@ def test_independent_workflow_nodes_run_in_parallel_with_manifests_lineage_and_f
              "config": {"prompt": "query"}, "output_contract": ["metric_sql"]},
         ],
     }
+    store = RunStore(database)
+    parent, _ = store.create_run(
+        workspace_id="default", session_id=session["id"], actor_id="local-default",
+        source_scope=[], allowed_tool_ids=["workflow_step", "validate_result"], run_kind="workflow",
+    )
+    store.add_contract(parent["id"], TaskContract.from_payload({
+        "objective": "验证并行工作流", "coverage": "测试定义",
+        "dimensions": ["报告", "SQL"], "deliverables": ["manifest"], "source_scope": [],
+    }), expected_version=0, confirmed_by="local-default")
+    store.add_plan(parent["id"], {"tasks": [
+        {"id": "report", "title": "报告", "status": "open", "depends_on": []},
+        {"id": "query", "title": "SQL", "status": "open", "depends_on": []},
+    ]}, reason="test", expected_version=0)
     run = database.put(
         "workflow_runs",
         {
             "id": "run_parallel", "workspace_id": "default", "workflow_id": workflow["id"],
+            "actor_id": "local-default", "agent_run_id": parent["id"],
             "workflow_version": 1, "workflow_version_id": "wfver_parallel",
             "definition_snapshot": definition, "status": "queued", "inputs": {"session_id": session["id"]},
             "outputs": {}, "step_states": {
@@ -49,8 +65,11 @@ def test_independent_workflow_nodes_run_in_parallel_with_manifests_lineage_and_f
         with lock:
             active -= 1
         if step["id"] == "report":
-            return {"report": "经营结论：收入稳定增长"}
-        return {"metric_sql": {"sql": "SELECT SUM(revenue) FROM data"}, "sql": "SELECT SUM(revenue) FROM data"}
+            return {"report": "经营结论：收入稳定增长", "publication_id": "publication-report"}
+        return {
+            "metric_sql": {"sql": "SELECT SUM(revenue) FROM data"},
+            "sql": "SELECT SUM(revenue) FROM data", "publication_id": "publication-query",
+        }
 
     monkeypatch.setattr(workflows, "_execute_step", fake_step)
     with app.app_context():

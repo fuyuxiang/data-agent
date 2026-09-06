@@ -137,8 +137,8 @@ def put_skill(name: str):
     from ..services.skills import get_skill, public_skill
 
     current = get_skill(name, workspace_id())
-    if current and current.get("builtin"):
-        raise PermissionError("不能修改内置 Skill")
+    if current and current.get("source") != "database":
+        raise PermissionError("文件型或内置 Skill 不能通过兼容 API 修改")
     if not current:
         raise FileNotFoundError("Skill not found")
     payload = body()
@@ -149,14 +149,24 @@ def put_skill(name: str):
         raise ValueError("Invalid name format")
     if not description or not prompt:
         raise ValueError("Description and prompt required")
+    version = int(current.get("version") or 1) + 1
     updated = db().patch(
         "skills", current["id"],
         {
             "name": new_name, "slug": new_name, "description": description[:240],
             "instruction": prompt[:50000], "allowed_tools": payload.get("allowed_tools", []),
-            "icon": str(payload.get("icon") or "custom"),
+            "icon": str(payload.get("icon") or "custom"), "version": version,
+            "status": "candidate", "approved_by": None, "approval_at": None,
+            "published_at": None, "latest_evaluation_id": None,
+            "latest_evaluation_status": None,
         },
+        workspace_id=current["workspace_id"],
     )
+    db().put("skill_versions", {
+        "id": db().new_id("skillver"), "workspace_id": current["workspace_id"],
+        "skill_id": current["id"], "version": version, "payload": updated,
+        "status": "candidate", "created_by": current_user_id(),
+    }, workspace_id=current["workspace_id"])
     return jsonify({"ok": True, "name": new_name, "skill": public_skill(updated or current, include_prompt=True)})
 
 
@@ -236,7 +246,7 @@ def test_hooks_compat():
     hooks = settings.get("hooks") or []
     side_effects = [
         str(item.get("id") or "") for item in hooks
-        if (item.get("action") or {}).get("type") in {"http", "webhook", "command", "workflow", "connector"}
+        if (item.get("action") or {}).get("type") in {"http", "webhook", "workflow", "connector"}
     ]
     if side_effects:
         return jsonify({
@@ -267,7 +277,7 @@ def hooks_metadata():
     return jsonify({
         "ok": True, "events": sorted(SUPPORTED_EVENTS), "dispatched_events": sorted(SUPPORTED_EVENTS),
         "aliases": aliases, "accepted_event_names": sorted(set(SUPPORTED_EVENTS) | set(aliases)),
-        "actions": ["prompt", "http", "command", "workflow", "connector"],
+        "actions": ["prompt", "http", "workflow", "connector"],
         "once_scopes": ["turn", "session", "global"],
         "variables": [
             "$EVENT", "$SESSION_ID", "$TURN_ID", "$TOOL_NAME", "$TOOL_ARGS.sql",

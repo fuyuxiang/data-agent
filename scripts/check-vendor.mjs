@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+
+const vendorRoot = new URL('../frontend/vendor/', import.meta.url);
+const checksumLines = (await readFile(new URL('SHA256SUMS', vendorRoot), 'utf8'))
+  .trim()
+  .split(/\r?\n/);
+for (const line of checksumLines) {
+  const match = line.match(/^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$/);
+  assert.ok(match, `Invalid SHA256SUMS line: ${line}`);
+  const [, expected, filename] = match;
+  const bytes = await readFile(new URL(filename, vendorRoot));
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected, `${filename} checksum`);
+}
 
 const load = async (filename) => {
   const sandbox = {};

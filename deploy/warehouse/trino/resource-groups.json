@@ -1,0 +1,12 @@
+{
+  "rootGroups": [
+    {
+      "name": "meridian",
+      "softMemoryLimit": "70%",
+      "hardConcurrencyLimit": 4,
+      "maxQueued": 20,
+      "schedulingPolicy": "fair"
+    }
+  ],
+  "selectors": [{"user": ".*", "group": "meridian"}]
+}

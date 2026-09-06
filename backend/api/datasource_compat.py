@@ -18,7 +18,7 @@ from ..services.datasets import (
     register_http,
     register_upload,
 )
-from ..services.jobs import get_job_manager
+from ..services.jobs import get_job_manager, register_job_handler
 from ..services.security import SecretVault
 from .common import api_errors, body, db, require_workspace_record, workspace_id
 
@@ -201,19 +201,13 @@ def upload(sid: str):
         try:
             if suffix != ".csv" and pending_path.stat().st_size > threshold:
                 app = current_app._get_current_object()
-
-                def work(progress, cancel, path=pending_path, original=filename, wid=session["workspace_id"]):
-                    progress(5, "正在准备 Excel 解析")
-                    if cancel.is_set():
-                        return {"cancelled": True}
-                    source = _upload_one(path, original, wid)
-                    progress(95, "Excel 已解析，等待挂载")
-                    path.unlink(missing_ok=True)
-                    return {"source_id": source["id"], "source": public_source(source)}
-
-                job = get_job_manager(app).submit(
+                job = get_job_manager(app).submit_spec(
                     workspace_id=session["workspace_id"], session_id=sid,
-                    kind="excel_parse", title=filename, work=work,
+                    job_type="excel_parse", title=filename,
+                    spec={
+                        "path": str(pending_path), "original": filename,
+                        "workspace_id": session["workspace_id"],
+                    },
                 )
                 pending.append({"id": job["id"], "type": "excel_parse", "source_name": filename, "status": "queued"})
                 continue
@@ -618,3 +612,21 @@ def cancel_session_job(sid: str, jid: str):
         return jsonify({"error": "cannot cancel terminal job", "id": jid, "status": _compat_job(item)["status"]}), 409
     accepted = get_job_manager(current_app._get_current_object()).cancel(jid)
     return jsonify({"id": jid, "accepted": accepted, "status": "canceling" if accepted else _compat_job(item)["status"]})
+
+
+def _excel_parse_job_handler(app, spec, progress, cancel):
+    upload_root = app.config["SETTINGS"].upload_dir.resolve()
+    path = Path(str(spec.get("path") or "")).resolve()
+    if path.parent != upload_root or not path.name.startswith("pending_"):
+        raise PermissionError("Excel 解析任务路径超出受控上传目录")
+    progress(5, "正在准备 Excel 解析")
+    if cancel.is_set():
+        path.unlink(missing_ok=True)
+        return {"cancelled": True}
+    source = _upload_one(path, str(spec.get("original") or path.name), str(spec["workspace_id"]))
+    progress(95, "Excel 已解析，等待挂载")
+    path.unlink(missing_ok=True)
+    return {"source_id": source["id"], "source": public_source(source)}
+
+
+register_job_handler("excel_parse", _excel_parse_job_handler)

@@ -19,7 +19,10 @@ from ..services.datasets import (
 )
 from ..services.knowledge import add_document, public_document, save_entry, search
 from ..services.skills import get_skill, load_skills, public_skill, read_skill_resource
-from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
+from .common import (
+    api_errors, body, current_user_id, db, ok, require_workspace_access,
+    require_workspace_record, workspace_id,
+)
 
 
 bp = Blueprint("catalog", __name__)
@@ -27,7 +30,12 @@ bp = Blueprint("catalog", __name__)
 
 @bp.get("/api/sources")
 def list_sources():
-    return ok(items=[public_source(item) for item in db().list("sources", workspace_id=workspace_id())])
+    page = db().page(
+        "sources", workspace_id=workspace_id(), limit=int(request.args.get("limit", 100)),
+        cursor=str(request.args.get("cursor") or ""), search=str(request.args.get("q") or ""),
+        category=str(request.args.get("category") or ""),
+    )
+    return ok(items=[public_source(item) for item in page["items"]], next_cursor=page["next_cursor"])
 
 
 @bp.get("/api/source-sets")
@@ -345,6 +353,11 @@ def list_skills():
     names = {item.get("id") for item in loaded}
     compatibility = [item for item in DEFAULT_SKILLS if item["id"] not in names]
     items = [public_skill(item) for item in loaded] + compatibility
+    known = {str(item.get("id")) for item in items}
+    items.extend(
+        public_skill(item) for item in db().list("skills", workspace_id=wid, limit=5000)
+        if str(item.get("id")) not in known
+    )
     return ok(items=items, skills=items, diagnostics=diagnostics)
 
 
@@ -389,10 +402,15 @@ def create_skill():
             "instruction": str(instruction)[:50000], "input_schema": payload.get("input_schema", {}),
             "slug": str(payload.get("slug") or payload["name"])[:100],
             "allowed_tools": payload.get("allowed_tools", []), "resources": payload.get("resources", []),
-            "enabled": bool(payload.get("enabled", True)),
+            "enabled": True, "status": "candidate", "version": 1,
+            "created_by": current_user_id(), "approved_by": None,
         },
         workspace_id=wid,
     )
+    db().put("skill_versions", {
+        "id": db().new_id("skillver"), "workspace_id": wid, "skill_id": item["id"],
+        "version": 1, "payload": item, "status": "candidate", "created_by": current_user_id(),
+    }, workspace_id=wid)
     return ok(item=item), 201
 
 
@@ -401,8 +419,129 @@ def create_skill():
 def update_skill(skill_id: str):
     if skill_id in {item["id"] for item in DEFAULT_SKILLS}:
         raise ValueError("内置技能不能修改")
-    require_workspace_record("skills", skill_id)
-    return ok(item=db().patch("skills", skill_id, body()))
+    current = require_workspace_record("skills", skill_id)
+    payload = body()
+    allowed = {
+        key: payload[key] for key in (
+            "name", "description", "instruction", "input_schema", "slug", "allowed_tools", "resources",
+        ) if key in payload
+    }
+    version = int(current.get("version") or 1) + 1
+    item = db().patch("skills", skill_id, {
+        **allowed, "version": version, "status": "candidate", "approved_by": None,
+        "approval_at": None, "published_at": None,
+    }, workspace_id=current["workspace_id"])
+    db().put("skill_versions", {
+        "id": db().new_id("skillver"), "workspace_id": current["workspace_id"],
+        "skill_id": skill_id, "version": version, "payload": item,
+        "status": "candidate", "created_by": current_user_id(),
+    }, workspace_id=current["workspace_id"])
+    return ok(item=item)
+
+
+@bp.post("/api/skills/<skill_id>/evaluate")
+@api_errors
+def evaluate_skill(skill_id: str):
+    skill = require_workspace_record("skills", skill_id)
+    cases = body().get("cases")
+    if not isinstance(cases, list) or not 1 <= len(cases) <= 50:
+        raise ValueError("Skill 评估需要 1–50 个确定性用例")
+    from ..services.advanced_agent import FORMAL_AGENT_TOOLS
+
+    allowed = set(str(value) for value in skill.get("allowed_tools") or [])
+    issues = []
+    results = []
+    for index, case in enumerate(cases, 1):
+        if not isinstance(case, dict) or not str(case.get("input") or "").strip():
+            issues.append(f"第 {index} 个用例缺少 input")
+            continue
+        required = set(str(value) for value in case.get("required_tools") or [])
+        forbidden = set(str(value) for value in case.get("forbidden_tools") or [])
+        unknown = required - FORMAL_AGENT_TOOLS
+        missing = required - allowed if allowed else set()
+        conflict = forbidden & allowed
+        passed = not (unknown or missing or conflict)
+        results.append({
+            "index": index, "passed": passed, "required_tools": sorted(required),
+            "unknown_tools": sorted(unknown), "missing_allowed_tools": sorted(missing),
+            "forbidden_exposed_tools": sorted(conflict),
+        })
+        if not passed:
+            issues.append(f"第 {index} 个用例的工具权限合同失败")
+    if not str(skill.get("instruction") or "").strip():
+        issues.append("Skill 指令为空")
+    status = "PASS" if len(results) == len(cases) and not issues else "FAIL"
+    evaluation = db().put("skill_evaluations", {
+        "id": db().new_id("skilleval"), "workspace_id": skill["workspace_id"],
+        "skill_id": skill_id, "skill_version": int(skill.get("version") or 1),
+        "status": status, "results": results, "issues": issues, "evaluated_by": current_user_id(),
+    }, workspace_id=skill["workspace_id"])
+    db().patch("skills", skill_id, {
+        "status": "tested" if status == "PASS" else "candidate",
+        "latest_evaluation_id": evaluation["id"], "latest_evaluation_status": status,
+    }, workspace_id=skill["workspace_id"])
+    return ok(item=evaluation)
+
+
+@bp.post("/api/skills/<skill_id>/publish")
+@api_errors
+def publish_skill(skill_id: str):
+    skill = require_workspace_record("skills", skill_id)
+    require_workspace_access(skill["workspace_id"], owner=True)
+    evaluation = db().get(
+        "skill_evaluations", str(skill.get("latest_evaluation_id") or ""),
+        workspace_id=skill["workspace_id"],
+    )
+    if not evaluation or evaluation.get("status") != "PASS" or int(evaluation.get("skill_version") or 0) != int(skill.get("version") or 1):
+        raise ValueError("当前 Skill 版本未通过测试，不能发布")
+    from ..core.database import utcnow
+
+    item = db().patch("skills", skill_id, {
+        "status": "published", "approved_by": current_user_id(),
+        "approval_at": utcnow(), "published_at": utcnow(), "enabled": True,
+    }, workspace_id=skill["workspace_id"])
+    return ok(item=item)
+
+
+@bp.post("/api/skills/<skill_id>/deprecate")
+@api_errors
+def deprecate_skill(skill_id: str):
+    skill = require_workspace_record("skills", skill_id)
+    require_workspace_access(skill["workspace_id"], owner=True)
+    return ok(item=db().patch(
+        "skills", skill_id, {"status": "deprecated", "enabled": False},
+        workspace_id=skill["workspace_id"],
+    ))
+
+
+@bp.post("/api/skills/<skill_id>/rollback")
+@api_errors
+def rollback_skill(skill_id: str):
+    skill = require_workspace_record("skills", skill_id)
+    require_workspace_access(skill["workspace_id"], owner=True)
+    target = int(body().get("version") or 0)
+    version = next((
+        item for item in db().list("skill_versions", workspace_id=skill["workspace_id"], limit=5000)
+        if item.get("skill_id") == skill_id and int(item.get("version") or 0) == target
+    ), None)
+    if not version:
+        raise FileNotFoundError("Skill 历史版本不存在")
+    restored = dict(version.get("payload") or {})
+    next_version = int(skill.get("version") or 1) + 1
+    allowed = {key: restored.get(key) for key in (
+        "name", "description", "instruction", "input_schema", "slug", "allowed_tools", "resources",
+    )}
+    item = db().patch("skills", skill_id, {
+        **allowed, "version": next_version, "status": "candidate", "enabled": True,
+        "approved_by": None, "latest_evaluation_id": None, "latest_evaluation_status": None,
+        "rolled_back_from": target,
+    }, workspace_id=skill["workspace_id"])
+    db().put("skill_versions", {
+        "id": db().new_id("skillver"), "workspace_id": skill["workspace_id"],
+        "skill_id": skill_id, "version": next_version, "payload": item,
+        "status": "candidate", "created_by": current_user_id(), "rolled_back_from": target,
+    }, workspace_id=skill["workspace_id"])
+    return ok(item=item)
 
 
 @bp.delete("/api/skills/<skill_id>")

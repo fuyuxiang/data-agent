@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "migration-restore",
+  "status": "BLOCKED",
+  "results": [
+    {
+      "id": "migration-restore",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_MIGRATION_EVIDENCE 未配置；必须由真实外部环境产生",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    }
+  ]
+}

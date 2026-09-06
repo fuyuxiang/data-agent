@@ -61,10 +61,16 @@ def save_provider(
                 and urlsplit(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
             ),
             "model": str(payload.get("model") or current.get("model") or "gpt-4.1-mini"),
+            "protocol": str(
+                payload.get("protocol") or current.get("protocol") or "chat_completions"
+            ).lower().replace("-", "_"),
             "temperature": float(payload.get("temperature", current.get("temperature", 0.2))),
             "context_window": int(payload.get("context_window") or current.get("context_window") or 0) or None,
             "max_output_tokens": int(payload.get("max_output_tokens") or current.get("max_output_tokens") or 0) or None,
             "enable_thinking": bool(payload.get("enable_thinking", current.get("enable_thinking", False))),
+            "reasoning_effort": str(
+                payload.get("reasoning_effort") or current.get("reasoning_effort") or "medium"
+            )[:32],
             "thinking_budget": int(payload.get("thinking_budget") or current.get("thinking_budget") or 8000),
             "input_price_per_million": payload.get("input_price_per_million", current.get("input_price_per_million")),
             "output_price_per_million": payload.get("output_price_per_million", current.get("output_price_per_million")),

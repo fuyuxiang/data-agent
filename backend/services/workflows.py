@@ -12,12 +12,15 @@ from typing import Any
 
 from flask import current_app
 
+from ..agent.contracts import ModelResponse, ModelToolCall, TaskContract, ToolSpec, ToolStatus
+from ..agent.store import RunStore
+from ..agent.tools import ToolExecutor, ToolRegistry
 from ..core.database import Database, utcnow
 from .analytics import run_analysis
 from .datasets import execute_query, load_result_frame, source_table
 from .exports import export_data, export_report
 from .hooks import dispatch_hooks
-from .jobs import get_job_manager
+from .jobs import get_job_manager, register_job_handler
 
 
 STEP_TYPES = {
@@ -326,7 +329,25 @@ def _record_event(run: dict, event: str, **detail: Any) -> None:
     )
 
 
-def start_workflow(workflow: dict, payload: dict, *, idempotency_key: str | None = None) -> dict:
+def _workflow_source_ids(definition: dict, payload: dict) -> list[str]:
+    values = payload.get("source_ids") or []
+    if isinstance(values, str):
+        values = [values]
+    found = [str(value) for value in values]
+    for step in definition.get("steps") or []:
+        config = step.get("config") if isinstance(step.get("config"), dict) else {}
+        config = _resolve(config, {"inputs": payload, **payload})
+        configured = config.get("source_ids") or ([config["source_id"]] if config.get("source_id") else [])
+        if isinstance(configured, str):
+            configured = [configured]
+        found.extend(str(value) for value in configured)
+    return list(dict.fromkeys(value for value in found if value))
+
+
+def start_workflow(
+    workflow: dict, payload: dict, *, idempotency_key: str | None = None,
+    actor_id: str = "local-default",
+) -> dict:
     validation = validate_definition(workflow.get("definition", {}))
     if not validation["valid"]:
         raise ValueError("；".join(validation["errors"]))
@@ -338,8 +359,42 @@ def start_workflow(workflow: dict, payload: dict, *, idempotency_key: str | None
             f"{workspace_id}\0{workflow.get('id')}\0{idempotency_key}".encode("utf-8"),
         ).hexdigest()[:24]
         run_id = f"run_{digest}"
+        existing = _db().get("workflow_runs", run_id, workspace_id=workspace_id)
+        if existing:
+            if existing.get("workflow_id") != workflow.get("id") or existing.get("inputs") != payload:
+                raise ValueError("幂等键已被不同的工作流请求占用")
+            return existing
+    source_ids = _workflow_source_ids(normalized, payload)
+    for source_id in source_ids:
+        source = _db().get("sources", source_id, workspace_id=workspace_id)
+        if not source:
+            raise PermissionError("工作流引用的数据源不存在或不属于当前工作空间")
+        allowed_users = source.get("authorized_user_ids")
+        if isinstance(allowed_users, list) and actor_id not in allowed_users:
+            raise PermissionError("工作流执行者无权访问选定数据源")
+    store = RunStore(_db())
+    agent_run, _ = store.create_run(
+        workspace_id=workspace_id, session_id=str(payload.get("session_id") or f"workflow:{workflow['id']}"),
+        actor_id=str(actor_id), source_scope=source_ids,
+        allowed_tool_ids=["workflow_step", "validate_result"], run_kind="workflow",
+        budget=dict(workflow.get("budget") or RunStore.default_budget()),
+        idempotency_key=f"workflow:{workflow['id']}:{idempotency_key}" if idempotency_key else None,
+    )
+    if agent_run["contract_version"] == 0:
+        store.add_contract(agent_run["id"], TaskContract.from_payload({
+            "objective": str(workflow.get("name") or "执行已发布分析工作流"),
+            "coverage": str(workflow.get("description") or "已发布工作流定义与本次输入"),
+            "dimensions": [str(step.get("name") or step["id"]) for step in normalized["steps"]],
+            "deliverables": ["workflow_result_manifest"], "source_scope": source_ids,
+            "budget": dict(workflow.get("budget") or RunStore.default_budget()),
+        }), expected_version=0, confirmed_by=str(actor_id))
+        store.add_plan(agent_run["id"], {"tasks": [{
+            "id": str(step["id"]), "title": str(step.get("name") or step["id"]),
+            "status": "open", "depends_on": [str(value) for value in step.get("depends_on") or []],
+        } for step in normalized["steps"]]}, reason="published_workflow_definition", expected_version=0)
     run_payload = {
             "id": run_id, "workspace_id": workspace_id,
+            "actor_id": str(actor_id), "agent_run_id": agent_run["id"],
             "workflow_id": workflow["id"], "workflow_version": workflow.get("version", 1),
             "workflow_version_id": workflow.get("current_version_id"),
             "definition_snapshot": normalized, "status": "queued", "inputs": payload,
@@ -365,24 +420,10 @@ def start_workflow(workflow: dict, payload: dict, *, idempotency_key: str | None
         workspace_id, database=_db(),
     )
     app = current_app._get_current_object()
-
-    def work(progress, cancel):
-        with app.app_context():
-            try:
-                return execute_run(run["id"], progress, cancel)
-            except Exception as exc:
-                failed = _db().patch(
-                    "workflow_runs", run["id"],
-                    {"status": "failed", "error": str(exc), "finished_at": utcnow()},
-                )
-                if failed:
-                    _record_event(failed, "workflow_failed", error=str(exc))
-                dispatch_hooks("workflow.failed", failed or {"error": str(exc)}, workspace_id, database=_db())
-                raise
-
-    job = get_job_manager(app).submit(
-        workspace_id=workspace_id, session_id=payload.get("session_id"), kind="workflow",
-        title=f"运行：{workflow.get('name', workflow['id'])}", work=work,
+    job = get_job_manager(app).submit_spec(
+        workspace_id=workspace_id, session_id=payload.get("session_id"), job_type="workflow_run",
+        title=f"运行：{workflow.get('name', workflow['id'])}",
+        spec={"run_id": run["id"]}, run_id=agent_run["id"],
     )
     _db().patch("workflow_runs", run["id"], {"job_id": job["id"]})
     return _db().get("workflow_runs", run["id"])
@@ -420,6 +461,7 @@ def _execute_agent_step(step: dict, config: dict, context: dict, workspace_id: s
         team=None, member=member, prompt=prompt, description=shared[:24000],
         workspace_id=workspace_id, source_ids=[str(value) for value in source_ids],
         session_id=str(context.get("inputs", {}).get("session_id") or f"workflow-{step['id']}"),
+        actor_id=str(context.get("_actor_id") or "local-default"),
     )
     result = delegated["result"]
     return {
@@ -494,109 +536,6 @@ def _update_context(context: dict, step_id: str, output: dict) -> None:
         context["analysis"] = output
 
 
-def _execute_run_sequential(run_id: str, progress, cancel) -> dict:
-    run = _db().get("workflow_runs", run_id)
-    if not run:
-        raise FileNotFoundError("工作流运行不存在")
-    definition = normalize_definition(run.get("definition_snapshot") or {})
-    by_id = {step["id"]: step for step in definition["steps"]}
-    context: dict[str, Any] = {"inputs": deepcopy(run.get("inputs", {})), "steps": {}}
-    context.update(run.get("inputs", {}))
-    for step_id, output in run.get("outputs", {}).items():
-        if isinstance(output, dict):
-            _update_context(context, step_id, output)
-    run.update({"status": "running", "pause_requested": False})
-    run.setdefault("started_at", utcnow())
-    _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-    _record_event(run, "workflow_running")
-    for index, step_id in enumerate(run["order"]):
-        latest = _db().get("workflow_runs", run_id) or run
-        if cancel.is_set() or latest.get("cancel_requested"):
-            run["status"] = "cancelled"
-            break
-        if latest.get("pause_requested"):
-            run.update({"status": "paused", "paused_at": utcnow(), "current_step_id": step_id})
-            break
-        step = by_id[step_id]
-        state = run["step_states"][step_id]
-        if state.get("status") in {"completed", "skipped"}:
-            continue
-        dependency_states = [run["step_states"][item].get("status") for item in step.get("depends_on", [])]
-        if step.get("join_policy", "all_success") == "all_success" and any(
-            status in {"failed", "rejected", "cancelled"} for status in dependency_states
-        ):
-            state.update({"status": "skipped", "reason": "上游步骤未成功", "finished_at": utcnow()})
-            continue
-        if not _should_execute(step, context):
-            state.update({"status": "skipped", "reason": "条件未满足", "finished_at": utcnow()})
-            _record_event(run, "workflow_step_skipped", step_id=step_id, reason=state["reason"])
-            _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-            continue
-        if step["type"] == "approval" and not state.get("approved"):
-            state.update({"status": "waiting_approval", "requested_at": utcnow()})
-            run.update({"status": "waiting_approval", "current_step_id": step_id})
-            _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-            _record_event(run, "workflow_approval_requested", step_id=step_id)
-            dispatch_hooks(
-                "workflow.waiting_approval", {**run, "step_id": step_id, "step": step},
-                run["workspace_id"], database=_db(),
-            )
-            return {"run_id": run_id, "status": "waiting_approval", "step_id": step_id}
-        state.update({"status": "running", "started_at": utcnow()})
-        run["current_step_id"] = step_id
-        _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-        _record_event(run, "workflow_step_started", step_id=step_id)
-        dispatch_hooks(
-            "workflow.step_started", {**run, "step_id": step_id, "step": step},
-            run["workspace_id"], database=_db(),
-        )
-        progress(index / max(1, len(run["order"])) * 100, f"执行步骤：{step.get('name', step_id)}")
-        config = _resolve(
-            {**step.get("config", {}), **context.get("overrides", {}).get(step_id, {})}, context,
-        )
-        retry = step.get("retry") if isinstance(step.get("retry"), dict) else {}
-        max_attempts = max(1, min(int(retry.get("max_attempts", config.pop("max_attempts", 1))), 10))
-        output = None
-        last_error: Exception | None = None
-        for attempt in range(max_attempts):
-            state["attempts"] = int(state.get("attempts", 0)) + 1
-            try:
-                output = _execute_step(step, config, context, run["workspace_id"])
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                state.update({"last_error": str(exc), "last_failed_at": utcnow()})
-                _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-                _record_event(run, "workflow_step_retry", step_id=step_id, attempt=attempt + 1, error=str(exc))
-                if attempt + 1 < max_attempts:
-                    time.sleep(min(float(retry.get("delay_seconds", 0)), 2.0))
-        if last_error is not None or output is None:
-            state.update({"status": "failed", "error": str(last_error), "finished_at": utcnow()})
-            _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-            if step.get("on_error") in {"continue", "close_branch"}:
-                continue
-            raise last_error or RuntimeError("工作流步骤没有产生输出")
-        state.update({"status": "completed", "finished_at": utcnow(), "output": output})
-        run["outputs"][step_id] = output
-        _update_context(context, step_id, output)
-        _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-        _record_event(run, "workflow_step_completed", step_id=step_id, output=output)
-        dispatch_hooks(
-            "workflow.step_completed", {**run, "step_id": step_id, "step": step, "step_output": output},
-            run["workspace_id"], database=_db(),
-        )
-    if run["status"] == "running":
-        run["status"] = "completed"
-    if run["status"] in {"completed", "cancelled"}:
-        run["finished_at"] = utcnow()
-    _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
-    _record_event(run, f"workflow_{run['status']}")
-    if run["status"] in {"completed", "cancelled"}:
-        dispatch_hooks(f"workflow.{run['status']}", run, run["workspace_id"], database=_db())
-    return {"run_id": run_id, "status": run["status"], "outputs": run["outputs"]}
-
-
 def _profile_key(step: dict) -> str:
     config = step.get("config") if isinstance(step.get("config"), dict) else {}
     return str(config.get("agent_profile_id") or step.get("agent_profile_id") or step["id"])
@@ -661,8 +600,115 @@ def _record_manifest(run: dict, step: dict, node_run_id: str, output: dict) -> d
     )
 
 
+def _workflow_has_published_evidence(context: dict) -> bool:
+    return any(
+        isinstance(value, dict) and (
+            value.get("validation_status") == "PASS" or value.get("publication_id")
+            or (value.get("validation") or {}).get("validation_status") == "PASS"
+        )
+        for value in (context.get("steps") or {}).values()
+    )
+
+
+def _execute_step_through_boundary(
+    step: dict, config: dict, context: dict, workspace_id: str,
+    *, agent_run_id: str, call_suffix: str, lease,
+) -> dict:
+    """Execute one deterministic workflow node through the canonical Action boundary."""
+    from .advanced_agent import _dataset_ref, _source_authorized, _validate_result
+    from .data_plane.contracts import DatasetRefStore
+
+    database = _db()
+    store = RunStore(database)
+    formal_run = store.get_run(agent_run_id, workspace_id=workspace_id)
+    if not formal_run or not _source_authorized(database, formal_run):
+        raise PermissionError("工作流执行期间数据授权已失效")
+    registry = ToolRegistry()
+
+    def execute(arguments: dict[str, Any]) -> dict:
+        if step["type"] in {"export_data", "export_report", "notification"} and not _workflow_has_published_evidence(context):
+            raise PermissionError("导出或通知必须位于已通过验证/发布的结果之后")
+        value = _execute_step(step, arguments["config"], context, workspace_id)
+        value = value if isinstance(value, dict) else {"value": value}
+        if step["type"] == "query" and str(value.get("id") or "").startswith("qry_"):
+            ref = _dataset_ref(database, formal_run, value)
+            DatasetRefStore(database).put(ref, workspace_id=workspace_id, run_id=agent_run_id)
+            value = {
+                **value, "result_id": value["id"], "dataset_ref_id": ref.ref_id,
+                "output_refs": [ref.ref_id], "completeness": ref.result_completeness,
+                "provenance_ref": ref.provenance_ref,
+            }
+        elif str(value.get("id") or "").startswith(("art_", "export_", "report_")):
+            value = {
+                **value, "artifact_id": value["id"], "output_refs": [value["id"]],
+                "completeness": "complete",
+            }
+        elif value.get("publication_id"):
+            value = {
+                **value, "output_refs": [str(value["publication_id"])],
+                "completeness": "complete", "validation_status": "PASS",
+            }
+        return value
+
+    registry.register(ToolSpec(
+        id="workflow_step", description="执行已发布工作流中的一个确定性节点。",
+        input_schema={
+            "type": "object", "properties": {
+                "node_id": {"type": "string"}, "node_type": {"type": "string"},
+                "config": {"type": "object"},
+            }, "required": ["node_id", "node_type", "config"],
+        },
+        mutability="external" if step["type"] in {"export_data", "export_report", "notification"} else "read",
+        cancellable=step["type"] in {"query", "analysis", "agent", "verifier"},
+    ), execute)
+    registry.register(ToolSpec(
+        id="validate_result", description="验证工作流节点的数据完整性、来源范围与结构。",
+        input_schema={"type": "object", "properties": {
+            "dataset_ref_id": {"type": "string"}, "result_id": {"type": "string"},
+        }},
+    ), lambda arguments: _validate_result(database, formal_run, arguments))
+    executor = ToolExecutor(store, registry)
+    arguments = {"node_id": step["id"], "node_type": step["type"], "config": config}
+    call_id = f"{step['id']}:{call_suffix}"
+    decision = store.record_decision(agent_run_id, ModelResponse(
+        protocol="local_deterministic", model="published_workflow", content="",
+        tool_calls=(ModelToolCall(call_id, "workflow_step", arguments),),
+        finish_reason="tool_calls", refusal=None,
+        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    ))
+    executed = executor.execute(
+        context=lease, decision_id=decision["id"], call_id=call_id,
+        tool_id="workflow_step", arguments=arguments,
+    )
+    if executed.result.status is not ToolStatus.SUCCEEDED:
+        raise RuntimeError(str(executed.value.get("error") or "工作流动作执行失败"))
+    output = dict(executed.value)
+    if output.get("dataset_ref_id"):
+        validation_args = {
+            "dataset_ref_id": str(output["dataset_ref_id"]),
+            "result_id": str(output.get("result_id") or ""),
+        }
+        validation_call = f"{call_id}:validate"
+        validation_decision = store.record_decision(agent_run_id, ModelResponse(
+            protocol="local_deterministic", model="workflow_validator", content="",
+            tool_calls=(ModelToolCall(validation_call, "validate_result", validation_args),),
+            finish_reason="tool_calls", refusal=None,
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        ))
+        checked = executor.execute(
+            context=lease, decision_id=validation_decision["id"], call_id=validation_call,
+            tool_id="validate_result", arguments=validation_args,
+        )
+        output["validation"] = checked.value
+        output["validation_status"] = checked.value.get("validation_status")
+        if checked.result.status is not ToolStatus.SUCCEEDED or output["validation_status"] != "PASS":
+            raise RuntimeError("工作流查询结果未通过正式验证")
+    return output
+
+
 def _execute_step_with_retry(
     app, step: dict, config: dict, context: dict, workspace_id: str,
+    agent_run_id: str, node_run_id: str, lease,
 ) -> tuple[dict | None, Exception | None, int]:
     retry = step.get("retry") if isinstance(step.get("retry"), dict) else {}
     config = deepcopy(config)
@@ -671,7 +717,10 @@ def _execute_step_with_retry(
     with app.app_context():
         for attempt in range(1, max_attempts + 1):
             try:
-                return _execute_step(step, config, context, workspace_id), None, attempt
+                return _execute_step_through_boundary(
+                    step, config, context, workspace_id,
+                    agent_run_id=agent_run_id, call_suffix=f"{node_run_id}:{attempt}", lease=lease,
+                ), None, attempt
             except Exception as exc:
                 last_error = exc
                 if attempt < max_attempts:
@@ -695,6 +744,12 @@ def execute_run(run_id: str, progress, cancel) -> dict:
     run.setdefault("started_at", utcnow())
     _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
     _record_event(run, "workflow_running")
+    parent_store = RunStore(_db())
+    if not run.get("agent_run_id"):
+        raise RuntimeError("工作流缺少统一执行边界对应的 AgentRun")
+    parent_store.update_status(run["agent_run_id"], "running")
+    lease_owner = f"workflow:{run_id}"
+    parent_lease = parent_store.acquire_lease(run["agent_run_id"], lease_owner, ttl_seconds=3600)
     app = current_app._get_current_object()
     total = max(1, len(run["order"]))
 
@@ -818,6 +873,7 @@ def execute_run(run_id: str, progress, cancel) -> dict:
             futures = {
                 pool.submit(
                     _execute_step_with_retry, app, step, config, deepcopy(context), run["workspace_id"],
+                    run["agent_run_id"], node_run_id, parent_lease,
                 ): (step, profile, node_run_id)
                 for step, profile, node_run_id, config in selected
             }
@@ -868,6 +924,67 @@ def execute_run(run_id: str, progress, cancel) -> dict:
         run["status"] = "failed" if failed else "completed"
     if run["status"] in {"completed", "cancelled", "failed"}:
         run["finished_at"] = utcnow()
+    if run["status"] == "completed":
+        from .advanced_agent import _source_authorized
+        from .results.manifests import ResultService
+
+        actions = parent_store.actions(run["agent_run_id"])
+        evidence = []
+        for action in actions:
+            node_id = str((action.get("arguments") or {}).get("node_id") or "")
+            if action["status"] != "succeeded" and run.get("step_states", {}).get(node_id, {}).get("status") == "completed":
+                continue
+            result = action.get("result") or {}
+            tool_result = result.get("tool_result") or {}
+            evidence.append({
+                "tool": action["tool_id"],
+                "status": "SUCCEEDED" if action["status"] == "succeeded" else "FAILED",
+                "refs": list(tool_result.get("output_refs") or []),
+                "completeness": tool_result.get("completeness", "unknown"),
+                "validation_status": tool_result.get("validation_status", "not_evaluated"),
+            })
+        # A checkpoint branch reuses immutable upstream artifacts rather than copying
+        # old Action rows. Feed only the persisted PASS evidence into the new gate.
+        for output in run["outputs"].values():
+            if not isinstance(output, dict) or output.get("validation_status") != "PASS":
+                continue
+            ref = str(output.get("dataset_ref_id") or output.get("result_id") or "")
+            evidence.append({
+                "tool": "checkpoint_reuse", "status": "SUCCEEDED",
+                "refs": [ref] if ref else [],
+                "completeness": str(output.get("completeness") or "unknown"),
+                "validation_status": "PASS",
+            })
+        final = ResultService(
+            _db(), authorize=lambda current: _source_authorized(_db(), current),
+        ).finalize(
+            run["agent_run_id"],
+            json.dumps(run["outputs"], ensure_ascii=False, default=str, sort_keys=True),
+            evidence,
+        )
+        run["result_manifest_id"] = final.get("manifest_id")
+        run["publication_id"] = final.get("publication_id")
+        if final.get("published"):
+            parent_store.update_status(
+                run["agent_run_id"], "finished", outcome="complete",
+                quality_status="passed", stop_reason="workflow_published",
+            )
+        else:
+            run.update({"status": "failed", "error": "工作流结果未通过正式发布门禁"})
+            parent_store.update_status(
+                run["agent_run_id"], "failed", outcome="partial",
+                quality_status=str(final.get("quality_status") or "failed"),
+                stop_reason="workflow_publication_blocked",
+            )
+    elif run["status"] == "cancelled":
+        parent_store.update_status(run["agent_run_id"], "cancelled", outcome="cancelled", stop_reason="workflow_cancelled")
+    elif run["status"] == "failed":
+        parent_store.update_status(run["agent_run_id"], "failed", outcome="failed", stop_reason="workflow_failed")
+    elif run["status"] == "paused":
+        parent_store.update_status(run["agent_run_id"], "paused", stop_reason="workflow_paused")
+    elif run["status"] == "waiting_approval":
+        parent_store.update_status(run["agent_run_id"], "waiting_approval", stop_reason="workflow_waiting_approval")
+    parent_store.release_lease(run["agent_run_id"], lease_owner, parent_lease.lease_epoch)
     _db().put("workflow_runs", run, workspace_id=run["workspace_id"])
     _record_event(run, f"workflow_{run['status']}")
     if run["status"] in {"completed", "cancelled", "failed"}:
@@ -977,8 +1094,31 @@ def fork_run(database: Database, source_run: dict, checkpoint_node_run_id: str) 
     if missing := sorted(required - set(reusable_runs)):
         raise ValueError("检查点缺少成功的上游依赖：" + "、".join(missing))
     branch = deepcopy(source_run)
+    source_parent = RunStore(database).get_run(str(source_run.get("agent_run_id") or ""))
+    if not source_parent:
+        raise ValueError("源工作流缺少统一执行边界，不能安全分叉")
+    branch_store = RunStore(database)
+    branch_parent, _ = branch_store.create_run(
+        workspace_id=source_parent["workspace_id"], session_id=source_parent["session_id"],
+        actor_id=source_parent["actor_id"], source_scope=source_parent["source_scope"],
+        allowed_tool_ids=source_parent["allowed_tool_ids"], parent_run_id=source_parent["id"],
+        run_kind="workflow_branch", budget=source_parent["budget"],
+    )
+    source_contract = branch_store.latest_contract(source_parent["id"])
+    source_plan = branch_store.latest_plan(source_parent["id"])
+    if not source_contract or not source_plan:
+        raise ValueError("源工作流契约或计划缺失，不能安全分叉")
+    branch_store.add_contract(
+        branch_parent["id"], TaskContract.from_payload(source_contract["payload"]),
+        expected_version=0, confirmed_by=source_parent["actor_id"],
+    )
+    branch_store.add_plan(
+        branch_parent["id"], source_plan["payload"], reason="workflow_checkpoint_branch",
+        expected_version=0,
+    )
     branch.update({
         "id": database.new_id("run"), "status": "queued", "outputs": {},
+        "agent_run_id": branch_parent["id"],
         "step_states": {
             step_id: ({"status": "completed", "attempts": 0, "reused": True} if step_id in required
                       else {"status": "pending", "attempts": 0})
@@ -1095,3 +1235,39 @@ def generate_knowledge_candidates(database: Database, run: dict) -> list[dict]:
         item for item in database.list("workflow_knowledge_candidates", workspace_id=run["workspace_id"], limit=5000)
         if item.get("run_id") == run["id"]
     ]
+
+
+def _workflow_job_handler(app, spec, progress, cancel):
+    run_id = str(spec.get("run_id") or "")
+    run = _db().get("workflow_runs", run_id)
+    if not run:
+        raise FileNotFoundError("工作流运行不存在")
+    try:
+        return execute_run(run_id, progress, cancel)
+    except Exception as exc:
+        failed = _db().patch(
+            "workflow_runs", run_id,
+            {"status": "failed", "error": str(exc), "finished_at": utcnow()},
+            workspace_id=run["workspace_id"],
+        )
+        if failed:
+            _record_event(failed, "workflow_failed", error=str(exc))
+        if run.get("agent_run_id"):
+            parent_store = RunStore(_db())
+            parent = parent_store.get_run(run["agent_run_id"])
+            if parent:
+                parent_store.update_status(
+                    parent["id"], "failed", outcome="failed",
+                    quality_status="failed", stop_reason="workflow_failed",
+                )
+                parent_store.release_lease(
+                    parent["id"], f"workflow:{run_id}", int(parent.get("lease_epoch") or 0),
+                )
+        dispatch_hooks(
+            "workflow.failed", failed or {"error": str(exc)},
+            run["workspace_id"], database=_db(),
+        )
+        raise
+
+
+register_job_handler("workflow_run", _workflow_job_handler)

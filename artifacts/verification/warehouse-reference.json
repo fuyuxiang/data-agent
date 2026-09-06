@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profile": "warehouse-reference",
+  "status": "BLOCKED",
+  "results": [
+    {
+      "id": "trino-cluster",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8080/v1/info: <urlopen error [Errno 1] Operation not permitted>",
+      "command": null,
+      "duration_seconds": 0.013,
+      "output": ""
+    },
+    {
+      "id": "trino-workers",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8080/v1/node: <urlopen error [Errno 1] Operation not permitted>",
+      "command": null,
+      "duration_seconds": 0.001,
+      "output": ""
+    },
+    {
+      "id": "livy-batches",
+      "status": "BLOCKED",
+      "detail": "无法连接真实端点 http://127.0.0.1:8998/batches?from=0&size=1: <urlopen error [Errno 1] Operation not permitted>",
+      "command": null,
+      "duration_seconds": 0.0,
+      "output": ""
+    },
+    {
+      "id": "warehouse-e2e-evidence",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_WAREHOUSE_EVIDENCE 未指定；不能证明 Iceberg 物化、2 workers/2 executors、取消恢复与四图邮件链路",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    }
+  ]
+}

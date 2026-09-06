@@ -142,19 +142,34 @@ def run_inbound_turn(app: Flask, session_id: str, connector_id: str, question: s
             connector = database.get("connectors", connector_id)
             if not session or not connector:
                 return
-            from .agent_runtime import run_conversation
+            from ..agent.contracts import TaskContract
+            from ..agent.store import RunStore
+            from .advanced_agent import available_formal_tools
 
-            before = len(database.messages(session_id, 5000))
-            for _event in run_conversation(
-                session_id=session_id, workspace_id=session["workspace_id"], question=question,
-                source_ids=[str(value) for value in session.get("source_ids") or []],
-                provider_id=session.get("provider_id"), should_cancel=lambda: False,
-            ):
-                pass
-            new_messages = database.messages(session_id, 5000)[before:]
-            assistant = next((item for item in reversed(new_messages) if item.get("role") == "assistant"), None)
-            if not assistant:
-                return
+            source_ids = [str(value) for value in session.get("source_ids") or []]
+            store = RunStore(database)
+            run, _created = store.create_run(
+                workspace_id=session["workspace_id"], session_id=session_id,
+                actor_id=str(session.get("owner_id") or "external-trigger"),
+                source_scope=source_ids,
+                allowed_tool_ids=available_formal_tools(
+                    database, session["workspace_id"], session_id, source_ids,
+                ),
+                provider_id=session.get("provider_id"), run_kind="external_trigger",
+                idempotency_key=f"feishu:{connector_id}:{hashlib.sha256(question.encode('utf-8')).hexdigest()}",
+            )
+            if _created:
+                database.add_message(session_id, "user", question, {"run_id": run["id"], "channel": "feishu"})
+                store.add_contract(run["id"], TaskContract.from_payload({
+                    "objective": question, "coverage": "当前会话已选的授权来源，待 Web 端确认",
+                    "dimensions": ["时间", "业务实体", "可用分类属性"],
+                    "deliverables": ["summary", "dashboard", "report"], "source_scope": source_ids,
+                }), expected_version=0)
+            reply = f"已创建分析任务 {run['id']}。为避免未确认口径触发正式扫描，请在 Web 端核对四段任务契约后确认。"
+            assistant = database.add_message(
+                session_id, "assistant", reply,
+                {"run_id": run["id"], "requires_confirmation": True, "channel": "feishu"},
+            )
             record_inbound_event(database, session, "user", question)
             record_inbound_event(database, session, "assistant", assistant["content"])
             from ..api.integration import _send_connector

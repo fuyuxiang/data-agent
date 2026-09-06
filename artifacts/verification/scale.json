@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "scale",
+  "status": "BLOCKED",
+  "results": [
+    {
+      "id": "scale",
+      "status": "BLOCKED",
+      "detail": "MERIDIAN_SCALE_EVIDENCE 未配置；不以合成字节字段冒充 PB/EB 实测",
+      "command": null,
+      "duration_seconds": 0,
+      "output": ""
+    }
+  ]
+}

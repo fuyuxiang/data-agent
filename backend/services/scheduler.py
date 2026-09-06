@@ -9,7 +9,7 @@ from flask import Flask
 
 from ..core.database import Database, utcnow
 from .dashboard_refresh import dashboard_refresh_due, refresh_dashboard
-from .jobs import get_job_manager
+from .jobs import get_job_manager, register_job_handler
 from .workflows import start_workflow
 
 
@@ -92,34 +92,11 @@ class WorkflowScheduler:
         self.db.patch("dashboards", dashboard["id"], {
             "refresh_queued_at": queued_at, "refresh_status": "queued", "refresh_error": None,
         })
-        app = self.app
-
-        def work(progress, cancel):
-            with app.app_context():
-                try:
-                    if cancel.is_set():
-                        self.db.patch("dashboards", dashboard["id"], {
-                            "refresh_queued_at": None, "refresh_status": "cancelled",
-                        })
-                        return {"dashboard_id": dashboard["id"], "cancelled": True}
-                    progress(10, "正在刷新看板数据")
-                    current = self.db.get("dashboards", dashboard["id"])
-                    if not current or str(current.get("workspace_id") or "default") != workspace_id:
-                        raise FileNotFoundError("看板不存在")
-                    refreshed = refresh_dashboard(self.db, current)
-                    progress(100, "看板刷新完成")
-                    return {"dashboard_id": refreshed["id"], "revision": refreshed["revision"]}
-                except Exception as exc:
-                    self.db.patch("dashboards", dashboard["id"], {
-                        "refresh_queued_at": None, "refresh_status": "error", "refresh_error": str(exc),
-                    })
-                    raise
-
         try:
-            job = get_job_manager(app).submit(
+            job = get_job_manager(self.app).submit_spec(
                 workspace_id=workspace_id, session_id=dashboard.get("session_id"),
-                kind="dashboard_refresh", title=f"刷新看板：{dashboard.get('name') or dashboard['id']}",
-                work=work,
+                job_type="dashboard_refresh", title=f"刷新看板：{dashboard.get('name') or dashboard['id']}",
+                spec={"dashboard_id": dashboard["id"], "workspace_id": workspace_id},
             )
             self.db.patch("dashboards", dashboard["id"], {"refresh_job_id": job["id"]})
         except Exception as exc:
@@ -138,6 +115,8 @@ class WorkflowScheduler:
 
     def _run_once(self) -> None:
         with self.app.app_context():
+            self._reconcile_warehouse_queries()
+            self._reconcile_spark_batches()
             for schedule in self.db.list("schedules"):
                 if not schedule.get("enabled", True):
                     continue
@@ -159,6 +138,7 @@ class WorkflowScheduler:
                     run = start_workflow(
                         executable, schedule.get("inputs", {}),
                         idempotency_key=f"schedule:{schedule['id']}:{minute_key}",
+                        actor_id=str(schedule.get("actor_id") or "local-default"),
                     )
                     schedule.update({
                         "last_run_at": utcnow(), "last_run_id": run["id"],
@@ -174,6 +154,188 @@ class WorkflowScheduler:
             for dashboard in self.db.list("dashboards", limit=5000):
                 if dashboard_refresh_due(dashboard, now_utc):
                     self._queue_dashboard_refresh(dashboard)
+
+    def _reconcile_warehouse_queries(self) -> None:
+        from ..agent.store import RunStore
+        from .advanced_agent import materialize_trino_preview
+        from .data_plane.factory import trino_adapter
+
+        store = RunStore(self.db)
+        for query in self.db.list("warehouse_queries", limit=5000):
+            if query.get("status") not in {"running", "cancelling"}:
+                continue
+            run = store.get_run(str(query.get("run_id") or ""), workspace_id=query.get("workspace_id"))
+            if not run:
+                continue
+            adapter = trino_adapter(self.db, run["workspace_id"], str(query["engine_id"]))
+            try:
+                if run["execution_status"] in {"cancelling", "cancelled"} and query.get("status") == "running":
+                    adapter.cancel(query["id"])
+                    continue
+                current = adapter.poll(query["id"])
+                if current.get("status") not in {"finished", "failed"}:
+                    continue
+                if current.get("status") == "failed":
+                    store.complete_external_action(
+                        run["id"], query["id"], status="failed",
+                        result={"tool": "warehouse_query", "ok": False, "error_code": "warehouse_query_failed"},
+                        error_code="warehouse_query_failed",
+                    )
+                else:
+                    try:
+                        remote_ref = adapter.result_ref(
+                            query["id"], owner_id=run["actor_id"], contract_version=run["contract_version"],
+                            policy_version=run["policy_version"],
+                        )
+                        result, bounded_ref = (None, None)
+                        if query.get("result_mode") != "materialize":
+                            result, bounded_ref = materialize_trino_preview(
+                                self.db, run, current, source_ids=list(query.get("source_refs") or []),
+                            )
+                        refs = [remote_ref.ref_id, *([bounded_ref.ref_id] if bounded_ref else [])]
+                        value = {
+                            "status": "SUCCEEDED", "query_id": query["id"], "job_id": query["id"],
+                            "dataset_ref_id": (bounded_ref or remote_ref).ref_id,
+                            "result_id": result.get("id") if result else None,
+                            "output_refs": refs, "completeness": "complete", "accuracy": "exact",
+                        }
+                        store.complete_external_action(
+                            run["id"], query["id"], status="succeeded",
+                            result={
+                                "tool": "warehouse_query", "value": value,
+                                "tool_result": {
+                                    "output_refs": refs, "completeness": "complete",
+                                    "validation_status": "not_evaluated",
+                                },
+                            },
+                        )
+                    except ValueError as exc:
+                        store.complete_external_action(
+                            run["id"], query["id"], status="failed",
+                            result={
+                                "tool": "warehouse_query", "ok": False,
+                                "error": str(exc), "error_code": "warehouse_result_not_durable",
+                            },
+                            error_code="warehouse_result_not_durable",
+                        )
+                if not any(
+                    item.get("run_id") == run["id"] and item.get("status") in {"queued", "running"}
+                    for item in self.db.list("jobs", workspace_id=run["workspace_id"], limit=5000)
+                ):
+                    get_job_manager(self.app).submit_spec(
+                        workspace_id=run["workspace_id"], session_id=run["session_id"],
+                        job_type="analysis_run", title="继续远程查询后分析",
+                        spec={"run_id": run["id"]}, run_id=run["id"],
+                    )
+            except Exception as exc:
+                self.db.patch(
+                    "warehouse_queries", query["id"],
+                    {"reconcile_error": str(exc), "reconcile_error_at": utcnow()},
+                    workspace_id=run["workspace_id"],
+                )
+
+    def _reconcile_spark_batches(self) -> None:
+        from ..agent.store import RunStore
+        from .data_plane.factory import livy_adapter
+
+        store = RunStore(self.db)
+        for batch in self.db.list("remote_batches", limit=5000):
+            if batch.get("state") in {"success", "dead", "error", "killed"} and batch.get("reconciled_at"):
+                continue
+            run = store.get_run(str(batch.get("run_id") or ""), workspace_id=batch.get("workspace_id"))
+            if not run:
+                continue
+            adapter = livy_adapter(self.db, run["workspace_id"], str(batch["engine_id"]))
+            try:
+                if run["execution_status"] in {"cancelling", "cancelled"} and batch.get("state") not in {
+                    "success", "dead", "error", "killed", "cancelling",
+                }:
+                    adapter.cancel(batch["id"])
+                    continue
+                current = adapter.reconcile(batch["id"])
+                state = str(current.get("state") or "unknown")
+                if state not in {"success", "dead", "error", "killed", "unknown"}:
+                    continue
+                if state == "success":
+                    manifest = adapter.result_manifest(batch["id"])
+                    ref = adapter.result_ref(
+                        batch["id"], owner_id=run["actor_id"],
+                        contract_version=run["contract_version"], policy_version=run["policy_version"],
+                        manifest=manifest,
+                    )
+                    value = {
+                        "status": "SUCCEEDED", "job_id": batch["id"],
+                        "dataset_ref_id": ref.ref_id, "output_refs": [ref.ref_id],
+                        "completeness": ref.result_completeness, "accuracy": ref.accuracy,
+                        "provenance_ref": ref.provenance_ref,
+                    }
+                    store.complete_external_action(
+                        run["id"], batch["id"], status="succeeded",
+                        result={
+                            "tool": "warehouse_spark_submit", "value": value,
+                            "tool_result": {
+                                "output_refs": [ref.ref_id], "completeness": ref.result_completeness,
+                                "validation_status": "not_evaluated", "preview": manifest.get("preview"),
+                            },
+                        },
+                    )
+                else:
+                    status = "cancelled" if state == "killed" and run["execution_status"] == "cancelling" else (
+                        "unknown" if state == "unknown" else "failed"
+                    )
+                    store.complete_external_action(
+                        run["id"], batch["id"], status=status,
+                        result={
+                            "tool": "warehouse_spark_submit", "ok": False,
+                            "error_code": f"spark_{state}", "state": state,
+                        }, error_code=f"spark_{state}",
+                    )
+                self.db.patch(
+                    "remote_batches", batch["id"], {"reconciled_at": utcnow()},
+                    workspace_id=run["workspace_id"],
+                )
+                if state != "unknown" and not any(
+                    item.get("run_id") == run["id"] and item.get("status") in {"queued", "running"}
+                    for item in self.db.list("jobs", workspace_id=run["workspace_id"], limit=5000)
+                ):
+                    get_job_manager(self.app).submit_spec(
+                        workspace_id=run["workspace_id"], session_id=run["session_id"],
+                        job_type="analysis_run", title="继续 Spark 作业后分析",
+                        spec={"run_id": run["id"]}, run_id=run["id"],
+                    )
+            except Exception as exc:
+                self.db.patch(
+                    "remote_batches", batch["id"],
+                    {"reconcile_error": str(exc), "reconcile_error_at": utcnow()},
+                    workspace_id=run["workspace_id"],
+                )
+
+
+def _dashboard_refresh_handler(app, spec, progress, cancel):
+    database: Database = app.extensions["meridian_db"]
+    dashboard_id = str(spec.get("dashboard_id") or "")
+    workspace_id = str(spec.get("workspace_id") or "default")
+    if cancel.is_set():
+        database.patch("dashboards", dashboard_id, {
+            "refresh_queued_at": None, "refresh_status": "cancelled",
+        }, workspace_id=workspace_id)
+        return {"dashboard_id": dashboard_id, "cancelled": True}
+    progress(10, "正在刷新看板数据")
+    current = database.get("dashboards", dashboard_id, workspace_id=workspace_id)
+    if not current:
+        raise FileNotFoundError("看板不存在")
+    try:
+        refreshed = refresh_dashboard(database, current)
+    except Exception as exc:
+        database.patch("dashboards", dashboard_id, {
+            "refresh_queued_at": None, "refresh_status": "error", "refresh_error": str(exc),
+        }, workspace_id=workspace_id)
+        raise
+    progress(100, "看板刷新完成")
+    return {"dashboard_id": refreshed["id"], "revision": refreshed["revision"]}
+
+
+register_job_handler("dashboard_refresh", _dashboard_refresh_handler)
 
 
 def start_scheduler(app: Flask) -> WorkflowScheduler:

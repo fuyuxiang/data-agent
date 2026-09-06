@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,8 @@ from urllib.parse import quote_plus, urlparse
 import duckdb
 import numpy as np
 import pandas as pd
+import sqlglot
+from sqlglot import expressions as sql_exp
 from flask import current_app
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import URL, make_url
@@ -396,19 +399,9 @@ def register_http(config: dict, workspace_id: str) -> dict:
         headers = {**headers, "Authorization": f"Bearer {auth_value}"}
     elif auth_type == "api_key" and auth_value:
         headers = {**headers, "X-API-Key": auth_value}
-    response = safe_http_request("GET", url, headers=headers, timeout=20)
-    response.raise_for_status()
-    content_type = response.headers.get("Content-Type", "").lower()
     json_path = str(config.get("json_path") or "").strip()
-    raw_text = response.text.strip()
-    if "csv" in content_type or (raw_text and not raw_text.startswith(("{", "["))):
-        try:
-            frame = pd.read_csv(io.StringIO(response.text))
-        except Exception:
-            payload = response.json()
-            frame = _flatten_http_json(payload, json_path)
-    else:
-        frame = _flatten_http_json(response.json(), json_path)
+    pagination = _http_pagination(config)
+    frame, page_meta = _load_http_dataset(url, headers, json_path, pagination)
     if frame.empty:
         raise ValueError("API 响应解析后为空，无法加载数据")
     _validate_frame_limits({"data": frame})
@@ -428,10 +421,13 @@ def register_http(config: dict, workspace_id: str) -> dict:
             "credential": vault.seal({
                 "headers": headers, "json_path": json_path,
                 "auth_type": auth_type, "auth_value": auth_value,
+                "pagination": pagination,
             }),
             "path": str(cache_path),
             "tables": [{"name": "data", "source_name": "data", "rows": len(frame), "columns": len(frame.columns)}],
             "status": "ready",
+            "ingestion_completeness": "complete" if page_meta["complete"] else "partial",
+            "pagination": page_meta,
             "last_refreshed_at": utcnow(),
         },
         workspace_id=workspace_id,
@@ -453,6 +449,119 @@ def _flatten_http_json(payload: Any, json_path: str = "") -> pd.DataFrame:
     if not isinstance(data, list):
         raise ValueError(f"无法将 {type(data).__name__} 格式的 API 响应转换为表格")
     return pd.json_normalize(data)
+
+
+def _json_path_value(payload: Any, path: str) -> Any:
+    value = payload
+    for part in filter(None, str(path or "").split(".")):
+        if isinstance(value, list) and part.isdigit():
+            value = value[int(part)]
+        elif isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return None
+    return value
+
+
+def _http_pagination(config: dict) -> dict[str, Any]:
+    raw = config.get("pagination")
+    value = dict(raw) if isinstance(raw, dict) else {}
+    mode = str(value.get("mode") or config.get("pagination_mode") or "none").lower()
+    if mode not in {"none", "page", "cursor", "next_url"}:
+        raise ValueError("API 分页模式仅支持 none、page、cursor 或 next_url")
+    return {
+        "mode": mode,
+        "page_param": str(value.get("page_param") or "page")[:100],
+        "start_page": max(0, int(value.get("start_page", 1))),
+        "page_size_param": str(value.get("page_size_param") or "")[:100],
+        "page_size": max(0, min(int(value.get("page_size") or 0), 10_000)),
+        "cursor_param": str(value.get("cursor_param") or "cursor")[:100],
+        "next_cursor_path": str(value.get("next_cursor_path") or "next_cursor")[:500],
+        "next_url_path": str(value.get("next_url_path") or "next")[:500],
+        "max_pages": max(1, min(int(value.get("max_pages") or 100), 1000)),
+        "max_records": max(
+            1, min(int(value.get("max_records") or settings().max_ingest_rows), settings().max_ingest_rows),
+        ),
+    }
+
+
+def _load_http_dataset(
+    url: str, headers: dict[str, Any], json_path: str, pagination: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frames: list[pd.DataFrame] = []
+    mode = pagination["mode"]
+    current_url = url
+    cursor: Any = None
+    page = pagination["start_page"]
+    fingerprints: set[str] = set()
+    complete = False
+    total = 0
+    for _page_index in range(pagination["max_pages"]):
+        params: dict[str, Any] = {}
+        if mode == "page":
+            params[pagination["page_param"]] = page
+            if pagination["page_size_param"] and pagination["page_size"]:
+                params[pagination["page_size_param"]] = pagination["page_size"]
+        elif mode == "cursor" and cursor not in (None, ""):
+            params[pagination["cursor_param"]] = cursor
+        response = safe_http_request("GET", current_url, headers=headers, params=params, timeout=20)
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "").lower()
+        raw_text = response.text.strip()
+        payload = None
+        if "csv" in content_type or (raw_text and not raw_text.startswith(("{", "["))):
+            try:
+                current = pd.read_csv(io.StringIO(response.text))
+            except Exception:
+                payload = response.json()
+                current = _flatten_http_json(payload, json_path)
+        else:
+            payload = response.json()
+            current = _flatten_http_json(payload, json_path)
+        response_bytes = getattr(response, "content", None)
+        if response_bytes is None:
+            response_bytes = response.text.encode("utf-8")
+        fingerprint = hashlib.sha256(response_bytes).hexdigest()
+        if fingerprint in fingerprints and mode != "none":
+            raise ValueError("API 分页返回重复页面，已停止以避免无限循环")
+        fingerprints.add(fingerprint)
+        remaining = pagination["max_records"] - total
+        if remaining <= 0:
+            break
+        frames.append(current.head(remaining))
+        total += min(len(current), remaining)
+        if mode == "none":
+            complete = True
+            break
+        if current.empty:
+            complete = True
+            break
+        if total >= pagination["max_records"]:
+            break
+        if mode == "page":
+            if pagination["page_size"] and len(current) < pagination["page_size"]:
+                complete = True
+                break
+            page += 1
+        elif mode == "cursor":
+            next_cursor = _json_path_value(payload, pagination["next_cursor_path"])
+            if next_cursor in (None, ""):
+                complete = True
+                break
+            if str(next_cursor) == str(cursor):
+                raise ValueError("API 分页游标没有前进")
+            cursor = next_cursor
+        else:
+            next_url = _json_path_value(payload, pagination["next_url_path"])
+            if not next_url:
+                complete = True
+                break
+            current_url = validate_outbound_url(str(next_url))
+    frame = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    return frame, {
+        "mode": mode, "pages_fetched": len(frames), "records_fetched": len(frame),
+        "complete": complete, "limit_reason": None if complete else "configured_page_or_record_limit",
+    }
 
 
 def register_google_sheet(config: dict, workspace_id: str) -> dict:
@@ -771,50 +880,14 @@ def source_frames(source: dict) -> dict[str, pd.DataFrame]:
         "file", "http", "derived", "workspace", "google_sheet", "lark_table", "lark_table_snapshot",
     }:
         return _read_tabular_file(Path(source["path"]))
-    if source["kind"] == "database":
-        vault = SecretVault(current_app.config["VAULT_KEY"])
-        secret = vault.open(source.get("credential", ""), {})
-        engine = _database_engine(secret["url"])
-        result: dict[str, pd.DataFrame] = {}
-        try:
-            with engine.connect() as connection:
-                _configure_read_only(connection, settings().query_timeout_seconds)
-                selected = source.get("analysis_tables")
-                candidates = source.get("tables", [])
-                if isinstance(selected, list):
-                    selected_names = {str(value) for value in selected}
-                    candidates = [
-                        table for table in candidates
-                        if table.get("name") in selected_names or table.get("source_name") in selected_names
-                    ]
-                for table in candidates[:50]:
-                    statement = bounded_read_only_sql(
-                        f"SELECT * FROM {_qualified_table(engine, table)}",  # noqa: S608 -- identifiers are quoted
-                        settings().source_sample_rows, _dialect_name(engine),
-                    )
-                    result[table["name"]] = pd.read_sql(text(statement), connection)
-        finally:
-            engine.dispose()
-        return result
+    if source["kind"] in {"database", "warehouse"}:
+        raise ValueError("远程数据源不允许经 source_frames 隐式拉取；请通过只读 SQL 下推并使用受控结果引用")
     raise ValueError("未知数据源类型")
 
 
 def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.DataFrame]:
-    if source.get("kind") == "database":
-        candidates = source.get("tables", [])
-        chosen = next(
-            (
-                item for item in candidates
-                if table_name and (item.get("name") == table_name or item.get("source_name") == table_name)
-            ),
-            candidates[0] if candidates and not table_name else None,
-        )
-        if not chosen:
-            raise ValueError(f"数据表不存在：{table_name}" if table_name else "数据源中没有可分析的数据表")
-        selected_source = {**source, "analysis_tables": [chosen.get("source_name") or chosen["name"]]}
-        frames = source_frames(selected_source)
-        name, frame = next(iter(frames.items()))
-        return _sanitize_table_name(name), frame
+    if source.get("kind") in {"database", "warehouse"}:
+        raise ValueError("远程数据源不允许经 source_table 转为 DataFrame；请先执行有范围的只读查询")
     frames = source_frames(source)
     if not frames:
         raise ValueError("数据源中没有可分析的数据表")
@@ -828,6 +901,13 @@ def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.D
 
 
 def schema_for_source(source: dict) -> dict:
+    if source.get("kind") == "warehouse":
+        return {
+            "source_id": source["id"], "engine_id": source.get("engine_id"),
+            "catalog": source.get("catalog"), "schema": source.get("schema"),
+            "lazy": True, "tables": [],
+            "catalog_url": f"/api/warehouse/engines/{source.get('engine_id')}/catalog",
+        }
     if source.get("kind") == "database":
         return {
             "source_id": source["id"],
@@ -888,7 +968,16 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
         raise ValueError("一个或多个数据源不属于当前工作空间")
     if len(sources) > 1 and any(source.get("kind") == "database" for source in sources):
         raise ValueError("数据库数据源不能与其他数据源直接联邦查询；请先生成受控快照后再关联")
-    # A single database source should execute on its native engine to preserve dialect.
+    parsed = sqlglot.parse_one(statement)
+    raw_limit = parsed.args.get("limit")
+    requested_top_n = None
+    if raw_limit and isinstance(raw_limit.expression, sql_exp.Literal) and not raw_limit.expression.is_string:
+        try:
+            requested_top_n = int(raw_limit.expression.this)
+        except (TypeError, ValueError):
+            requested_top_n = None
+    probe_limit = limit if requested_top_n is not None and requested_top_n <= limit else limit + 1
+    # A single database source executes on its native engine to preserve dialect.
     if len(sources) == 1 and sources[0]["kind"] == "database":
         source = sources[0]
         vault = SecretVault(current_app.config["VAULT_KEY"])
@@ -897,7 +986,7 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
         try:
             with engine.connect() as connection:
                 _configure_read_only(connection, settings().query_timeout_seconds)
-                bounded = bounded_read_only_sql(statement, limit, _dialect_name(engine))
+                bounded = bounded_read_only_sql(statement, probe_limit, _dialect_name(engine))
                 frame = pd.read_sql(text(bounded), connection)
         finally:
             engine.dispose()
@@ -916,7 +1005,7 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
                         name = _sanitize_table_name(f"{source['name']}_{base}")
                     used.add(name)
                     connection.register(name, frame)
-            bounded = bounded_read_only_sql(statement, limit, "duckdb")
+            bounded = bounded_read_only_sql(statement, probe_limit, "duckdb")
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meridian-query")
             future = executor.submit(lambda: connection.execute(bounded).fetchdf())
             try:
@@ -928,6 +1017,13 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
                 executor.shutdown(wait=True, cancel_futures=True)
         finally:
             connection.close()
+    # The extra probe row is private evidence that the server bound, including an
+    # oversized user LIMIT, changed the requested result. Never publish that row.
+    system_truncated = len(frame) > limit
+    if system_truncated:
+        frame = frame.head(limit).copy()
+    source_partial = any(source.get("ingestion_completeness") == "partial" for source in sources)
+    completeness = "system_truncated" if system_truncated else "source_partial" if source_partial else "complete"
     query_id = db().new_id("qry")
     result_path = settings().export_dir / f"{query_id}.csv"
     frame.to_csv(result_path, index=False)
@@ -939,6 +1035,11 @@ def execute_query(source_ids: list[str], sql: str, workspace_id: str, limit: int
             "source_ids": source_ids,
             "sql": statement,
             "rows": int(len(frame)),
+            "returned_rows": int(len(frame)),
+            "total_rows": int(len(frame)) if completeness == "complete" else None,
+            "completeness": completeness,
+            "accuracy": "exact",
+            "user_top_n": requested_top_n,
             "columns": [str(column) for column in frame.columns],
             "data": frame_records(frame, 300),
             "path": str(result_path),
@@ -953,23 +1054,29 @@ def load_result_frame(result_id: str) -> pd.DataFrame:
     result = db().get("query_results", result_id)
     if not result:
         raise ValueError("查询结果不存在")
-    return pd.read_csv(result["path"])
+    if result.get("dataset_ref_kind") in {"trino_query", "iceberg_table", "spark_output", "object_prefix"}:
+        raise ValueError("远程结果引用不得隐式转为 DataFrame")
+    path = Path(str(result.get("path") or ""))
+    if not path.is_file():
+        raise ValueError("查询结果文件不存在")
+    max_bytes = min(int(settings().max_upload_bytes), 50 * 1024 * 1024)
+    if path.stat().st_size > max_bytes or int(result.get("rows") or 0) > settings().max_query_rows:
+        raise ValueError("结果超过本地完整读取门禁，请在仓内继续计算")
+    return pd.read_csv(path)
 
 
 def refresh_source(source: dict) -> dict:
     if source["kind"] == "http":
         vault = SecretVault(current_app.config["VAULT_KEY"])
         secret = vault.open(source.get("credential", ""), {})
-        response = safe_http_request("GET", source["endpoint"], headers=secret.get("headers", {}), timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        for part in filter(None, str(secret.get("json_path", "")).split(".")):
-            data = data[int(part)] if isinstance(data, list) and part.isdigit() else data[part]
-        if isinstance(data, dict):
-            data = data.get("data", data.get("items", [data]))
-        frame = pd.json_normalize(data)
+        frame, page_meta = _load_http_dataset(
+            source["endpoint"], secret.get("headers", {}), str(secret.get("json_path", "")),
+            _http_pagination({"pagination": secret.get("pagination") or {"mode": "none"}}),
+        )
         _validate_frame_limits({"data": frame})
         frame.to_json(source["path"], orient="records", force_ascii=False)
+        source["ingestion_completeness"] = "complete" if page_meta["complete"] else "partial"
+        source["pagination"] = page_meta
     elif source["kind"] == "google_sheet":
         secret = SecretVault(current_app.config["VAULT_KEY"]).open(source.get("credential", ""), {})
         if secret.get("creds_dict"):

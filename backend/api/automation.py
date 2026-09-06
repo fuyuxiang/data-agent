@@ -17,7 +17,6 @@ from ..services.teams import retry_team_run, start_team_run, team_run_to_workflo
 from ..services.workflows import (
     STEP_TYPES,
     create_run_template,
-    execute_run,
     fork_run,
     generate_knowledge_candidates,
     reset_run_steps,
@@ -32,6 +31,13 @@ from .common import (
 
 
 bp = Blueprint("automation", __name__)
+
+
+def _owned_execution(collection: str, record_id: str, wid: str | None = None) -> dict:
+    item = require_workspace_record(collection, record_id, wid)
+    if str(item.get("actor_id") or "local-default") != current_user_id():
+        raise FileNotFoundError(f"{collection} 记录不存在：{record_id}")
+    return item
 
 
 def _valid_hook_event(event: str) -> bool:
@@ -285,36 +291,32 @@ def run_workflow(workflow_id: str):
     executable = {**workflow, "definition": workflow.get("published_definition") or workflow["definition"]}
     return ok(run=start_workflow(
         executable, payload.get("inputs") or {}, idempotency_key=payload.get("idempotency_key"),
+        actor_id=current_user_id(),
     )), 202
 
 
 @bp.get("/api/workflow-runs")
 def workflow_runs():
-    return ok(items=db().list("workflow_runs", workspace_id=workspace_id()))
+    return ok(items=[
+        item for item in db().list("workflow_runs", workspace_id=workspace_id())
+        if str(item.get("actor_id") or "local-default") == current_user_id()
+    ])
 
 
 @bp.get("/api/workflow-runs/<run_id>")
 @api_errors
 def workflow_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     detail = run_detail(db(), run)
     return ok(item=run, **detail)
 
 
 def _resume_run(run: dict):
     app = current_app._get_current_object()
-
-    def work(progress, cancel):
-        with app.app_context():
-            try:
-                return execute_run(run["id"], progress, cancel)
-            except Exception as exc:
-                db().patch("workflow_runs", run["id"], {"status": "failed", "error": str(exc), "finished_at": utcnow()})
-                raise
-
-    job = get_job_manager(app).submit(
+    job = get_job_manager(app).submit_spec(
         workspace_id=run["workspace_id"], session_id=run.get("inputs", {}).get("session_id"),
-        kind="workflow_resume", title=f"继续工作流：{run['id']}", work=work,
+        job_type="workflow_run", title=f"继续工作流：{run['id']}",
+        spec={"run_id": run["id"]}, run_id=run.get("agent_run_id"),
     )
     db().patch("workflow_runs", run["id"], {"job_id": job["id"]})
     return job
@@ -323,7 +325,7 @@ def _resume_run(run: dict):
 @bp.post("/api/workflow-runs/<run_id>/pause")
 @api_errors
 def pause_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     if run.get("status") not in {"queued", "running", "waiting_approval"}:
         raise ValueError("当前状态不可暂停")
     changes = {"pause_requested": True}
@@ -335,7 +337,7 @@ def pause_run(run_id: str):
 @bp.post("/api/workflow-runs/<run_id>/resume")
 @api_errors
 def resume_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     if run.get("status") != "paused":
         raise ValueError("只有已暂停的工作流可以继续")
     if any(state.get("status") == "waiting_approval" for state in run.get("step_states", {}).values()):
@@ -348,7 +350,7 @@ def resume_run(run_id: str):
 @bp.post("/api/workflow-runs/<run_id>/retry")
 @api_errors
 def retry_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     if run.get("status") != "failed":
         raise ValueError("只有失败的工作流可以重试")
     step_ids = body().get("step_ids")
@@ -362,7 +364,7 @@ def retry_run(run_id: str):
 @bp.post("/api/workflow-runs/<run_id>/approve")
 @api_errors
 def approve_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     require_workspace_access(run["workspace_id"], owner=True)
     step_id = str(body().get("step_id") or run.get("current_step_id") or "")
     state = run.get("step_states", {}).get(step_id)
@@ -387,7 +389,7 @@ def approve_run(run_id: str):
 @bp.post("/api/workflow-runs/<run_id>/reject")
 @api_errors
 def reject_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     require_workspace_access(run["workspace_id"], owner=True)
     payload = body()
     step_id = str(payload.get("step_id") or run.get("current_step_id") or "")
@@ -433,7 +435,7 @@ def reject_run(run_id: str):
 @bp.post("/api/workflow-runs/<run_id>/cancel")
 @api_errors
 def cancel_run(run_id: str):
-    run = require_workspace_record("workflow_runs", run_id)
+    run = _owned_execution("workflow_runs", run_id)
     accepted = get_job_manager(current_app._get_current_object()).cancel(run.get("job_id", ""))
     item = db().patch(
         "workflow_runs", run_id,
@@ -444,7 +446,9 @@ def cancel_run(run_id: str):
 
 def _require_session_run(session_id: str, run_id: str) -> tuple[dict, dict]:
     session_record = require_workspace_record("sessions", session_id)
-    run = require_workspace_record("workflow_runs", run_id, session_record["workspace_id"])
+    if str(session_record.get("owner_id") or "local-default") != current_user_id():
+        raise FileNotFoundError("会话不存在")
+    run = _owned_execution("workflow_runs", run_id, session_record["workspace_id"])
     run_session = str(run.get("inputs", {}).get("session_id") or "")
     if run_session and run_session != session_id:
         raise FileNotFoundError("工作流运行不存在")
@@ -455,6 +459,8 @@ def _require_session_run(session_id: str, run_id: str) -> tuple[dict, dict]:
 @api_errors
 def start_session_workflow_run(session_id: str):
     session_record = require_workspace_record("sessions", session_id)
+    if str(session_record.get("owner_id") or "local-default") != current_user_id():
+        raise FileNotFoundError("会话不存在")
     payload = body()
     version_id = str(payload.get("workflow_version_id") or "")
     version = require_workspace_record("workflow_versions", version_id, session_record["workspace_id"])
@@ -466,7 +472,10 @@ def start_session_workflow_run(session_id: str):
     }
     inputs = deepcopy(payload.get("inputs") if isinstance(payload.get("inputs"), dict) else {})
     inputs["session_id"] = session_id
-    run = start_workflow(executable, inputs, idempotency_key=payload.get("idempotency_key"))
+    run = start_workflow(
+        executable, inputs, idempotency_key=payload.get("idempotency_key"),
+        actor_id=current_user_id(),
+    )
     return ok(run=run), 202
 
 
@@ -474,6 +483,8 @@ def start_session_workflow_run(session_id: str):
 @api_errors
 def list_session_workflow_runs(session_id: str):
     session_record = require_workspace_record("sessions", session_id)
+    if str(session_record.get("owner_id") or "local-default") != current_user_id():
+        raise FileNotFoundError("会话不存在")
     runs = [
         item for item in db().list("workflow_runs", workspace_id=session_record["workspace_id"], limit=5000)
         if str(item.get("inputs", {}).get("session_id") or "") == session_id
@@ -865,6 +876,7 @@ def create_schedule():
             "id": db().new_id("sched"), "workspace_id": wid, "name": str(payload.get("name") or "定时分析")[:100],
             "workflow_id": payload["workflow_id"], "cron": cron,
             "timezone": timezone_name, "inputs": payload.get("inputs", {}),
+            "actor_id": current_user_id(),
             "enabled": bool(payload.get("enabled", True)), "last_run_at": None, "next_run_at": payload.get("next_run_at"),
         },
         workspace_id=wid,
@@ -915,7 +927,7 @@ def run_schedule_now(schedule_id: str):
     if workflow.get("status") != "published" or not workflow.get("published_definition"):
         raise ValueError("调度关联的工作流尚未发布")
     executable = {**workflow, "definition": workflow["published_definition"]}
-    run = start_workflow(executable, schedule.get("inputs", {}))
+    run = start_workflow(executable, schedule.get("inputs", {}), actor_id=current_user_id())
     db().patch("schedules", schedule_id, {"last_run_at": utcnow(), "last_run_id": run["id"]})
     return ok(run=run), 202
 
@@ -1082,25 +1094,28 @@ def create_team():
 @api_errors
 def run_team(team_id: str):
     team = require_workspace_record("teams", team_id)
-    run, job = start_team_run(team, body())
+    run, job = start_team_run(team, {**body(), "actor_id": current_user_id()})
     return ok(run=run, job=job), 202
 
 
 @bp.get("/api/team-runs")
 def list_team_runs():
-    return ok(items=db().list("team_runs", workspace_id=workspace_id()))
+    return ok(items=[
+        item for item in db().list("team_runs", workspace_id=workspace_id())
+        if str(item.get("actor_id") or "local-default") == current_user_id()
+    ])
 
 
 @bp.get("/api/team-runs/<run_id>")
 @api_errors
 def get_team_run(run_id: str):
-    return ok(item=require_workspace_record("team_runs", run_id))
+    return ok(item=_owned_execution("team_runs", run_id))
 
 
 @bp.post("/api/team-runs/<run_id>/retry")
 @api_errors
 def retry_team_tasks(run_id: str):
-    run = require_workspace_record("team_runs", run_id)
+    run = _owned_execution("team_runs", run_id)
     if run.get("status") not in {"partial_failed", "failed", "needs_review"}:
         raise ValueError("当前团队运行没有可重试任务")
     team = require_workspace_record("teams", run["team_id"])
@@ -1108,14 +1123,14 @@ def retry_team_tasks(run_id: str):
     if task_ids is not None and not isinstance(task_ids, list):
         raise ValueError("task_ids 必须是数组")
     reset = retry_team_run(run, [str(item) for item in task_ids] if task_ids else None)
-    item, job = start_team_run(team, {}, existing_run=reset)
+    item, job = start_team_run(team, {"actor_id": current_user_id()}, existing_run=reset)
     return ok(item=item, job=job), 202
 
 
 @bp.post("/api/team-runs/<run_id>/cancel")
 @api_errors
 def cancel_team_run(run_id: str):
-    run = require_workspace_record("team_runs", run_id)
+    run = _owned_execution("team_runs", run_id)
     accepted = get_job_manager(current_app._get_current_object()).cancel(str(run.get("job_id") or ""))
     item = db().patch("team_runs", run_id, {"status": "cancelled", "finished_at": utcnow()})
     return ok(item=item, accepted=accepted)
@@ -1124,7 +1139,7 @@ def cancel_team_run(run_id: str):
 @bp.post("/api/team-runs/<run_id>/workflow")
 @api_errors
 def promote_team_run(run_id: str):
-    run = require_workspace_record("team_runs", run_id)
+    run = _owned_execution("team_runs", run_id)
     team = require_workspace_record("teams", run["team_id"])
     return ok(item=team_run_to_workflow(team, run)), 201
 

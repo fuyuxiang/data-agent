@@ -1,6 +1,6 @@
-import { api, stream, withWorkspace } from './api.js';
+import { api, withWorkspace } from './api.js';
 import { Icon, Modal, StatusPill, ToastStack } from './components.js';
-import { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, GpuPanel, KnowledgePanel, MapsPanel, SettingsPanel, SourcesPanel } from './panels.js';
+import { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, KnowledgePanel, SettingsPanel, SourcesPanel } from './panels.js';
 
 const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
@@ -10,14 +10,12 @@ const routes = [
   { id: 'knowledge', label: '业务知识', icon: 'book' },
   { id: 'automation', label: '自动化中心', icon: 'workflow' },
   { id: 'dashboards', label: '分析看板', icon: 'dashboard' },
-  { id: 'maps', label: '决策地图', icon: 'map' },
   { id: 'feishu', label: '飞书机器人', icon: 'workflow' },
-  { id: 'gpu', label: 'GPU 算力', icon: 'database' },
   { id: 'settings', label: '系统设置', icon: 'settings' },
 ];
 
 const Root = {
-  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, GpuPanel, Icon, KnowledgePanel, MapsPanel, Modal, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
+  components: { AutomationPanel, ChatPanel, DashboardsPanel, FeishuBotPanel, Icon, KnowledgePanel, Modal, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
   setup() {
     const state = reactive({
       ready: false, authChecking: true, authRequired: false, registrationOpen: false,
@@ -25,7 +23,6 @@ const Root = {
       route: location.hash.slice(1) || 'chat', sidebarOpen: false,
       workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [],
       sessions: [], activeSessionId: '', sources: [], providers: [], skills: [], analysisMethods: [], agentProfiles: [],
-      messages: [], chatRunning: false, chatStages: [], chatDraft: null, abortController: null,
       busy: false, busyLabel: '', toasts: [], jobsOpen: false, jobs: [], activeJobs: 0,
       commandOpen: false, commands: [], commandQuery: '', theme: document.documentElement.dataset.theme || 'light',
     });
@@ -49,12 +46,6 @@ const Root = {
     };
     const number = (value) => new Intl.NumberFormat('zh-CN').format(value || 0);
 
-    const loadMessages = async () => {
-      const session = activeSession();
-      if (!session) { state.messages = []; return; }
-      const result = await api(`/api/sessions/${session.id}/messages`);
-      state.messages = result.items;
-    };
     const bootstrap = async () => {
       state.busy = true; state.busyLabel = '正在准备工作空间';
       try {
@@ -77,7 +68,7 @@ const Root = {
         state.activeSessionId = data.active_session?.id || data.sessions[0]?.id || '';
         state.skills = skills.items; state.analysisMethods = methods.items; state.agentProfiles = profiles.items; state.commands = commands.items;
         localStorage.setItem('meridian-workspace', state.workspaceId);
-        await loadMessages(); await loadJobs(); state.ready = true;
+        await loadJobs(); state.ready = true;
       } catch (error) {
         if (error?.status === 401) state.authRequired = true; else fail(error);
       }
@@ -108,43 +99,11 @@ const Root = {
     };
     const go = (route) => { state.route = route; location.hash = route; state.sidebarOpen = false; };
     const switchWorkspace = async () => { localStorage.setItem('meridian-workspace', state.workspaceId); await bootstrap(); };
-    const switchSession = async (id) => { state.activeSessionId = id; await loadMessages(); go('chat'); };
+    const switchSession = async (id) => { state.activeSessionId = id; go('chat'); };
     const newSession = async (name = '新分析会话') => {
       const result = await api('/api/sessions', { method:'POST', body:{ name, workspace_id:state.workspaceId, source_ids:state.sources.slice(0,1).map(item=>item.id) } });
-      state.sessions.forEach(item => item.status = 'idle'); state.sessions.unshift(result.item); state.activeSessionId = result.item.id; state.messages = []; go('chat');
+      state.sessions.forEach(item => item.status = 'idle'); state.sessions.unshift(result.item); state.activeSessionId = result.item.id; go('chat');
     };
-    const sendMessage = async (message, skillId = '') => {
-      let session = activeSession(); if (!session) { await newSession(); session = activeSession(); }
-      const user = { id:`local-${Date.now()}`, role:'user', content:message, created_at:new Date().toISOString(), metadata:{} };
-      state.messages.push(user); state.chatRunning = true; state.chatStages = []; state.chatDraft = {};
-      state.abortController = new AbortController();
-      try {
-        await stream(`/api/sessions/${session.id}/messages`, { message, source_ids:session.source_ids || [], provider_id:session.provider_id, skill_id:skillId }, async (event,payload) => {
-          if (event === 'stage') {
-            const current = state.chatStages.find(item => item.id === payload.id);
-            if (current) Object.assign(current,payload); else state.chatStages.push(payload);
-          } else if (event === 'tool_start') {
-            state.chatStages.push({ id:`tool-${payload.id}`, label:`调用工具：${payload.tool}`, status:'running' });
-          } else if (event === 'tool_end') {
-            const current = state.chatStages.find(item => item.id === `tool-${payload.id}`);
-            if (current) Object.assign(current,{ status:'completed', ok:payload.ok });
-          } else if (event === 'text_delta') state.chatDraft.content = (state.chatDraft.content || '') + (payload.content || '');
-          else if (event === 'plan') state.chatDraft.sql = payload.sql;
-          else if (event === 'table') state.chatDraft.table = payload;
-          else if (event === 'chart') state.chatDraft.chart = payload;
-          else if (event === 'artifact') (state.chatDraft.artifacts ||= []).push(payload);
-          else if (event === 'outline') (state.chatDraft.outlines ||= []).push(payload);
-          else if (event === 'ask_user') state.chatDraft.question = payload;
-          else if (event === 'diagram') (state.chatDraft.diagrams ||= []).push(payload);
-          else if (event === 'dashboard') (state.chatDraft.dashboards ||= []).push(payload);
-          else if (event === 'tool_result_artifact') (state.chatDraft.toolResults ||= []).push(payload);
-          else if (event === 'message') { state.chatDraft.content = payload.content; state.messages.push({ role:'assistant', created_at:new Date().toISOString(), ...payload }); }
-          else if (event === 'error') throw new Error(payload.error || '分析失败');
-        }, state.abortController.signal);
-      } catch (error) { if (error.name !== 'AbortError') fail(error); }
-      finally { state.chatRunning=false; state.chatDraft=null; state.abortController=null; }
-    };
-    const stopMessage = async () => { state.abortController?.abort(); const session=activeSession(); if(session) api(`/api/sessions/${session.id}/stop`,{method:'POST'}).catch(()=>{}); state.chatRunning=false; state.chatDraft=null; };
     const command = async (raw) => {
       let [name,...rest]=raw.slice(1).trim().split(/\s+/); const arg=rest.join(' ');
       const aliases={n:'new',cp:'checkpoint',c:'compact',h:'help','?':'help',i:'instruction',kb:'knowledge',bot:'robot',session:'sessions',sk:'skills',s:'status',ws:'workspace'};name=aliases[name]||name;
@@ -152,24 +111,22 @@ const Root = {
       if(name==='data'||name==='sources'||name==='profile') return go('sources');
       if(name==='knowledge') return go('knowledge');
       if(name==='jobs') { state.jobsOpen=true; return loadJobs(); }
-      if(name==='clear') { const session=activeSession();if(session)await api(`/api/sessions/${session.id}/clear`,{method:'POST'});state.messages=[];toast('','对话已清除');return; }
-      if(name==='compact'){const session=activeSession();if(!session)return;await api(`/api/sessions/${session.id}/commands/compact/execute`,{method:'POST',body:{arguments:arg}});await loadMessages();toast('','上下文已压缩');return;}
+      if(name==='clear') { const session=activeSession();if(session)await api(`/api/sessions/${session.id}/clear`,{method:'POST'});toast('','会话上下文已清除');return; }
+      if(name==='compact'){const session=activeSession();if(!session)return;await api(`/api/sessions/${session.id}/commands/compact/execute`,{method:'POST',body:{arguments:arg}});toast('','上下文已压缩');return;}
       if(name==='save') { const session=activeSession(); if(session){await api(`/api/sessions/${session.id}/save`,{method:'POST',body:{name:arg||session.name}});toast('当前消息与分析证据已保存','会话已保存');} return; }
       if(name==='instruction'){const session=activeSession();if(!session)return;const value=arg||prompt('输入仅对当前会话生效的指令：',session.temporary_instruction||'')||'';if(value){session.temporary_instruction=value;session.temp_prompt_enabled=true;await api(`/api/sessions/${session.id}`,{method:'PATCH',body:{temporary_instruction:value,temp_prompt_enabled:true}});toast('','临时指令已更新');}return;}
       if(name==='checkpoint'){const result=await api(`/api/workspaces/${state.workspaceId}/checkpoints`);toast(`共 ${result.items.length} 个可恢复快照`,'快照与历史');return;}
-      if(name==='stop')return stopMessage();
       if(name==='teams'){localStorage.setItem('meridian-automation-tab','teams');return go('automation');}
       if(name==='robot') return go('feishu');
-      if(name==='gpu') return go('gpu');
       if(name==='mcp'||name==='skills'||name==='workspace'){localStorage.setItem('meridian-settings-tab',name==='skills'?'skills':name==='mcp'?'mcp':'compute');return go('settings');}
       if(name==='sessions'){if(arg==='new')return newSession();toast(`${state.sessions.length} 个当前工作空间会话`,'会话');return;}
-      if(name==='status'){const session=activeSession();toast(`${selectedSources().length} 个数据源 · ${session?.provider_id||'默认模型'} · ${state.messages.length} 条消息`,'当前状态');return;}
+      if(name==='status'){const session=activeSession();toast(`${selectedSources().length} 个数据源 · ${session?.provider_id||'默认模型'}`,'当前状态');return;}
       if(name==='help'){state.commandQuery=arg;state.commandOpen=true;return;}
       state.commandQuery=name;state.commandOpen=true;
     };
     const loadJobs = async () => { try { const result=await api(withWorkspace('/api/jobs?limit=50',state.workspaceId));state.jobs=result.items;state.activeJobs=state.jobs.filter(item=>['queued','running','waiting_approval'].includes(item.status)).length; } catch{/* background refresh */} };
     const toggleTheme = () => { state.theme=state.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=state.theme;localStorage.setItem('meridian-theme',state.theme); };
-    const ctx = { state, toast, fail, run, activeSession, selectedSources, time, number, go, sendMessage, stopMessage, command };
+    const ctx = { state, toast, fail, run, activeSession, selectedSources, time, number, go, command };
 
     let jobTimer;
     const keydown = (event) => {
@@ -212,9 +169,7 @@ const Root = {
         <KnowledgePanel v-else-if="state.route==='knowledge'" :ctx="ctx" :key="state.workspaceId"/>
         <AutomationPanel v-else-if="state.route==='automation'" :ctx="ctx" :key="state.workspaceId"/>
         <DashboardsPanel v-else-if="state.route==='dashboards'" :ctx="ctx" :key="state.workspaceId"/>
-        <MapsPanel v-else-if="state.route==='maps'" :ctx="ctx" :key="state.workspaceId"/>
         <FeishuBotPanel v-else-if="state.route==='feishu'" :ctx="ctx" :key="state.workspaceId+'-'+state.activeSessionId"/>
-        <GpuPanel v-else-if="state.route==='gpu'" :ctx="ctx" :key="state.workspaceId"/>
         <SettingsPanel v-else :ctx="ctx" :key="state.workspaceId"/>
       </main>
       <button class="theme-fab" @click="toggleTheme" :title="state.theme==='dark'?'切换浅色':'切换深色'"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button>

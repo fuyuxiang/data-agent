@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.agent.store import RunStore
+
 
 def wait_for(client, path, statuses, timeout=8):
     deadline = time.time() + timeout
@@ -48,7 +50,7 @@ def test_schedule_requires_published_workflow_and_valid_configuration(client):
     assert client.patch(f"/api/schedules/{schedule_id}", json={"timezone": "Not/AZone"}).status_code == 400
 
 
-def test_workflow_validation_approval_resume_and_export(client, source):
+def test_workflow_validation_approval_resume_and_export(app, client, source):
     definition = {
         "steps": [
             {"id": "query", "name": "查询", "type": "query", "depends_on": [], "config": {"source_ids": [source["id"]], "sql": "SELECT * FROM data"}},
@@ -68,6 +70,9 @@ def test_workflow_validation_approval_resume_and_export(client, source):
     completed = wait_for(client, f"/api/workflow-runs/{run['id']}", {"completed", "failed"})
     assert completed["status"] == "completed", completed.get("error")
     assert completed["outputs"]["deliver"]["kind"] == "xlsx"
+    assert completed["publication_id"]
+    actions = RunStore(app.extensions["meridian_db"]).actions(completed["agent_run_id"])
+    assert {item["tool_id"] for item in actions} == {"workflow_step", "validate_result"}
 
 
 def test_invalid_workflow_cycle(client):
@@ -142,7 +147,8 @@ def test_team_hook_map_dashboard_and_trash(client, source):
     assert team_run.status_code == 202
     job_id = team_run.get_json()["job"]["id"]
     job = wait_for(client, f"/api/jobs/{job_id}", {"completed", "failed"})
-    assert job["status"] == "completed"
+    assert job["status"] == "failed"
+    assert "模型" in str(job.get("error") or "")
 
     hook = client.post("/api/hooks", json={"name": "一次记录", "event": "test.done", "once": True, "action": {"type": "noop"}})
     assert hook.status_code == 201
@@ -191,33 +197,55 @@ def test_team_members_use_bounded_tools_mailbox_and_quality_review(client, sourc
     class Completions:
         def __init__(self):
             self.calls = []
-            self.responses = [
-                SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(
-                        content=None,
-                        tool_calls=[SimpleNamespace(
-                            id="team_schema", function=SimpleNamespace(name="get_schema", arguments="{}"),
-                        )],
-                    ))],
-                    usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12),
-                ),
-                SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(
-                        content="已依据 schema 证据完成风险检查。", tool_calls=[],
-                    ))],
-                    usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5, total_tokens=17),
-                ),
-                SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(
-                        content="负责人汇总：证据链完整。", tool_calls=[],
-                    ))],
-                    usage=SimpleNamespace(prompt_tokens=8, completion_tokens=4, total_tokens=12),
-                ),
-            ]
+            self.stream_calls = 0
 
         def create(self, **kwargs):
             self.calls.append(kwargs)
-            return self.responses.pop(0)
+            if kwargs.get("stream"):
+                self.stream_calls += 1
+                if not kwargs.get("tools"):
+                    delta = SimpleNamespace(
+                        content="负责人汇总：证据链完整。", refusal=None, tool_calls=[],
+                    )
+                    finish = "stop"
+                elif self.stream_calls == 1:
+                    delta = SimpleNamespace(
+                        content=None, refusal=None,
+                        tool_calls=[SimpleNamespace(
+                            index=0, id="team_query",
+                            function=SimpleNamespace(
+                                name="query_data", arguments='{"sql":"SELECT region, SUM(sales) AS sales FROM data GROUP BY region"}',
+                            ),
+                        )],
+                    )
+                    finish = "tool_calls"
+                elif self.stream_calls == 2:
+                    previous = __import__("json").loads(kwargs["messages"][-1]["content"])
+                    arguments = __import__("json").dumps({
+                        "dataset_ref_id": previous["dataset_ref_id"],
+                        "result_id": previous["result_id"],
+                    })
+                    delta = SimpleNamespace(
+                        content=None, refusal=None,
+                        tool_calls=[SimpleNamespace(
+                            index=0, id="team_validate",
+                            function=SimpleNamespace(name="validate_result", arguments=arguments),
+                        )],
+                    )
+                    finish = "tool_calls"
+                else:
+                    delta = SimpleNamespace(
+                        content="已依据 schema 证据完成风险检查。", refusal=None, tool_calls=[],
+                    )
+                    finish = "stop"
+                return iter([SimpleNamespace(
+                    choices=[SimpleNamespace(delta=delta, finish_reason=finish)],
+                    usage=SimpleNamespace(prompt_tokens=10, completion_tokens=3, total_tokens=13),
+                )])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="负责人汇总：证据链完整。"))],
+                usage=SimpleNamespace(prompt_tokens=8, completion_tokens=4, total_tokens=12),
+            )
 
     completions = Completions()
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -244,10 +272,12 @@ def test_team_members_use_bounded_tools_mailbox_and_quality_review(client, sourc
     assert job["status"] == "completed", job.get("error")
     run = client.get(f"/api/team-runs/{started['run']['id']}").get_json()["item"]
     assert run["status"] == "completed"
-    assert run["tasks"][0]["result"]["tool_evidence"][0]["tool"] == "get_schema"
+    assert {item["tool"] for item in run["tasks"][0]["result"]["tool_evidence"]} >= {
+        "query_data", "validate_result",
+    }
     assert run["review"]["status"] == "passed"
     assert run["summary"] == "负责人汇总：证据链完整。"
     assert "重点检查字段结构" in completions.calls[0]["messages"][1]["content"]
     assert {item["function"]["name"] for item in completions.calls[0]["tools"]} == {
-        "get_schema", "profile_data", "query_data",
+        "get_schema", "profile_data", "query_data", "validate_result", "update_plan",
     }

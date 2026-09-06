@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, jsonify, request, session as flask_session
 
-from ..services.agent_runtime import run_conversation
+from ..agent.contracts import TaskContract
+from ..agent.store import RunStore
+from ..services.advanced_agent import available_formal_tools
 from ..services.hooks import dispatch_hooks
 from .common import api_errors, body, db, ok, require_workspace_record, workspace_id
 
 
 bp = Blueprint("conversation", __name__)
-_cancelled: set[str] = set()
-_lock = threading.RLock()
 
 
 def _owned_tool_result(session_id: str, artifact_id: str) -> tuple[dict, dict]:
@@ -117,48 +116,38 @@ def chat(session_id: str):
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
 
-    @stream_with_context
-    def generate():
-        def should_cancel() -> bool:
-            with _lock:
-                return session_id in _cancelled
-
-        try:
-            for event in run_conversation(
-                session_id=session_id,
-                workspace_id=wid,
-                question=question,
-                source_ids=[str(item) for item in source_ids],
-                provider_id=provider_id,
-                skill_id=payload.get("skill_id"),
-                should_cancel=should_cancel,
-            ):
-                with _lock:
-                    if session_id in _cancelled:
-                        _cancelled.discard(session_id)
-                        yield f"event: cancelled\ndata: {json.dumps({'ok': False, 'cancelled': True}, ensure_ascii=False)}\n\n"
-                        return
-                yield event
-            refreshed = db().get("sessions", session_id) or session
-            if refreshed.get("feishu_bot_enabled") and refreshed.get("feishu_chat_id"):
-                yield f"event: feishu_sync\ndata: {json.dumps({'status': 'sending'}, ensure_ascii=False)}\n\n"
-                try:
-                    from ..services.feishu_bot import sync_web_turn
-
-                    assistant = next(
-                        (item for item in reversed(db().messages(session_id, 5000)) if item.get("role") == "assistant"),
-                        None,
-                    )
-                    if assistant:
-                        sync_web_turn(db(), refreshed, question, assistant["content"])
-                    yield f"event: feishu_sync\ndata: {json.dumps({'status': 'sent'}, ensure_ascii=False)}\n\n"
-                except Exception:
-                    yield f"event: feishu_sync\ndata: {json.dumps({'status': 'failed'}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False)}\n\n"
-
+    # Compatibility endpoint is deliberately a thin adapter: it creates the same
+    # governed run and returns the required confirmation card. Execution never
+    # lives in the HTTP request and never enters the retired fallback loop.
+    store = RunStore(db())
+    contract = TaskContract.from_payload({
+        "objective": question,
+        "coverage": payload.get("coverage") or "所选来源的已授权数据范围；请在确认卡核对时间口径",
+        "dimensions": payload.get("dimensions") or ["时间", "业务实体", "可用分类属性"],
+        "deliverables": payload.get("deliverables") or ["summary", "dashboard", "report"],
+        "source_scope": source_ids,
+    })
+    actor = str(flask_session.get("user_id") or "local-default")
+    run, created = store.create_run(
+        workspace_id=wid, session_id=session_id, actor_id=actor,
+        source_scope=[str(item) for item in source_ids],
+        allowed_tool_ids=available_formal_tools(db(), wid, session_id, [str(item) for item in source_ids]),
+        provider_id=provider_id, skill_id=payload.get("skill_id"),
+        idempotency_key=str(request.headers.get("Idempotency-Key") or "") or None,
+    )
+    if created:
+        db().add_message(session_id, "user", question, {"run_id": run["id"]})
+        store.add_contract(run["id"], contract, expected_version=0)
+        db().patch("sessions", session_id, {"current_run_id": run["id"]}, workspace_id=wid)
+    event = {
+        "run_id": run["id"], "status": "waiting_input", "requires_confirmation": True,
+        "contract": (store.latest_contract(run["id"]) or {}).get("payload", contract.to_dict()),
+        "contract_version": (store.latest_contract(run["id"]) or {}).get("version", 1),
+    }
+    wire = f"event: contract\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+    wire += f"event: done\ndata: {json.dumps({'ok': True, **event}, ensure_ascii=False)}\n\n"
     return Response(
-        generate(),
+        wire,
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
@@ -167,10 +156,24 @@ def chat(session_id: str):
 @bp.post("/api/sessions/<session_id>/stop")
 @api_errors
 def stop_chat(session_id: str):
-    require_workspace_record("sessions", session_id)
-    with _lock:
-        _cancelled.add(session_id)
-    return ok(cancel_requested=True)
+    session_record = require_workspace_record("sessions", session_id)
+    store = RunStore(db())
+    active = next((
+        item for item in store.list_runs(session_record["workspace_id"], session_id=session_id, limit=100)
+        if item["execution_status"] not in {"finished", "failed", "cancelled"}
+    ), None)
+    if not active:
+        return ok(cancel_requested=False, idempotent=True)
+    store.update_status(active["id"], "cancelling", stop_reason="cancel_requested")
+    from ..services.jobs import get_job_manager
+
+    job = next((
+        item for item in db().list("jobs", workspace_id=session_record["workspace_id"], limit=5000)
+        if item.get("run_id") == active["id"] and item.get("status") in {"queued", "running"}
+    ), None)
+    if job:
+        get_job_manager(current_app._get_current_object()).cancel(job["id"])
+    return ok(cancel_requested=True, run_id=active["id"])
 
 
 @bp.post("/api/sessions/<session_id>/compact")

@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, g, jsonify, request, send_from_directory, session
+from flask import Flask, g, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -73,7 +73,6 @@ def create_app(test_config: dict | None = None) -> Flask:
             settings.frontend_dir / "src" / "renders.js",
             settings.frontend_dir / "vendor" / "vue.global.prod.js",
             settings.frontend_dir / "vendor" / "echarts-china.min.js",
-            settings.frontend_dir / "drawio" / "index.html",
         )
         if not all(path.is_file() for path in required_frontend_files):
             raise RuntimeError(
@@ -209,7 +208,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"ok": False, "error": "当前成员只有只读权限"}), 403
         owner_only_prefixes = (
             "/api/providers", "/api/models", "/api/mcp", "/api/connectors",
-            "/api/compute", "/api/gpu", "/api/system/", "/api/hooks", "/api/feishu-bot",
+            "/api/compute", "/api/system/", "/api/hooks", "/api/feishu-bot",
+            "/api/warehouse/engines",
         )
         if (
             request.method in {"POST", "PUT", "PATCH", "DELETE"}
@@ -235,13 +235,6 @@ def create_app(test_config: dict | None = None) -> Flask:
     def frontend_vendor(filename: str):
         return send_from_directory(settings.frontend_dir / "vendor", filename)
 
-    @app.get("/static/drawio/<path:filename>")
-    def drawio_asset(filename: str):
-        parts = {part.upper() for part in filename.replace("\\", "/").split("/")}
-        if parts & {"WEB-INF", "META-INF"}:
-            abort(404)
-        return send_from_directory(settings.frontend_dir / "drawio", filename)
-
     @app.get("/api/health")
     def health():
         return jsonify({
@@ -255,10 +248,17 @@ def create_app(test_config: dict | None = None) -> Flask:
     def ready():
         database_status = database.ping()
         storage_ready = settings.storage_dir.is_dir() and os.access(settings.storage_dir, os.W_OK)
+        try:
+            from .services.data_plane.factory import sandbox_client
+
+            sandbox = sandbox_client().capability()
+        except Exception as exc:
+            sandbox = {"available": False, "host_fallback": False, "error": str(exc)}
         status = 200 if storage_ready and database_status == "ready" else 503
         return jsonify({
             "ok": status == 200, "database": database_status, "storage_writable": storage_ready,
             "scheduler": "disabled" if os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") == "1" else "enabled",
+            "sandbox": sandbox,
         }), status
 
     @app.errorhandler(413)
@@ -300,27 +300,16 @@ def create_app(test_config: dict | None = None) -> Flask:
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains",
             )
-        if request.path.startswith("/static/drawio/"):
-            # The vendored draw.io runtime requires inline/evaluated plugin code. Keep that
-            # exception isolated to its same-origin iframe instead of weakening the workbench CSP.
-            response.headers.setdefault(
-                "Content-Security-Policy",
-                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
-                "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; "
-                "font-src 'self' data:; worker-src 'self' blob:; object-src 'none'; "
-                "base-uri 'self'; frame-ancestors 'self'",
-            )
-        else:
-            nonce = str(getattr(g, "csp_nonce", ""))
-            script_policy = f"'self' 'nonce-{nonce}'"
-            if settings.environment != "production" and not app.config.get("TESTING"):
-                script_policy += " 'unsafe-eval'"
-            response.headers.setdefault(
-                "Content-Security-Policy",
-                f"default-src 'self'; script-src {script_policy}; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; "
-                "frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
-            )
+        nonce = str(getattr(g, "csp_nonce", ""))
+        script_policy = f"'self' 'nonce-{nonce}'"
+        if settings.environment != "production" and not app.config.get("TESTING"):
+            script_policy += " 'unsafe-eval'"
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            f"default-src 'self'; script-src {script_policy}; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; "
+            "frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+        )
         if response.mimetype == "text/html" or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         if request.path.startswith("/api/"):

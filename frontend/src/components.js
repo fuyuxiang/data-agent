@@ -67,7 +67,7 @@ export const StatusPill = {
   props: { status: String, label: String },
   computed: {
     text() {
-      const map = { ready: '就绪', active: '使用中', configured: '已配置', connected: '已连接', running: '运行中', queued: '排队中', waiting_approval: '待审批', completed: '已完成', failed: '失败', cancelled: '已取消', draft: '草稿', published: '已发布', online: '在线', received: '已接收' };
+      const map = { ready: '就绪', active: '使用中', configured: '已配置', connected: '已连接', running: '运行中', queued: '排队中', waiting_input: '待确认', waiting_job: '远程作业中', waiting_approval: '待审批', paused: '已暂停', cancelling: '取消中', finished: '已结束', completed: '已完成', failed: '失败', cancelled: '已取消', draft: '草稿', published: '已发布', online: '在线', received: '已接收' };
       return this.label || map[this.status] || this.status || '未知';
     },
   },
