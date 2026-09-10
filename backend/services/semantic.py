@@ -19,6 +19,7 @@ AGGREGATIONS = {"sum", "avg", "min", "max", "count", "count_distinct"}
 ENTITY_TYPES = {"primary", "foreign", "unique", "natural"}
 DIMENSION_TYPES = {"categorical", "time", "boolean", "numeric"}
 METRIC_STATUSES = {"draft", "approved", "deprecated"}
+METRIC_TYPES = {"atomic", "derived", "composite"}
 TIME_GRAINS = {"day", "week", "month", "quarter", "year"}
 FILTER_OPERATORS = {"=", "!=", ">", ">=", "<", "<=", "in", "between", "is_null", "is_not_null"}
 
@@ -122,7 +123,7 @@ def save_model(
     current = database.get("semantic_models", model_id, workspace_id=workspace_id) if model_id else None
     source_id = str(payload.get("source_id") or (current or {}).get("source_id") or "")
     source = require_source_access(
-        database, source_id, workspace_id=workspace_id, actor_id=actor_id, action="analyze",
+        database, source_id, workspace_id=workspace_id, actor_id=actor_id, action="update",
     )
     table_name = str(payload.get("table") or (current or {}).get("table") or "").strip()
     table = _table(source, table_name)
@@ -201,6 +202,26 @@ def save_model(
     return stored
 
 
+def _formula_references(expression: str) -> tuple[exp.Expression, list[str]]:
+    value = str(expression or "").strip()
+    if not value or len(value) > 2000:
+        raise ValueError("派生/复合指标必须提供不超过 2000 字符的计算公式")
+    try:
+        tree = sqlglot.parse_one(value, read="duckdb")
+    except sqlglot.errors.ParseError as exc:
+        raise ValueError("指标计算公式语法无效") from exc
+    allowed = (
+        exp.Column, exp.Identifier, exp.Literal, exp.Add, exp.Sub, exp.Mul,
+        exp.Div, exp.Mod, exp.Neg, exp.Paren,
+    )
+    if any(not isinstance(node, allowed) for node in tree.walk()):
+        raise ValueError("指标公式只允许指标名称、数字和 + - * / % 括号")
+    references = list(dict.fromkeys(str(node.name) for node in tree.find_all(exp.Column)))
+    if not references:
+        raise ValueError("派生/复合指标公式至少需要引用一个已有指标")
+    return tree, references
+
+
 def save_metric(
     database: Database, payload: dict, workspace_id: str, actor_id: str,
     metric_id: str | None = None,
@@ -212,14 +233,41 @@ def save_metric(
     if not model or not model.get("enabled", True):
         raise ValueError("语义指标必须引用已启用的语义模型")
     require_source_access(
-        database, model["source_id"], workspace_id=workspace_id, actor_id=actor_id, action="analyze",
+        database, model["source_id"], workspace_id=workspace_id, actor_id=actor_id, action="update",
     )
-    measure = _field(merged.get("measure"), "指标度量")
-    if measure not in {item["name"] for item in model.get("measures") or []}:
-        raise ValueError(f"指标引用的度量不存在：{measure}")
+    metric_type = str(merged.get("metric_type") or "atomic").lower()
+    if metric_type not in METRIC_TYPES:
+        raise ValueError("指标类型必须是 atomic、derived 或 composite")
+    measure = str(merged.get("measure") or "").strip()
+    expression = str(merged.get("expression") or "").strip()
+    dependencies: list[str] = []
+    if metric_type == "atomic":
+        measure = _field(measure, "指标度量")
+        if measure not in {item["name"] for item in model.get("measures") or []}:
+            raise ValueError(f"指标引用的度量不存在：{measure}")
+        expression = ""
+    else:
+        _tree, references = _formula_references(expression)
+        candidates = {
+            str(item.get("name")): item
+            for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
+            if item.get("model_id") == model_id and item.get("id") != metric_id
+        }
+        missing = [name for name in references if name not in candidates]
+        if missing:
+            raise ValueError(f"指标公式引用了不存在或不同模型的指标：{', '.join(missing)}")
+        dependencies = [candidates[name]["id"] for name in references]
+        measure = ""
     status = str(merged.get("status") or "draft").lower()
     if status not in METRIC_STATUSES:
         raise ValueError("指标状态必须是 draft、approved 或 deprecated")
+    if status == "approved" and metric_type != "atomic":
+        unresolved = [
+            item_id for item_id in dependencies
+            if (database.get("semantic_metrics", item_id, workspace_id=workspace_id) or {}).get("status") != "approved"
+        ]
+        if unresolved:
+            raise ValueError("派生/复合指标只有在全部依赖指标已审批后才能发布")
     aliases = merged.get("aliases") or []
     if isinstance(aliases, str):
         aliases = [value.strip() for value in aliases.split(",") if value.strip()]
@@ -250,11 +298,20 @@ def save_metric(
         "name": name,
         "label": label,
         "description": str(merged.get("description") or "")[:4000],
-        "model_id": model_id, "measure": measure, "status": status,
+        "model_id": model_id, "metric_type": metric_type, "measure": measure,
+        "expression": expression, "dependency_metric_ids": dependencies, "status": status,
         "aliases": list(dict.fromkeys(str(value).strip()[:160] for value in aliases if str(value).strip())),
         "filters": filters,
         "unit": str(merged.get("unit") or "")[:50],
         "format": str(merged.get("format") or "")[:100],
+        "business_object": str(merged.get("business_object") or "")[:200],
+        "business_event": str(merged.get("business_event") or "")[:200],
+        "grain": str(merged.get("grain") or model.get("grain") or "")[:500],
+        "time_semantics": str(merged.get("time_semantics") or "")[:500],
+        "deduplication": str(merged.get("deduplication") or "")[:500],
+        "business_owner": str(merged.get("business_owner") or "")[:160],
+        "technical_owner": str(merged.get("technical_owner") or "")[:160],
+        "certification_note": str(merged.get("certification_note") or "")[:2000],
         "created_by": (current or {}).get("created_by") or actor_id,
         "created_at": (current or {}).get("created_at") or utcnow(),
         "version": version, "updated_by": actor_id, "updated_at": utcnow(),
@@ -267,7 +324,9 @@ def save_metric(
         record["approved_at"] = None
     record["definition_fingerprint"] = _fingerprint({
         key: record.get(key) for key in (
-            "model_id", "measure", "filters", "unit", "format", "status",
+            "model_id", "metric_type", "measure", "expression", "dependency_metric_ids",
+            "filters", "unit", "format", "business_object", "business_event", "grain",
+            "time_semantics", "deduplication", "status",
         )
     })
     stored = database.put("semantic_metrics", record, workspace_id=workspace_id)
@@ -366,6 +425,53 @@ def _dialect(source: dict) -> str:
     return "sqlite" if "sqlite" in driver else driver
 
 
+def _atomic_metric_expression(metric: dict, measures: dict[str, dict], dimensions: dict[str, dict]) -> str:
+    measure = measures.get(str(metric.get("measure") or ""))
+    if not measure:
+        raise ValueError(f"指标引用的度量不存在：{metric.get('measure')}")
+    aggregation = measure["aggregation"]
+    column = "*" if measure["column"] == "*" else _column(measure["column"])
+    fixed = [_filter_sql(item, dimensions) for item in metric.get("filters") or []]
+    predicate = " AND ".join(f"({item})" for item in fixed)
+    if predicate:
+        if aggregation == "count_distinct":
+            return f"COUNT(DISTINCT CASE WHEN {predicate} THEN {column} END)"
+        if aggregation == "count":
+            return f"COUNT(CASE WHEN {predicate} THEN 1 END)"
+        return f"{aggregation.upper()}(CASE WHEN {predicate} THEN {column} END)"
+    if aggregation == "count_distinct":
+        return f"COUNT(DISTINCT {column})"
+    if aggregation == "count":
+        return f"COUNT({column})"
+    return f"{aggregation.upper()}({column})"
+
+
+def _compiled_metric_expression(
+    metric: dict, metrics: dict[str, dict], measures: dict[str, dict],
+    dimensions: dict[str, dict], stack: tuple[str, ...] = (),
+) -> str:
+    name = str(metric.get("name") or "")
+    if name in stack:
+        raise ValueError("指标公式存在循环依赖")
+    if str(metric.get("metric_type") or "atomic") == "atomic":
+        return _atomic_metric_expression(metric, measures, dimensions)
+    tree, references = _formula_references(str(metric.get("expression") or ""))
+    for reference in references:
+        dependency = metrics.get(reference)
+        if not dependency or dependency.get("status") != "approved":
+            raise ValueError(f"指标公式依赖未审批或不存在：{reference}")
+
+    def replace(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Column):
+            dependency_sql = _compiled_metric_expression(
+                metrics[node.name], metrics, measures, dimensions, (*stack, name),
+            )
+            return exp.Paren(this=sqlglot.parse_one(dependency_sql, read="duckdb"))
+        return node
+
+    return tree.transform(replace).sql(dialect="duckdb")
+
+
 def compile_metric_query(
     database: Database, request: dict, workspace_id: str, actor_id: str,
 ) -> dict:
@@ -377,7 +483,11 @@ def compile_metric_query(
     )
     dimensions = {item["name"]: item for item in model.get("dimensions") or []}
     measures = {item["name"]: item for item in model.get("measures") or []}
-    measure = measures[metric["measure"]]
+    model_metrics = {
+        str(item.get("name")): item
+        for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
+        if item.get("model_id") == model["id"]
+    }
     raw_group = request.get("group_by") or []
     if not isinstance(raw_group, list) or len(raw_group) > 20:
         raise ValueError("group_by 必须是不超过 20 项的数组")
@@ -399,14 +509,7 @@ def compile_metric_query(
         group_expressions.append((name, expression))
     if metric["name"] in {name for name, _expression in group_expressions}:
         raise ValueError("指标技术名称不能与分组维度同名")
-    aggregation = measure["aggregation"]
-    column = "*" if measure["column"] == "*" else _column(measure["column"])
-    if aggregation == "count_distinct":
-        metric_expression = f"COUNT(DISTINCT {column})"
-    elif aggregation == "count":
-        metric_expression = f"COUNT({column})"
-    else:
-        metric_expression = f"{aggregation.upper()}({column})"
+    metric_expression = _compiled_metric_expression(metric, model_metrics, measures, dimensions)
     selections = [f"{expression} AS {_column(name)}" for name, expression in group_expressions]
     selections.append(f"{metric_expression} AS {_column(metric['name'])}")
     table_name = str(model.get("source_table") or model["table"])
@@ -414,7 +517,8 @@ def compile_metric_query(
     table_sql = _column(table_name)
     if schema_name:
         table_sql = f"{_column(schema_name)}.{table_sql}"
-    filters = list(metric.get("filters") or []) + list(request.get("filters") or [])
+    formula_filters = list(metric.get("filters") or []) if metric.get("metric_type") in {"derived", "composite"} else []
+    filters = formula_filters + list(request.get("filters") or [])
     if len(filters) > 100:
         raise ValueError("指标过滤条件超过 100 项上限")
     predicates = [_filter_sql(item, dimensions) for item in filters]
@@ -463,6 +567,9 @@ def compile_metric_query(
         "metric": {
             "id": metric["id"], "name": metric["name"], "label": metric["label"],
             "version": metric["version"], "unit": metric.get("unit", ""),
+            "metric_type": metric.get("metric_type", "atomic"),
+            "expression": metric.get("expression", ""),
+            "dependency_metric_ids": metric.get("dependency_metric_ids") or [],
             "definition_fingerprint": metric.get("definition_fingerprint"),
         },
         "model": {
@@ -471,7 +578,8 @@ def compile_metric_query(
         },
         "source_id": source["id"], "dialect": dialect, "sql": rendered,
         "group_by": [name for name, _value in group_expressions],
-        "filters": filters, "time_range": time_range, "limit": limit,
+        "filters": filters, "certified_filters": metric.get("filters") or [],
+        "time_range": time_range, "limit": limit,
     }
 
 

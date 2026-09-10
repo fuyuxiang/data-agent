@@ -7,6 +7,7 @@ def register_blueprints(app: Flask) -> None:
     from .analysis import bp as analysis_bp
     from .analyses import bp as analyses_bp
     from .automation import bp as automation_bp
+    from .business import bp as business_bp
     from .catalog import bp as catalog_bp
     from .conversation import bp as conversation_bp
     from .delivery import bp as delivery_bp
@@ -21,6 +22,7 @@ def register_blueprints(app: Flask) -> None:
 
     for blueprint in (
         workspace_bp,
+        business_bp,
         product_bp,
         warehouse_bp,
         catalog_bp,

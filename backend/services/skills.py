@@ -17,6 +17,12 @@ RESOURCE_DIRS = ("references", "scripts", "assets")
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 FRONTMATTER_PATTERN = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DOTALL)
 
+DEFAULT_SKILLS = [
+    {"id": "executive-summary", "name": "经营摘要", "description": "提炼变化、原因、风险和建议", "instruction": "按结论、证据、风险、行动建议四段输出。", "enabled": True, "source": "builtin"},
+    {"id": "quality-audit", "name": "数据质量审计", "description": "检查缺失、重复、异常和类型问题", "instruction": "先量化质量问题，再给出不破坏原始数据的处理建议。", "enabled": True, "source": "builtin"},
+    {"id": "trend-diagnosis", "name": "趋势诊断", "description": "识别趋势、季节性和突变", "instruction": "比较环比与同比，标注异常点和可能原因。", "enabled": True, "source": "builtin"},
+]
+
 
 class SkillError(ValueError):
     pass
@@ -153,7 +159,10 @@ def get_skill(name: str | None, workspace_id: str) -> dict | None:
     if not name:
         return None
     skills, _ = load_skills(workspace_id)
-    return next((skill for skill in skills if name in {skill.get("id"), skill.get("name")}), None)
+    return next(
+        (skill for skill in [*skills, *DEFAULT_SKILLS] if name in {skill.get("id"), skill.get("name")}),
+        None,
+    )
 
 
 def read_skill_resource(skill_name: str, resource_path: str, workspace_id: str) -> tuple[Path, str]:

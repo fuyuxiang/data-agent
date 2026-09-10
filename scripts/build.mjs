@@ -27,7 +27,7 @@ globalThis.document = {
 const VueCompiler = Function(`${vueSource}; return Vue;`)();
 globalThis.Vue = VueCompiler;
 const renderSources = [];
-for (const filename of ['components.js', 'analysis-panel.js', 'panels.js', 'app.js']) {
+for (const filename of ['components.js', 'analysis-panel.js', 'business-panels.js', 'panels.js', 'app.js']) {
   const sourcePath = resolve(output, 'src', filename);
   const source = await readFile(sourcePath, 'utf8');
   const compiled = source.replace(/template\s*:\s*`([\s\S]*?)`/g, (_match, template) => {

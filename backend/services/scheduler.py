@@ -70,6 +70,79 @@ def cron_matches(expression: str, moment: datetime) -> bool:
     return day_matches
 
 
+def subscription_cron(frequency: str, delivery_time: str) -> str:
+    try:
+        hour, minute = (int(value) for value in str(delivery_time or "09:00").split(":", 1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("送达时间必须是 HH:MM") from exc
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("送达时间必须是有效的 HH:MM")
+    suffix = {"daily": "* * *", "weekly": "* * 1", "monthly": "1 * *"}.get(frequency)
+    if not suffix:
+        raise ValueError("订阅频率必须是 daily、weekly 或 monthly")
+    return validate_cron(f"{minute} {hour} {suffix}")
+
+
+def start_analysis_subscription(
+    database: Database, app: Flask, subscription: dict, *, minute_key: str,
+) -> dict:
+    from ..agent.contracts import TaskContract
+    from ..agent.store import RunStore
+    from .advanced_agent import available_formal_tools
+    from .authorization import require_sources_access
+
+    wid = str(subscription.get("workspace_id") or "default")
+    actor_id = str(subscription.get("owner_id") or "local-default")
+    space = database.get("business_spaces", str(subscription.get("business_space_id") or ""), workspace_id=wid)
+    if not space or space.get("status") != "published":
+        raise ValueError("订阅关联的业务数据空间未发布或已停用")
+    source_ids = [str(value) for value in space.get("source_ids") or []]
+    require_sources_access(database, source_ids, workspace_id=wid, actor_id=actor_id, action="analyze")
+    metric_id = str(subscription.get("metric_id") or "")
+    if metric_id and metric_id not in {str(value) for value in space.get("metric_ids") or []}:
+        raise ValueError("订阅指标已经移出业务数据空间")
+    objective = str(subscription.get("question") or subscription.get("name") or "定期经营分析").strip()
+    if subscription.get("condition"):
+        objective += f"。关注条件：{subscription['condition']}；请明确说明是否触发。"
+    session = database.put("sessions", {
+        "id": database.new_id("ses"), "workspace_id": wid,
+        "name": f"订阅 · {subscription.get('name') or '经营分析'}"[:100],
+        "status": "idle", "source_ids": source_ids, "business_space_id": space["id"],
+        "owner_id": actor_id, "subscription_id": subscription["id"], "analysis_mode": "subscription",
+    }, workspace_id=wid)
+    store = RunStore(database)
+    run, created = store.create_run(
+        workspace_id=wid, session_id=session["id"], actor_id=actor_id,
+        source_scope=source_ids,
+        allowed_tool_ids=available_formal_tools(database, wid, session["id"], source_ids),
+        run_kind="subscription", idempotency_key=f"subscription:{subscription['id']}:{minute_key}",
+    )
+    if created:
+        contract = TaskContract.from_payload({
+            "objective": objective,
+            "coverage": "订阅触发时业务数据空间内的最新已授权数据",
+            "dimensions": ["时间", "业务实体", "可用分类属性"],
+            "deliverables": ["summary", "dashboard"], "source_scope": source_ids,
+            "metrics": [metric_id] if metric_id else [],
+        })
+        database.add_message(session["id"], "user", objective, {"run_id": run["id"], "kind": "subscription"})
+        store.add_contract(run["id"], contract, expected_version=0)
+        store.add_contract(run["id"], contract, expected_version=1, confirmed_by=actor_id)
+        current = store.get_run(run["id"]) or run
+        store.add_plan(run["id"], {
+            "tasks": [{"id": "subscription_analysis", "title": "执行订阅分析并核对触发条件", "status": "open", "depends_on": []}],
+        }, reason="subscription_triggered", expected_version=int(current["plan_version"]))
+        job = get_job_manager(app).submit_spec(
+            workspace_id=wid, session_id=session["id"], job_type="analysis_run",
+            title=f"订阅分析：{subscription.get('name') or objective}"[:100],
+            spec={"run_id": run["id"]}, run_id=run["id"],
+        )
+        database.patch("sessions", session["id"], {"current_run_id": run["id"]}, workspace_id=wid)
+    else:
+        job = None
+    return {"run": store.get_run(run["id"]) or run, "job": job, "session": session, "created": created}
+
+
 class WorkflowScheduler:
     def __init__(self, app: Flask):
         self.app = app
@@ -150,6 +223,26 @@ class WorkflowScheduler:
                         "last_error": str(exc),
                     })
                 self.db.put("schedules", schedule, workspace_id=schedule.get("workspace_id", "default"))
+            for subscription in self.db.list("analysis_subscriptions", limit=5000):
+                if not subscription.get("enabled", True):
+                    continue
+                minute_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+                try:
+                    now = datetime.now(ZoneInfo(subscription.get("timezone") or "Asia/Shanghai"))
+                    minute_key = now.strftime("%Y-%m-%dT%H:%M")
+                    cron = subscription.get("cron") or subscription_cron(
+                        str(subscription.get("frequency") or "daily"), str(subscription.get("delivery_time") or "09:00"),
+                    )
+                    if subscription.get("last_minute_key") == minute_key or not cron_matches(cron, now):
+                        continue
+                    started = start_analysis_subscription(self.db, self.app, subscription, minute_key=minute_key)
+                    subscription.update({
+                        "last_run_at": utcnow(), "last_run_id": started["run"]["id"],
+                        "last_minute_key": minute_key, "last_error": None,
+                    })
+                except Exception as exc:
+                    subscription.update({"last_run_at": utcnow(), "last_minute_key": minute_key, "last_error": str(exc)})
+                self.db.put("analysis_subscriptions", subscription, workspace_id=subscription.get("workspace_id", "default"))
             now_utc = datetime.now(timezone.utc)
             for dashboard in self.db.list("dashboards", limit=5000):
                 if dashboard_refresh_due(dashboard, now_utc):

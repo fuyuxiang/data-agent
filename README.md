@@ -1,8 +1,8 @@
 <div align="center">
 
-# 经纬分析工作台
+# 经纬 Data Agent
 
-**从数据接入、可复核分析到自动化交付的标准化企业分析 SaaS**
+**面向业务人员的可治理、可追溯、可持续运营的企业级数据智能产品**
 
 [![CI](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -16,35 +16,39 @@
 
 ---
 
-经纬分析工作台（Meridian Analytics Workbench）是一套 Vue 3 + Python 的标准化企业分析 SaaS。它将数据连接、只读 SQL、语义指标、自然语言 Agent、业务口径、多顾问协作、审批工作流、决策看板和 Office 交付统一到同一个可治理工作空间中。
+经纬 Data Agent 是一套 Vue 3 + Python 的企业级数据智能产品。它不把“聊天框 + Text-to-SQL”当作完整产品，而是建立“数据接入 → 语义指标 → 知识与分析能力 → 业务数据空间 → 问数/洞察/报告/订阅”的生产闭环。数据库、文件、API 和数仓是受治理的数据源；MCP 是 Agent 的受控工具连接，不与数据源混为一类。
 
-项目面向需要“把问题变成数据证据，再把证据变成可交付结果”的分析团队。数据、中间结果、知识索引、审计记录与导出文件默认保存在本机 `storage/`；模型和外部工具按需连接。没有模型配置时，数据浏览和明确的确定性诊断仍可用，但正式自主分析会返回 `model_not_configured`，不会伪造完成结果。
+产品以业务人员为主要用户：用户选择管理员已发布的业务数据空间，使用自然语言完成问数、诊断和成果沉淀，无需理解表、SQL、模型或 Agent 编排。一套前端代码按角色提供两个清晰的产品界面：“业务工作台”与“管理后台”，另有仅系统所有者可见的租户控制台。
+
+数据、中间结果、知识索引、审计记录与导出文件默认保存在本机 `storage/`；模型和外部工具按需连接。没有模型配置时，数据浏览和确定性指标查询仍可用，正式自主分析则明确返回 `model_not_configured`，不会伪造结果。
 
 ## 核心能力
 
 | 能力域 | 已实现能力 |
 | --- | --- |
-| SaaS 产品控制面 | 默认租户、套餐、订阅、权益与配额；产品总览页展示标准方法论、解决方案、开通路径和演示数据初始化 |
-| 正式自主分析 | 四段任务契约确认、唯一 AgentLoop、Chat Completions/Responses 协议、滚动计划、持久化 Action/预算/事件；通过 JSON/SSE 展示真实状态 |
+| 业务工作台 | 个性化首页、业务数据空间切换、推荐问题、智能问数、可编辑理解卡、追问、证据卡、准确性反馈与历史分析 |
+| 洞察、订阅与报告 | 经营异常/机会洞察、每日/每周/每月订阅、时区调度、站内/邮件/飞书/Webhook 送达、手动触发、洞察回执、可发布报告库 |
+| 业务数据空间 | 将数据源、认证指标、知识标签、已审批分析能力、常用问题和成员 ACL 打包成可版本化发布的业务边界 |
 | 数据连接 | 上传 CSV、TSV、Excel、JSON/JSON Lines、Parquet；连接 SQLite、PostgreSQL、MySQL、SQL Server、HTTP JSON、Google Sheets 和飞书多维表格 |
 | 数据处理 | 数据预览、质量画像、缺失/重复/异常检查、文本规整、缺失填充、缩尾和派生数据集；清洗不覆盖原始数据 |
-| 语义指标 | 版本化语义模型、维度/度量绑定、固定口径过滤、owner 审批、确定性 SQL 编译与 `metric@version` 证据回放 |
+| 语义指标 | 原子/派生/复合指标、业务对象与事件、粒度/时间/去重口径、业务与技术负责人、版本、审批、依赖与确定性 SQL 编译；正式 KPI 只使用已认证指标 |
+| 可信分析引擎 | 统一 AgentLoop 根据问题自动使用语义查询、知识检索、统计分析和验证；复杂问题先确认理解卡，简单问数可直接执行；内部是否采用多 Agent 不暴露给业务用户 |
 | 统计与建模 | 相关分析、十分位分层、K-Means、A/B 检验、线性/逻辑回归、决策树、随机森林、梯度提升、特征筛选、异常检测以及 ARIMA、SARIMA、VAR、Prophet 风格和神经网络预测 |
 | 知识与记忆 | 导入 TXT、Markdown、HTML、CSV、JSON、PDF、Word 和 Excel 知识文档；管理指标口径、业务规则、背景知识、会话临时指令和长期记忆 |
-| 自动化与协作 | 版本化工作流、依赖图、并行 Agent 节点、人工审批、重试、调度、生命周期 Hook、后台任务、多顾问团队和证据复核 |
+| 自动化与协作 | 版本化工作流、依赖图、人工审批、重试、调度、生命周期 Hook 和后台任务；多 Agent/多顾问仅作为复杂任务的可选内部执行方式 |
 | 可视化与交付 | 同一 ResultManifest 渲染极简结论、四指标/四图看板、完整报告，以及 CSV、XLSX、DOCX、PPTX、PNG、EML/SMTP 成果 |
 | 开放集成 | OpenAI-Compatible 模型；Streamable HTTP、SSE、HTTP 和受控 stdio MCP；Webhook、飞书、钉钉、Slack 和 SMTP 通知 |
 | 计算资源 | 有界本地 DuckDB/Docker sandbox；Trino/Iceberg 远端查询与稳定物化；Livy/Spark 受信任分布式 JobSpec |
-| 企业治理 | 工作空间隔离、owner/editor/viewer 权限、邀请入组、会话与 CSRF 保护、凭据加密、审计日志、容量/超时/配额边界、归档恢复与加密备份 |
+| 企业治理 | 工作空间隔离、owner/editor/analyst/viewer 权限、邀请入组、数据源/数据空间成员 ACL、会话隔离、CSRF 保护、凭据加密、审计日志、配额边界、归档恢复与加密备份 |
 
 ## 一次完整的分析如何发生
 
-1. 在“数据连接”上传文件或登记外部数据源，预览表结构并检查数据质量。
-2. 将数据源加入当前会话；Agent 只能看到本会话明确授权的数据。
-3. 在四段任务契约中确认目标、范围、查看维度和交付形式，再开始正式分析。
-4. Agent 动态查询、分析并执行独立验证；系统保留版本、计划、Action、证据与完整性状态。
-5. 通过极简结论、可视化看板和完整报告查看同一发布版本，也可将稳定流程固化为带审批工作流。
-6. 导出 Word、四图 PNG 或 EML，或通过已配置 SMTP 发送精确版本附件；兼容数据/PPTX/HTML 导出继续保留。
+1. 数据管理员在“数据接入”登记数据库、文件、API 或数仓，完成结构预览、质量检查与访问策略。
+2. 在“指标与语义”中建立业务模型，定义原子、派生和复合指标，由负责人审批发布正式口径。
+3. 管理员按业务域创建“业务数据空间”，绑定授权数据、认证指标、知识标签、分析能力、常用问题与可见成员，通过就绪检查后发布。
+4. 业务用户在首页选择空间并直接提问。简单问数自动执行；涉及归因、预测或复盘时，先确认可编辑的查询理解卡。
+5. 统一 Agent 只在当前数据空间内发现指标、检索知识和调用能力，保留 SQL/指标版本、Action、数据引用、验证结果与完整性状态。
+6. 用户可将已验证结果追问、加入报告或订阅为定时洞察，并通过站内、邮件、飞书或 Webhook 持续送达。
 
 ## 快速开始
 
@@ -86,12 +90,11 @@ python app.py
 
 ### 首次使用
 
-1. 在“产品总览”查看当前租户、套餐权益、标准方法论、解决方案和开通进度。
-2. 点击“载入演示数据”，系统会接入 [`deploy/samples/Sample-data.xlsx`](deploy/samples/Sample-data.xlsx)，并自动沉淀业务口径与审批指标。
-3. 在“数据连接”上传自有数据或登记外部数据源，勾选“用于当前会话”。
-4. 在“业务口径”和“指标治理”维护指标定义、业务规则、语义模型和审批状态。
-5. 回到“可信分析”确认任务契约后提问；系统会保留查询、验证、证据和发布状态。
-6. 将高频分析固化为“报告工厂”工作流，或在“决策看板”形成可刷新、可导出的交付成果。
+1. 系统所有者可在“平台”查看租户、套餐权益和开通进度；也可点击“载入演示数据”快速生成一个已发布的业务数据空间。
+2. 数据管理员进入“管理后台”，依次完成“数据接入 → 指标与语义 → 知识与口径 → 业务数据空间”。
+3. 在“系统治理 → 成员与权限”邀请业务分析员，并在数据源或业务数据空间中进一步限定可见成员。
+4. 业务用户登录后直接进入“业务工作台”，从推荐问题或“新建分析”开始，无需自行选择数据表、指标 SQL 或 Agent。
+5. 已验证结果可继续追问、加入报告或建立订阅；系统会持续保留指标版本、查询、验证、证据和发布状态。
 
 ### 可选：深度学习能力
 
@@ -104,22 +107,24 @@ python -m pip install -r requirements-dl.txt
 ## 系统架构
 
 ```mermaid
-flowchart LR
-    UI["Vue 3 单页应用<br/>契约 / 过程 / 三类成果"] -->|HTTP + SSE| API["Flask API<br/>Waitress"]
+flowchart TB
+    BIZ["业务工作台<br/>首页 · 智能分析 · 洞察订阅 · 报告"]
+    ADMIN["客户管理后台<br/>数据 · 指标 · 知识 · 空间 · 权限"]
+    VENDOR["平台控制台<br/>租户 · 套餐 · 配额 · 运营"]
+    BIZ -->|HTTP + SSE| API["Flask 产品 API"]
+    ADMIN --> API
+    VENDOR --> API
 
-    API --> ID["身份、工作空间<br/>配额与审计"]
-    API --> AGENT["唯一 AgentLoop<br/>ToolExecutor / 发布门禁"]
-    API --> DATA["数据服务<br/>DatasetRef / Trino / Livy"]
-    API --> AUTO["工作流、调度<br/>多顾问协作"]
-    API --> DELIVERY["图表、看板<br/>Office / HTML 交付"]
-
-    ID --> META[("SQLite 控制面<br/>storage/meridian.sqlite3")]
-    AGENT --> MODEL["OpenAI-Compatible<br/>模型服务"]
-    AGENT --> MCP["MCP 工具服务"]
-    DATA --> LOCAL["本地文件 / DuckDB<br/>派生数据集"]
-    DATA --> REMOTE["Trino / Iceberg / Spark<br/>稳定远端引用"]
-    AUTO --> META
-    DELIVERY --> STORE["storage/exports<br/>storage/workspaces"]
+    API --> SPACE["业务数据空间<br/>运行时权限与语义边界"]
+    SPACE --> SEMANTIC["语义指标中心<br/>版本 · 审批 · 依赖 · 血缘"]
+    SPACE --> KNOWLEDGE["业务知识与已审批分析能力"]
+    SPACE --> AGENT["统一可信 Agent<br/>契约 · 工具策略 · 验证 · 证据"]
+    AGENT --> MODEL["OpenAI-Compatible 模型"]
+    AGENT --> MCP["MCP 受控工具"]
+    SEMANTIC --> DATA["数据访问层<br/>DuckDB / SQLAlchemy / Trino / Livy"]
+    DATA --> SOURCES["文件 · 数据库 · API · 数仓"]
+    AGENT --> RESULT["统一 ResultManifest<br/>洞察 · 图表 · 报告 · 订阅"]
+    API --> CONTROL[("控制面与审计存储")]
 ```
 
 ### 技术栈

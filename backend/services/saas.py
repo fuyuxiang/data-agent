@@ -375,7 +375,10 @@ def seed_demo_workspace(database: Database, workspace_id: str, actor_id: str) ->
     created.extend(["knowledge_entry"] * entries_created)
     semantic_created = _ensure_sample_semantic(database, workspace_id, source, actor_id)
     created.extend(semantic_created)
-    _attach_sample_to_active_session(database, workspace_id, source["id"])
+    business_space, space_created = _ensure_sample_business_space(database, workspace_id, source, actor_id)
+    if space_created:
+        created.append("business_space")
+    _attach_sample_to_active_session(database, workspace_id, source["id"], business_space["id"])
     database.audit(
         "product.demo_seeded", workspace_id=workspace_id, actor=actor_id,
         object_type="sample_seed", object_id=SAMPLE_SEED_ID,
@@ -550,10 +553,47 @@ def _ensure_sample_semantic(
     return created
 
 
-def _attach_sample_to_active_session(database: Database, workspace_id: str, source_id: str) -> None:
+def _ensure_sample_business_space(
+    database: Database, workspace_id: str, source: dict[str, Any], actor_id: str,
+) -> tuple[dict[str, Any], bool]:
+    existing = next((
+        item for item in database.list("business_spaces", workspace_id=workspace_id, limit=5000)
+        if (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID
+    ), None)
+    metrics = [
+        item for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
+        if (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID and item.get("status") == "approved"
+    ]
+    if existing:
+        return existing, False
+    item = database.put("business_spaces", {
+        "id": database.new_id("space"), "workspace_id": workspace_id,
+        "name": "即时零售经营分析", "business_domain": "城市经营",
+        "description": "面向城市经营团队的可信问数空间，演示统一指标、异常归因与经营简报流程。",
+        "source_ids": [source["id"]], "metric_ids": [metric["id"] for metric in metrics],
+        "knowledge_tags": ["即时零售", "经营口径"],
+        "skill_ids": ["executive-summary", "trend-diagnosis"], "member_ids": [],
+        "recommended_questions": [
+            "活跃合作商家总数是多少，各省份如何分布？",
+            "哪些城市的商家供给存在明显差异？",
+            "生成一份城市经营概览并说明数据限制。",
+        ],
+        "owner_id": actor_id, "status": "published", "version": 1,
+        "published_by": actor_id, "published_at": utcnow(),
+        "created_by": actor_id, "sample_seed": {"id": SAMPLE_SEED_ID, "version": 1},
+    }, workspace_id=workspace_id)
+    return item, True
+
+
+def _attach_sample_to_active_session(
+    database: Database, workspace_id: str, source_id: str, business_space_id: str,
+) -> None:
     sessions = database.list("sessions", workspace_id=workspace_id, limit=5000)
     session = next((item for item in sessions if item.get("status") == "active"), sessions[0] if sessions else None)
     if not session:
         return
     source_ids = list(dict.fromkeys([source_id, *(str(item) for item in session.get("source_ids") or [])]))
-    database.patch("sessions", session["id"], {"source_ids": source_ids}, workspace_id=workspace_id)
+    database.patch(
+        "sessions", session["id"], {"source_ids": source_ids, "business_space_id": business_space_id},
+        workspace_id=workspace_id,
+    )

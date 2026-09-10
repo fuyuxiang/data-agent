@@ -331,15 +331,44 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     }
 
 
+def _business_space(database: Database, run: dict[str, Any]) -> dict[str, Any] | None:
+    session = database.get("sessions", run["session_id"], workspace_id=run["workspace_id"]) or {}
+    space_id = str(session.get("business_space_id") or "")
+    return database.get("business_spaces", space_id, workspace_id=run["workspace_id"]) if space_id else None
+
+
+def _tag_set(value: Any) -> set[str]:
+    if isinstance(value, str):
+        values = value.replace("，", ",").split(",")
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = []
+    return {str(item).strip().lower() for item in values if str(item).strip()}
+
+
+def _space_knowledge_ids(database: Database, run: dict[str, Any], space: dict | None) -> list[str]:
+    ids = {
+        str(item["document_id"])
+        for item in database.list("analysis_attachments", workspace_id=run["workspace_id"], limit=5000)
+        if item.get("run_id") == run["id"] and item.get("owner_id") == run["actor_id"]
+    }
+    tags = _tag_set((space or {}).get("knowledge_tags"))
+    if tags:
+        for collection in ("knowledge_documents", "knowledge_entries"):
+            for item in database.list(collection, workspace_id=run["workspace_id"], limit=5000):
+                if item.get("enabled", True) and tags & _tag_set(item.get("tags")):
+                    ids.add(str(item["id"]))
+    return sorted(ids)
+
+
 def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
+    space = _business_space(database, run)
     context = AgentToolContext(
         database=database, workspace_id=run["workspace_id"], session_id=run["session_id"],
         source_ids=list(run["source_scope"]),
-        knowledge_document_ids=[
-            str(item["document_id"])
-            for item in database.list("analysis_attachments", workspace_id=run["workspace_id"], limit=5000)
-            if item.get("run_id") == run["id"] and item.get("owner_id") == run["actor_id"]
-        ],
+        knowledge_document_ids=_space_knowledge_ids(database, run, space),
+        semantic_metric_ids=[str(value) for value in space.get("metric_ids") or []] if space else None,
         actor_id=run["actor_id"],
     )
     registry = ToolRegistry()
@@ -573,9 +602,15 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         if item["role"] in {"system", "user", "assistant"}
     ]
     progress(15, "Agent 已开始动态规划与执行")
-    selected_skill = get_skill(run.get("skill_id"), run["workspace_id"])
-    governed_skills = [public_skill(selected_skill, include_prompt=True)] if selected_skill else []
     session = database.get("sessions", run["session_id"], workspace_id=run["workspace_id"]) or {}
+    space = _business_space(database, run)
+    skill_ids = [str(run.get("skill_id") or ""), *[str(value) for value in (space or {}).get("skill_ids") or []]]
+    selected_skills = []
+    for skill_id in dict.fromkeys(value for value in skill_ids if value):
+        skill = get_skill(skill_id, run["workspace_id"])
+        if skill:
+            selected_skills.append(skill)
+    governed_skills = [public_skill(skill, include_prompt=True) for skill in selected_skills]
     if session.get("temp_prompt_enabled") and str(session.get("temporary_instruction") or "").strip():
         governed_skills.append({
             "id": "run-temporary-instruction", "source": "session",
@@ -595,7 +630,7 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             {"total_tokens": model_delta, "model": provider["model"]},
             operation="analysis_run",
         )
-    if selected_skill:
+    for selected_skill in selected_skills:
         database.put("skill_usage", {
             "id": database.new_id("skilluse"), "workspace_id": run["workspace_id"],
             "run_id": run_id, "skill_id": selected_skill.get("id"),
@@ -617,6 +652,38 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             run["session_id"], "assistant", result.answer,
             {"run_id": run_id, "outcome": result.outcome, "publication_id": result.publication_id},
         )
+    subscription_id = str(session.get("subscription_id") or "")
+    if subscription_id:
+        subscription = database.get("analysis_subscriptions", subscription_id, workspace_id=run["workspace_id"])
+        if subscription:
+            successful = bool(result.publication_id)
+            summary = str(result.answer or f"订阅分析未发布正式结果：{result.stop_reason or result.outcome}")[:4000]
+            insight = database.put("business_insights", {
+                "id": database.new_id("insight"), "workspace_id": run["workspace_id"],
+                "owner_id": subscription.get("owner_id"),
+                "business_space_id": subscription.get("business_space_id"),
+                "title": f"{subscription.get('name') or '数据订阅'} · {'已更新' if successful else '执行异常'}"[:160],
+                "summary": summary, "severity": "info" if successful else "warning",
+                "metric_id": subscription.get("metric_id"), "run_id": run_id,
+                "audience_ids": [subscription.get("owner_id")], "status": "active", "detected_at": utcnow(),
+            }, workspace_id=run["workspace_id"])
+            delivery_status, delivery_error = "in_app", None
+            connector_id = str(subscription.get("connector_id") or "")
+            if connector_id:
+                try:
+                    from ..api.integration import _send_connector
+
+                    connector = database.get("connectors", connector_id, workspace_id=run["workspace_id"])
+                    if not connector or not connector.get("enabled", True):
+                        raise ValueError("订阅通知连接不存在或已停用")
+                    _send_connector(connector, f"{insight['title']}\n\n{summary}", {"run_id": run_id, "insight_id": insight["id"]})
+                    delivery_status = "delivered"
+                except Exception as exc:
+                    delivery_status, delivery_error = "failed", str(exc)[:1000]
+            database.patch("analysis_subscriptions", subscription_id, {
+                "last_delivery_at": utcnow(), "last_delivery_status": delivery_status,
+                "last_delivery_error": delivery_error, "last_insight_id": insight["id"],
+            }, workspace_id=run["workspace_id"])
     dispatch_hooks(
         "analysis.completed", {
             "run_id": run_id, "session_id": run["session_id"], "outcome": result.outcome,

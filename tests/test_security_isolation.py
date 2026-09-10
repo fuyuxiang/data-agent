@@ -50,6 +50,26 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
 
     user_id = second.get_json()["user"]["id"]
     promoted = owner.patch(
+        f"/api/workspaces/{workspace['id']}/members/{user_id}", json={"role": "analyst"},
+    )
+    assert promoted.status_code == 200
+    analyst_query = member.post(
+        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
+    )
+    assert analyst_query.status_code == 200
+    assert member.post(
+        "/api/connectors", json={"name": "unauthorized", "type": "webhook", "url": "https://example.com/hook"},
+    ).status_code == 403
+    assert member.post(
+        "/api/semantic/models",
+        json={
+            "name": "analyst_cannot_model", "source_id": source["id"], "table": "data",
+            "dimensions": [{"name": "name", "column": "name", "type": "categorical"}],
+            "measures": [{"name": "value", "column": "value", "aggregation": "sum"}],
+        },
+    ).status_code == 403
+
+    promoted = owner.patch(
         f"/api/workspaces/{workspace['id']}/members/{user_id}", json={"role": "editor"},
     )
     assert promoted.status_code == 200

@@ -46,9 +46,14 @@ def decide_source_access(
     membership = _workspace_membership(database, workspace_id, actor_id)
     if not membership:
         return SourceAccessDecision(False, "not_workspace_member", workspace_id, source_id, actor_id, action)
-    if action in {"create", "update", "delete", "refresh", "query", "analyze", "export"}:
-        if str(membership.get("role") or "viewer") not in {"owner", "editor"}:
+    role = str(membership.get("role") or "viewer")
+    if action in {"create", "update", "delete", "refresh"}:
+        if role not in {"owner", "editor"}:
             return SourceAccessDecision(False, "workspace_read_only", workspace_id, source_id, actor_id, action)
+    # Analysts can execute governed, read-only data operations but cannot alter
+    # sources, models or workspace configuration. Viewer remains a pure reader.
+    if action in {"query", "analyze", "export"} and role not in {"owner", "editor", "analyst"}:
+        return SourceAccessDecision(False, "workspace_read_only", workspace_id, source_id, actor_id, action)
     allowed_users = source.get("authorized_user_ids")
     if isinstance(allowed_users, list) and actor_id not in {str(value) for value in allowed_users}:
         return SourceAccessDecision(False, "source_acl", workspace_id, source_id, actor_id, action)

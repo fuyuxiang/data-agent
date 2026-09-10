@@ -180,8 +180,8 @@ def add_workspace_member(record_id: str):
     if not user:
         raise FileNotFoundError("用户不存在")
     role = str(payload.get("role") or "viewer")
-    if role not in {"owner", "editor", "viewer"}:
-        raise ValueError("成员角色必须是 owner、editor 或 viewer")
+    if role not in {"owner", "editor", "analyst", "viewer"}:
+        raise ValueError("成员角色必须是 owner、editor、analyst 或 viewer")
     item = db().put(
         "workspace_members",
         {
@@ -202,8 +202,8 @@ def create_workspace_invitation(record_id: str):
     role = str(payload.get("role") or "viewer")
     if "@" not in email:
         raise ValueError("请输入有效邮箱")
-    if role not in {"owner", "editor", "viewer"}:
-        raise ValueError("成员角色必须是 owner、editor 或 viewer")
+    if role not in {"owner", "editor", "analyst", "viewer"}:
+        raise ValueError("成员角色必须是 owner、editor、analyst 或 viewer")
     if any(item.get("email") == email for item in db().list("users", include_archived=True)):
         raise ValueError("该邮箱已注册，请直接添加为工作空间成员")
     token = secrets.token_urlsafe(32)
@@ -255,8 +255,8 @@ def rotate_workspace_integration_token(record_id: str):
 def update_workspace_member(record_id: str, user_id: str):
     require_workspace_access(record_id, owner=True)
     role = str(body().get("role") or "")
-    if role not in {"owner", "editor", "viewer"}:
-        raise ValueError("成员角色必须是 owner、editor 或 viewer")
+    if role not in {"owner", "editor", "analyst", "viewer"}:
+        raise ValueError("成员角色必须是 owner、editor、analyst 或 viewer")
     member = require_workspace_record("workspace_members", f"{record_id}:{user_id}", record_id)
     if user_id == current_user_id() and role != "owner":
         owners = [item for item in db().list("workspace_members", workspace_id=record_id) if item.get("role") == "owner"]
@@ -505,10 +505,21 @@ def list_sessions():
 @api_errors
 def create_session():
     wid = workspace_id()
-    source_ids = [str(value) for value in body().get("source_ids", [])]
+    payload = body()
+    business_space_id = str(payload.get("business_space_id") or "") or None
+    source_ids = [str(value) for value in payload.get("source_ids", [])]
+    if business_space_id:
+        space = require_workspace_record("business_spaces", business_space_id, wid)
+        membership = workspace_membership(wid) or {}
+        members = {str(value) for value in space.get("member_ids") or []}
+        if membership.get("role") not in {"owner", "editor"} and (
+            space.get("status") != "published" or (members and current_user_id() not in members)
+        ):
+            raise FileNotFoundError("业务数据空间不存在")
+        source_ids = [str(value) for value in space.get("source_ids") or []]
     for source_id in source_ids:
         require_source_access(source_id, wid)
-    provider_id = body().get("provider_id")
+    provider_id = payload.get("provider_id")
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
     for session in db().list("sessions", workspace_id=wid):
@@ -519,10 +530,11 @@ def create_session():
         {
             "id": db().new_id("ses"),
             "workspace_id": wid,
-            "name": str(body().get("name") or "新分析会话")[:100],
+            "name": str(payload.get("name") or "新分析会话")[:100],
             "status": "active",
             "source_ids": source_ids,
             "provider_id": provider_id,
+            "business_space_id": business_space_id,
             "owner_id": current_user_id(),
         },
         workspace_id=wid,
@@ -545,7 +557,7 @@ def update_session(session_id: str):
         key: value for key, value in body().items()
         if key in {
             "name", "status", "source_ids", "provider_id", "temporary_instruction",
-            "temp_prompt_enabled", "agent_allow_mutations", "agent_allow_mcp",
+            "temp_prompt_enabled", "agent_allow_mutations", "agent_allow_mcp", "business_space_id",
         }
     }
     for flag in {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
@@ -556,6 +568,18 @@ def update_session(session_id: str):
         allowed["source_ids"] = [str(value) for value in allowed["source_ids"]]
         for source_id in allowed["source_ids"]:
             require_source_access(source_id, current["workspace_id"])
+    if "business_space_id" in allowed:
+        space_id = str(allowed.get("business_space_id") or "") or None
+        if space_id:
+            space = require_workspace_record("business_spaces", space_id, current["workspace_id"])
+            membership = workspace_membership(current["workspace_id"]) or {}
+            members = {str(value) for value in space.get("member_ids") or []}
+            if membership.get("role") not in {"owner", "editor"} and (
+                space.get("status") != "published" or (members and current_user_id() not in members)
+            ):
+                raise FileNotFoundError("业务数据空间不存在")
+            allowed["business_space_id"] = space_id
+            allowed["source_ids"] = [str(value) for value in space.get("source_ids") or []]
     if allowed.get("provider_id") and allowed["provider_id"] != "environment-default":
         require_workspace_record("providers", str(allowed["provider_id"]), current["workspace_id"])
     item = db().patch("sessions", session_id, allowed)

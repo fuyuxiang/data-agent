@@ -85,7 +85,10 @@ class AgentLoop:
         if skills:
             declared = [set(item.get("allowed_tools") or []) for item in skills if item.get("allowed_tools")]
             if declared:
-                skill_tools = set.intersection(*declared)
+                # A business space may package complementary skills. Their tool
+                # grants compose as a union, still bounded by the run-level
+                # source and formal-tool allowlist in ToolExecutor.
+                skill_tools = set.union(*declared)
                 # Governed metric queries are a safer subset of generic SQL access.
                 # Existing skills that may query data automatically gain the
                 # semantic discovery/compiler tools without broadening data scope.

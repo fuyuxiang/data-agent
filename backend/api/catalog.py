@@ -23,7 +23,7 @@ from ..services.saas import assert_collection_limit, assert_feature_enabled, ass
 from ..services.semantic import (
     compile_metric_query, execute_metric_query, save_metric, save_model, visible_metrics,
 )
-from ..services.skills import get_skill, load_skills, public_skill, read_skill_resource
+from ..services.skills import DEFAULT_SKILLS, get_skill, load_skills, public_skill, read_skill_resource
 from .common import (
     api_errors, body, current_user_id, db, ok, require_workspace_access,
     require_query_result_access, require_session_access, require_source_access,
@@ -551,13 +551,6 @@ def create_knowledge_category():
         workspace_id=wid,
     )
     return ok(item=item), 201
-
-
-DEFAULT_SKILLS = [
-    {"id": "executive-summary", "name": "经营摘要", "description": "提炼变化、原因、风险和建议", "instruction": "按结论、证据、风险、行动建议四段输出。", "enabled": True},
-    {"id": "quality-audit", "name": "数据质量审计", "description": "检查缺失、重复、异常和类型问题", "instruction": "先量化质量问题，再给出不破坏原始数据的处理建议。", "enabled": True},
-    {"id": "trend-diagnosis", "name": "趋势诊断", "description": "识别趋势、季节性和突变", "instruction": "比较环比与同比，标注异常点和可能原因。", "enabled": True},
-]
 
 
 def _skills(wid: str) -> list[dict]:

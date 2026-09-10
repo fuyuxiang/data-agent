@@ -19,7 +19,7 @@ from ..services.saas import assert_feature_enabled
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
 from .common import (
     api_errors, body, current_user_id, db, ok, require_system_owner,
-    require_workspace_record, workspace_id,
+    require_workspace_access, require_workspace_record, workspace_id,
 )
 
 
@@ -226,7 +226,9 @@ def _public_connector(item: dict) -> dict:
 
 @bp.get("/api/connectors")
 def connectors():
-    return ok(items=[_public_connector(item) for item in db().list("connectors", workspace_id=workspace_id())])
+    wid = workspace_id()
+    require_workspace_access(wid)
+    return ok(items=[_public_connector(item) for item in db().list("connectors", workspace_id=wid)])
 
 
 @bp.post("/api/connectors")
@@ -234,6 +236,7 @@ def connectors():
 def create_connector():
     payload = body()
     wid = workspace_id()
+    require_workspace_access(wid, write=True)
     assert_feature_enabled(db(), wid, "result_delivery")
     connector_type = str(payload.get("type") or "webhook")
     if connector_type not in {"webhook", "lark", "lark_app", "dingtalk", "slack", "email"}:
@@ -324,6 +327,7 @@ def _send_connector(connector: dict, message: str, extra: dict | None = None) ->
 @api_errors
 def test_connector(connector_id: str):
     connector = require_workspace_record("connectors", connector_id)
+    require_workspace_access(connector["workspace_id"], write=True)
     assert_feature_enabled(db(), connector["workspace_id"], "result_delivery")
     return ok(result=_send_connector(connector, "经纬分析工作台连接测试成功"))
 
@@ -332,6 +336,7 @@ def test_connector(connector_id: str):
 @api_errors
 def send_connector(connector_id: str):
     connector = require_workspace_record("connectors", connector_id)
+    require_workspace_access(connector["workspace_id"], write=True)
     assert_feature_enabled(db(), connector["workspace_id"], "result_delivery")
     message = str(body().get("message") or "").strip()
     if not message:
@@ -342,7 +347,8 @@ def send_connector(connector_id: str):
 @bp.delete("/api/connectors/<connector_id>")
 @api_errors
 def delete_connector(connector_id: str):
-    require_workspace_record("connectors", connector_id)
+    connector = require_workspace_record("connectors", connector_id)
+    require_workspace_access(connector["workspace_id"], write=True)
     if not db().archive("connectors", connector_id):
         raise FileNotFoundError("连接器不存在")
     return ok(archived=True)

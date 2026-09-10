@@ -18,7 +18,8 @@ from ..services.saas import assert_agent_run_limit, assert_feature_enabled
 from ..services.validation.engine import ValidationEngine
 from .common import (
     api_errors, body, current_user_id, db, ok, require_session_access,
-    require_source_access, require_workspace_record, workspace_id,
+    require_source_access, require_workspace_access, require_workspace_record, workspace_id,
+    workspace_membership,
 )
 
 
@@ -61,6 +62,7 @@ def _session(payload: dict[str, Any], wid: str) -> dict[str, Any]:
         "id": db().new_id("ses"), "workspace_id": wid,
         "name": str(payload.get("title") or payload.get("objective") or payload.get("message") or "新分析")[:100],
         "status": "active", "source_ids": [], "provider_id": payload.get("provider_id"),
+        "business_space_id": str(payload.get("business_space_id") or "") or None,
         "owner_id": current_user_id(), "analysis_mode": "intelligent",
     }, workspace_id=wid)
     return session
@@ -79,17 +81,76 @@ def _draft_contract(payload: dict[str, Any], source_ids: list[str]) -> TaskContr
     })
 
 
-@bp.post("/api/analyses")
-@api_errors
-def create_analysis():
-    payload, wid = body(), workspace_id()
-    assert_feature_enabled(db(), wid, "governed_agent")
-    assert_agent_run_limit(db(), wid)
-    source_ids = list(dict.fromkeys(str(value) for value in payload.get("source_ids") or []))
+def _analysis_scope(payload: dict[str, Any], session: dict[str, Any], wid: str) -> tuple[list[str], str | None]:
+    space_id = str(payload.get("business_space_id") or session.get("business_space_id") or "") or None
+    if space_id:
+        space = require_workspace_record("business_spaces", space_id, wid)
+        membership = workspace_membership(wid)
+        if not membership:
+            raise PermissionError("无权访问该工作空间")
+        role = str(membership.get("role") or "viewer")
+        members = {str(value) for value in space.get("member_ids") or []}
+        if role not in {"owner", "editor"} and (
+            space.get("status") != "published" or (members and current_user_id() not in members)
+        ):
+            raise FileNotFoundError("业务数据空间不存在")
+        source_ids = [str(value) for value in space.get("source_ids") or []]
+    else:
+        source_ids = [str(value) for value in payload.get("source_ids") or session.get("source_ids") or []]
+    source_ids = list(dict.fromkeys(source_ids))
     if len(source_ids) > 100:
         raise ValueError("单次分析最多选择 100 个来源")
     for source_id in source_ids:
         require_source_access(source_id, wid, action="analyze")
+    return source_ids, space_id
+
+
+def _auto_confirm_requested(payload: dict[str, Any], objective: str) -> bool:
+    if payload.get("confirm_required") is True:
+        return False
+    mode = str(payload.get("execution_mode") or "auto")
+    if mode == "deep":
+        return False
+    if mode == "quick":
+        return True
+    if not payload.get("auto_confirm"):
+        return False
+    complex_terms = ("为什么", "归因", "预测", "复盘", "完整报告", "方案", "深度", "建模")
+    return not any(term in objective for term in complex_terms)
+
+
+def _confirm_and_enqueue(run: dict[str, Any], contract: TaskContract, expected_version: int) -> tuple[dict, dict]:
+    confirmed = _store().add_contract(
+        run["id"], contract, expected_version=expected_version, confirmed_by=current_user_id(),
+    )
+    current = _store().get_run(run["id"]) or run
+    _store().add_plan(run["id"], {
+        "tasks": [{
+            "id": "evidence_driven_analysis", "title": "根据证据动态选择查询、验证与分析动作",
+            "status": "open", "depends_on": [],
+        }],
+    }, reason="contract_confirmed", expected_version=int(current["plan_version"]))
+    job = get_job_manager(current_app._get_current_object()).submit_spec(
+        workspace_id=run["workspace_id"], session_id=run["session_id"],
+        job_type="analysis_run", title=contract.objective[:100], spec={"run_id": run["id"]}, run_id=run["id"],
+    )
+    db().audit(
+        "contract.confirmed", workspace_id=run["workspace_id"], actor=current_user_id(),
+        object_type="agent_run", object_id=run["id"],
+        detail={"contract_version": confirmed["version"], "job_id": job["id"]},
+    )
+    return confirmed, job
+
+
+@bp.post("/api/analyses")
+@api_errors
+def create_analysis():
+    payload, wid = body(), workspace_id()
+    require_workspace_access(wid)
+    assert_feature_enabled(db(), wid, "governed_agent")
+    assert_agent_run_limit(db(), wid)
+    session = _session(payload, wid)
+    source_ids, business_space_id = _analysis_scope(payload, session, wid)
     provider_id = str(payload.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id, wid)
@@ -100,7 +161,10 @@ def create_analysis():
         skill = get_skill(skill_id, wid)
         if not skill or (skill.get("status") and skill.get("status") != "published"):
             raise ValueError("只能使用当前已发布的 Skill")
-    session = _session(payload, wid)
+        if business_space_id:
+            space = require_workspace_record("business_spaces", business_space_id, wid)
+            if skill_id not in {str(value) for value in space.get("skill_ids") or []}:
+                raise PermissionError("该分析技能未发布到当前业务数据空间")
     contract = _draft_contract(payload, source_ids)
     allowed_tools = available_formal_tools(db(), wid, session["id"], source_ids)
     idempotency_key = str(request.headers.get("Idempotency-Key") or payload.get("idempotency_key") or "") or None
@@ -114,7 +178,7 @@ def create_analysis():
     if created:
         db().patch("sessions", session["id"], {
             "source_ids": source_ids, "provider_id": provider_id or session.get("provider_id"),
-            "owner_id": current_user_id(), "current_run_id": run["id"],
+            "business_space_id": business_space_id, "owner_id": current_user_id(), "current_run_id": run["id"],
         }, workspace_id=wid)
         db().add_message(session["id"], "user", contract.objective, {"run_id": run["id"]})
         _store().add_contract(run["id"], contract, expected_version=0)
@@ -123,7 +187,11 @@ def create_analysis():
             "analysis.created", workspace_id=wid, actor=current_user_id(),
             object_type="agent_run", object_id=run["id"], detail={"source_ids": source_ids},
         )
-    return ok(item=_snapshot(run), created=created), 201 if created else 200
+        if _auto_confirm_requested(payload, contract.objective):
+            _confirmed, job = _confirm_and_enqueue(run, contract, expected_version=1)
+            run = _store().get_run(run["id"]) or run
+            return ok(item=_snapshot(run), created=True, auto_confirmed=True, job=job), 201
+    return ok(item=_snapshot(run), created=created, auto_confirmed=False), 201 if created else 200
 
 
 @bp.get("/api/analyses")
@@ -243,25 +311,7 @@ def confirm_contract(run_id: str):
     contract = TaskContract.from_payload(payload.get("contract") or latest["payload"])
     if set(contract.source_scope) - set(run["source_scope"]):
         raise PermissionError("确认时不得扩大数据来源范围")
-    confirmed = _store().add_contract(
-        run_id, contract, expected_version=expected, confirmed_by=current_user_id(),
-    )
-    current = _store().get_run(run_id) or run
-    _store().add_plan(run_id, {
-        "tasks": [{
-            "id": "evidence_driven_analysis", "title": "根据证据动态选择查询、验证与分析动作",
-            "status": "open", "depends_on": [],
-        }],
-    }, reason="contract_confirmed", expected_version=int(current["plan_version"]))
-    job = get_job_manager(current_app._get_current_object()).submit_spec(
-        workspace_id=run["workspace_id"], session_id=run["session_id"],
-        job_type="analysis_run", title=contract.objective[:100], spec={"run_id": run_id}, run_id=run_id,
-    )
-    db().audit(
-        "contract.confirmed", workspace_id=run["workspace_id"], actor=current_user_id(),
-        object_type="agent_run", object_id=run_id,
-        detail={"contract_version": confirmed["version"], "job_id": job["id"]},
-    )
+    _confirmed, job = _confirm_and_enqueue(run, contract, expected)
     return ok(item=_snapshot(_store().get_run(run_id) or run), job=job)
 
 

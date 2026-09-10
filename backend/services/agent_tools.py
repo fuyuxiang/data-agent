@@ -227,6 +227,7 @@ class AgentToolContext:
     dashboard_ids: list[str] = field(default_factory=list)
     tool_result_ids: list[str] = field(default_factory=list)
     knowledge_document_ids: list[str] | None = None
+    semantic_metric_ids: list[str] | None = None
     actor_id: str = ""
 
     def sources(self) -> list[dict]:
@@ -509,8 +510,21 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             )
             if item.get("status") == "approved" and item.get("source_id") in context.source_ids
         ]
+        if context.semantic_metric_ids is not None:
+            allowed = {str(value) for value in context.semantic_metric_ids}
+            items = [item for item in items if str(item.get("id")) in allowed]
         return {"items": items}, events
     if name == "query_metric":
+        if context.semantic_metric_ids is not None:
+            requested = str(args.get("metric") or "").split("@", 1)[0]
+            allowed = {str(value) for value in context.semantic_metric_ids}
+            visible = [
+                item for item in visible_metrics(
+                    context.database, context.workspace_id, context.actor_id or "local-default",
+                ) if str(item.get("id")) in allowed
+            ]
+            if not any(requested in {str(item.get("id")), str(item.get("name"))} for item in visible):
+                raise PermissionError("指标未在当前业务数据空间发布")
         output = execute_metric_query(
             context.database, args, context.workspace_id, context.actor_id or "local-default",
             allowed_source_ids=context.source_ids,

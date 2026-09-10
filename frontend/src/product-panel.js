@@ -106,7 +106,7 @@ export const ProductPanel = {
   template: `
     <section class="workspace-page">
       <header class="surface-header">
-        <div><span class="eyebrow">SaaS control plane</span><h1>产品总览</h1><p>把数据连接、业务口径、指标治理、可信分析、结果交付和自动化沉淀为一条可售卖的标准产品路径。</p></div>
+        <div><span class="eyebrow">管理中心 / 产品运营</span><h1>产品总览</h1><p>统一查看租户开通状态、产品能力、交付路径与套餐权益边界。</p></div>
         <div class="header-cluster">
           <span class="source-chip"><i :class="{on:entitlements.plan}"></i>{{ entitlements.tenant_name || '默认客户' }} · {{ entitlements.plan?.name || '未开通' }}</span>
           <button class="button" :disabled="loading" @click="refresh"><Icon name="refresh"/>{{ loading ? '刷新中' : '刷新' }}</button>
