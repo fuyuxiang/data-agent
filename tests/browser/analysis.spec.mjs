@@ -3,9 +3,9 @@ import { expect, test } from '@playwright/test';
 
 test('creates an analysis contract and manages a real indexed attachment', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('从可信指标出发')).toBeVisible();
+  await expect(page.getByText('查看当前经营状态')).toBeVisible();
   await page.getByRole('button', { name: '智能分析' }).click();
-  await expect(page.getByText('直接说出你的业务问题')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '新建分析' })).toBeVisible();
 
   const composer = page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行');
   await page.getByLabel('分析模式').selectOption('deep');
@@ -87,15 +87,15 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
 
 test('builds and validates an approved semantic metric from the UI', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '管理后台' }).click();
-  await page.getByRole('button', { name: '数据接入' }).click();
+  await page.getByRole('button', { name: '管理控制台' }).click();
+  await page.getByRole('button', { name: '数据源管理' }).click();
   await page.locator('input[type=file][accept*=".csv"]').setInputFiles({
     name: 'sales.csv', mimeType: 'text/csv',
     buffer: Buffer.from('region,month,sales\nNorth,2026-01-01,120\nSouth,2026-01-01,90\n'),
   });
   await expect(page.getByText('sales', { exact: true }).first()).toBeVisible();
 
-  await page.getByRole('button', { name: '指标与语义' }).click();
+  await page.getByRole('button', { name: '指标中心' }).click();
   await page.getByRole('button', { name: '新建语义模型' }).click();
   await page.getByLabel('模型名称').fill('销售事实模型');
   await page.getByRole('button', { name: '保存并校验' }).click();

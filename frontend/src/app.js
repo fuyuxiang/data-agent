@@ -7,21 +7,21 @@ import { ProductPanel } from './product-panel.js';
 const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
 const businessRoutes = [
-  { id: 'home', label: '工作台首页', icon: 'dashboard' },
+  { id: 'home', label: '工作台概览', icon: 'dashboard' },
   { id: 'chat', label: '智能分析', icon: 'chat' },
-  { id: 'insights', label: '洞察与订阅', icon: 'bolt' },
-  { id: 'reports', label: '报告库', icon: 'book' },
+  { id: 'insights', label: '经营洞察', icon: 'bolt' },
+  { id: 'reports', label: '分析报告', icon: 'book' },
 ];
 
 const adminRoutes = [
-  { id: 'spaces', label: '业务数据空间', icon: 'dashboard' },
-  { id: 'sources', label: '数据接入', icon: 'database' },
-  { id: 'semantic', label: '指标与语义', icon: 'chart' },
-  { id: 'knowledge', label: '知识与口径', icon: 'book' },
-  { id: 'automation', label: '自动化运营', icon: 'workflow' },
-  { id: 'dashboards', label: '看板资产', icon: 'map' },
-  { id: 'feishu', label: '渠道接入', icon: 'users' },
-  { id: 'settings', label: '系统治理', icon: 'settings' },
+  { id: 'spaces', label: '业务空间', icon: 'dashboard' },
+  { id: 'sources', label: '数据源管理', icon: 'database' },
+  { id: 'semantic', label: '指标中心', icon: 'chart' },
+  { id: 'knowledge', label: '业务知识', icon: 'book' },
+  { id: 'automation', label: '分析任务', icon: 'workflow' },
+  { id: 'dashboards', label: '分析看板', icon: 'map' },
+  { id: 'feishu', label: '协同渠道', icon: 'users' },
+  { id: 'settings', label: '平台设置', icon: 'settings' },
 ];
 
 const consoleRoutes = [{ id: 'product', label: '租户控制台', icon: 'bolt' }];
@@ -199,11 +199,11 @@ const Root = {
     const canConsole=computed(()=>!state.user||state.user?.role==='owner');
     const routes=computed(()=>state.surface==='admin'?adminRoutes:state.surface==='console'?consoleRoutes:businessRoutes);
     const routeGroups=computed(()=>{
-      if(state.surface==='business') return [{id:'business',label:'我的工作',items:businessRoutes}];
-      if(state.surface==='console') return [{id:'console',label:'平台控制面',items:consoleRoutes}];
+      if(state.surface==='business') return [{id:'business',label:'业务分析',items:businessRoutes}];
+      if(state.surface==='console') return [{id:'console',label:'平台运营',items:consoleRoutes}];
       return [
-        {id:'governance',label:'数据与语义',items:adminRoutes.filter(item=>['spaces','sources','semantic','knowledge'].includes(item.id))},
-        {id:'operations',label:'运营与系统',items:adminRoutes.filter(item=>['automation','dashboards','feishu','settings'].includes(item.id))},
+        {id:'governance',label:'数据资产',items:adminRoutes.filter(item=>['spaces','sources','semantic','knowledge'].includes(item.id))},
+        {id:'operations',label:'运营管理',items:adminRoutes.filter(item=>['automation','dashboards','feishu','settings'].includes(item.id))},
       ];
     });
     const activeRoute=computed(()=>allRoutes.find(item=>item.id===state.route)||routes.value[0]);
@@ -229,9 +229,9 @@ const Root = {
     </main>
     <div v-else class="app-shell" :class="{ 'sidebar-visible': state.sidebarOpen }">
       <aside class="app-sidebar">
-        <header class="brand"><span class="brand__mark" aria-hidden="true"><i></i><i></i><i></i></span><div><b>经纬</b><small>MERIDIAN DATA AGENT</small></div><button class="sidebar-close" @click="state.sidebarOpen=false" aria-label="关闭导航"><Icon name="close"/></button></header>
-        <div v-if="canAdmin || canConsole" class="surface-switch"><button :class="{active:state.surface==='business'}" @click="setSurface('business')">业务工作台</button><button v-if="canAdmin" :class="{active:state.surface==='admin'}" @click="setSurface('admin')">管理后台</button><button v-if="canConsole" :class="{active:state.surface==='console'}" @click="setSurface('console')" title="租户控制台">平台</button></div>
-        <div class="workspace-switcher"><span class="workspace-switcher__icon"><Icon name="dashboard" :size="16"/></span><label>企业工作空间<select v-model="state.workspaceId" @change="switchWorkspace"><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><Icon name="chevron" :size="15"/></div>
+        <header class="brand"><span class="brand__mark" aria-hidden="true"><i></i><i></i><i></i></span><div><b>经纬</b><small>企业数据分析平台</small></div><button class="sidebar-close" @click="state.sidebarOpen=false" aria-label="关闭导航"><Icon name="close"/></button></header>
+        <div v-if="canAdmin || canConsole" class="surface-switch" aria-label="产品界面"><button :class="{active:state.surface==='business'}" @click="setSurface('business')">业务应用</button><button v-if="canAdmin" :class="{active:state.surface==='admin'}" @click="setSurface('admin')">管理控制台</button><button v-if="canConsole" :class="{active:state.surface==='console'}" @click="setSurface('console')" title="平台运营控制台">平台运营</button></div>
+        <div class="workspace-switcher"><span class="workspace-switcher__icon"><Icon name="dashboard" :size="16"/></span><label>当前组织<select v-model="state.workspaceId" @change="switchWorkspace"><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><Icon name="chevron" :size="15"/></div>
         <nav class="main-nav">
           <section v-for="group in routeGroups" :key="group.id" class="nav-group">
             <header>{{ group.label }}</header>
@@ -240,15 +240,15 @@ const Root = {
         </nav>
         <section v-if="state.surface==='business'" class="sidebar-sessions"><header><span>最近分析</span><button @click="newSession()" title="新建分析"><Icon name="plus"/></button></header><button v-for="session in state.sessions.slice(0,5)" :key="session.id" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button></section>
         <footer class="sidebar-footer">
-          <button class="command-entry" @click="state.commandOpen=true"><Icon name="search" :size="15"/><span>快速命令</span><kbd>⌘ K</kbd></button>
-          <div class="system-status"><i :class="{on:state.sources.length}"></i><span>数据服务正常</span><small>{{ state.sources.length }} 个来源</small></div>
+          <button class="command-entry" @click="state.commandOpen=true"><Icon name="search" :size="15"/><span>全局搜索</span><kbd>⌘ K</kbd></button>
+          <div class="system-status"><i :class="{on:state.sources.length}"></i><span>{{ state.sources.length ? '数据服务正常' : '等待数据接入' }}</span><small>{{ state.sources.length }} 个数据源</small></div>
           <div v-if="state.user" class="sidebar-profile"><span class="user-avatar">{{ userInitial }}</span><div><b>{{ state.user.name || '企业用户' }}</b><small>{{ state.entitlements?.plan?.name || '标准版' }}</small></div><button @click="logout" title="退出登录"><Icon name="chevron" :size="15"/></button></div>
         </footer>
       </aside>
       <main class="app-main">
         <header class="global-header">
           <div class="global-context"><span>{{ state.surface==='business' ? (state.businessSpaces.find(item=>item.id===state.activeBusinessSpaceId)?.name || '业务工作台') : (state.workspaces.find(item=>item.id===state.workspaceId)?.name || '企业工作空间') }}</span><b>{{ activeRoute.label }}</b></div>
-          <button class="global-search" @click="state.commandOpen=true"><Icon name="search" :size="16"/><span>搜索数据、任务或命令</span><kbd>⌘ K</kbd></button>
+          <button class="global-search" @click="state.commandOpen=true"><Icon name="search" :size="16"/><span>搜索分析、指标和数据资产</span><kbd>⌘ K</kbd></button>
           <div class="global-actions"><button v-if="state.surface==='admin'" class="run-center" @click="state.jobsOpen=true"><Icon name="workflow" :size="17"/><span>运行中心</span><b v-if="state.activeJobs">{{ state.activeJobs }}</b></button><button class="icon-button" @click="toggleTheme" :aria-label="state.theme==='dark'?'切换浅色模式':'切换深色模式'"><Icon :name="state.theme==='dark'?'sun':'moon'" :size="17"/></button><span class="top-avatar">{{ userInitial }}</span></div>
         </header>
         <div class="mobile-bar"><button class="icon-button" @click="state.sidebarOpen=true" aria-label="打开导航">☰</button><b>{{ activeRoute.label }}</b><button class="icon-button" @click="toggleTheme"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button></div>

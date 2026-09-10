@@ -34,13 +34,13 @@ export const ProductPanel = {
     limitText(value) { return value === null || value === undefined ? '不限' : this.ctx.number(value); },
     featureLabel(value) {
       return ({
-        data_sources: '数据连接',
+        data_sources: '数据源管理',
         governed_agent: '可信分析',
-        knowledge_base: '业务口径',
+        knowledge_base: '业务知识',
         semantic_layer: '指标治理',
-        dashboards: '决策看板',
+        dashboards: '分析看板',
         result_delivery: '结果交付',
-        automation: '报告工厂',
+        automation: '分析任务',
         feishu_bot: '飞书协同',
         mcp_integrations: 'MCP 集成',
         warehouse: '数仓引擎',
@@ -105,8 +105,8 @@ export const ProductPanel = {
   },
   template: `
     <section class="workspace-page">
-      <header class="surface-header">
-        <div><span class="eyebrow">管理中心 / 产品运营</span><h1>产品总览</h1><p>统一查看租户开通状态、产品能力、交付路径与套餐权益边界。</p></div>
+      <header class="surface-header page-heading">
+        <div><h1>租户运营</h1><p>查看租户开通状态、产品能力、配置进度和套餐权益。</p></div>
         <div class="header-cluster">
           <span class="source-chip"><i :class="{on:entitlements.plan}"></i>{{ entitlements.tenant_name || '默认客户' }} · {{ entitlements.plan?.name || '未开通' }}</span>
           <button class="button" :disabled="loading" @click="refresh"><Icon name="refresh"/>{{ loading ? '刷新中' : '刷新' }}</button>

@@ -48,7 +48,7 @@ export const Modal = {
       <Transition name="fade">
         <div v-if="open" class="modal-backdrop" @mousedown.self="$emit('close')">
           <section class="modal" :class="{ 'modal--wide': wide }" role="dialog" aria-modal="true" :aria-label="title">
-            <header class="modal__header"><div><span class="eyebrow">工作台</span><h2>{{ title }}</h2></div><button class="icon-button" @click="$emit('close')" aria-label="关闭"><Icon name="close" /></button></header>
+            <header class="modal__header"><h2>{{ title }}</h2><button class="icon-button" @click="$emit('close')" aria-label="关闭"><Icon name="close" /></button></header>
             <div class="modal__body"><slot /></div>
             <footer v-if="$slots.footer" class="modal__footer"><slot name="footer" /></footer>
           </section>

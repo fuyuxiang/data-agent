@@ -240,18 +240,18 @@ export const AnalysisPanel = {
           workspace_id: this.state.workspaceId, run_id: this.current.id,
           title: (this.contract?.payload?.objective || '经营分析') + '报告',
         } });
-        this.ctx.toast('已在报告库创建草稿，可继续组合与发布', '已加入报告');
+        this.ctx.toast('已在分析报告中创建草稿，可继续编辑并发布', '已加入报告');
       } catch (error) { this.ctx.fail(error); }
     },
     async createSubscription() {
-      if (!this.businessSpace) return this.ctx.fail(new Error('当前分析未绑定业务数据空间'));
+      if (!this.businessSpace) return this.ctx.fail(new Error('当前分析未绑定业务空间'));
       try {
         await api('/api/subscriptions', { method: 'POST', body: {
           workspace_id: this.state.workspaceId, business_space_id: this.businessSpace.id,
           name: (this.contract?.payload?.objective || '分析') + '订阅', question: this.contract?.payload?.objective || '',
           frequency: 'daily', delivery_time: '09:00', channel: 'in_app',
         } });
-        this.ctx.toast('默认每天 09:00 站内送达，可在“洞察与订阅”修改', '订阅已创建');
+        this.ctx.toast('默认每天 09:00 站内送达，可在“经营洞察”中修改', '订阅已创建');
       } catch (error) { this.ctx.fail(error); }
     },
     async feedback(rating) {
@@ -308,10 +308,10 @@ export const AnalysisPanel = {
   template: `
     <section class="chat-surface">
       <header class="surface-header chat-header">
-        <div class="agent-title"><span class="agent-title__icon"><Icon name="brain" :size="18"/></span><div><span class="eyebrow">智能分析</span><h1>{{ session?.name || '新分析' }}</h1></div></div>
+        <div class="agent-title"><span class="agent-title__icon"><Icon name="brain" :size="18"/></span><div><small>智能分析</small><h1>{{ session?.name || '新分析' }}</h1></div></div>
         <div class="header-cluster">
-          <span class="trust-chip"><Icon name="check" :size="14"/>认证指标与数据权限已生效</span>
-          <span class="source-chip"><i :class="{on:businessSpace}"></i>{{ businessSpace?.name || '未绑定业务数据空间' }}</span>
+          <span class="trust-chip"><Icon name="check" :size="14"/>指标口径与数据权限已生效</span>
+          <span class="source-chip"><i :class="{on:businessSpace}"></i>{{ businessSpace?.name || '未绑定业务空间' }}</span>
           <StatusPill v-if="current" :status="current.execution_status"/>
         </div>
       </header>
@@ -319,16 +319,16 @@ export const AnalysisPanel = {
       <div ref="feed" class="chat-feed" :class="{'chat-feed--empty':!current}">
         <div v-if="!current" class="welcome-block">
           <section class="agent-welcome">
-            <div class="welcome-glyph"><span></span><Icon name="brain" :size="30"/></div>
-            <div class="agent-welcome__copy"><div class="agent-kicker"><span class="live-dot">企业可信问数</span><span>可审计</span></div><h2>直接说出你的业务问题</h2><p>经纬会理解问题、匹配认证指标并选择合适的分析方法；复杂任务会先请你核对范围。</p></div>
+            <div class="welcome-glyph"><Icon name="brain" :size="24"/></div>
+            <div class="agent-welcome__copy"><h2>新建分析</h2><p>描述业务问题即可开始。系统会在当前业务空间内匹配指标口径与数据权限，复杂问题将在执行前确认分析范围。</p></div>
           </section>
           <section class="context-strip" aria-label="当前分析上下文">
-            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="dashboard" :size="17"/></span><span><small>业务数据空间</small><b>{{ businessSpace?.name || '等待管理员发布' }}</b></span><Icon name="chevron" :size="14"/></button>
-            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="chart" :size="17"/></span><span><small>认证指标</small><b>{{ businessSpace?.metric_ids?.length || 0 }} 个可问指标</b></span><Icon name="chevron" :size="14"/></button>
-            <button @click="ctx.go('reports')"><span class="context-strip__icon"><Icon name="book" :size="17"/></span><span><small>结果交付</small><b>报告、订阅与分享</b></span><Icon name="chevron" :size="14"/></button>
+            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="dashboard" :size="17"/></span><span><small>当前业务空间</small><b>{{ businessSpace?.name || '等待管理员发布' }}</b></span><Icon name="chevron" :size="14"/></button>
+            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="chart" :size="17"/></span><span><small>可用指标</small><b>{{ businessSpace?.metric_ids?.length || 0 }} 个认证指标</b></span><Icon name="chevron" :size="14"/></button>
+            <button @click="ctx.go('reports')"><span class="context-strip__icon"><Icon name="book" :size="17"/></span><span><small>成果管理</small><b>报告、订阅与分享</b></span><Icon name="chevron" :size="14"/></button>
           </section>
           <section class="suggestion-section">
-            <header><div><b>推荐分析任务</b><small>选择一项开始，或在下方描述你的问题</small></div><span>基于当前数据上下文</span></header>
+            <header><div><b>常用分析</b><small>选择任务模板，或在下方输入具体问题</small></div><span>基于当前业务空间</span></header>
             <div class="prompt-grid">
               <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标、结构与数据质量</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
               <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化、贡献度与风险信号</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
@@ -356,7 +356,7 @@ export const AnalysisPanel = {
           </article>
 
           <section v-if="contract && !contract.confirmed_at" class="analysis-contract">
-            <header><div><span class="eyebrow">查询理解卡</span><h2>请核对复杂任务的统计范围</h2></div><StatusPill status="draft" label="待核对"/></header>
+            <header><div><small class="section-label">分析范围确认</small><h2>请核对复杂任务的统计范围</h2></div><StatusPill status="draft" label="待确认"/></header>
             <div class="contract-grid">
               <label><span>业务分析目标</span><textarea v-model="contractForm.objective"></textarea></label>
               <label><span>统计覆盖范围</span><textarea v-model="contractForm.coverage"></textarea></label>
@@ -377,7 +377,7 @@ export const AnalysisPanel = {
           </section>
 
           <section v-else class="analysis-progress">
-            <header><div><span class="eyebrow">分析进度</span><h2>{{ processing ? '正在查询、分析并核对数据' : '执行记录' }}</h2></div>
+            <header><div><small class="section-label">执行进度</small><h2>{{ processing ? '正在查询、分析并核对数据' : '执行记录' }}</h2></div>
               <div class="row-actions">
                 <button v-if="['running','queued','waiting_job'].includes(current.execution_status)" class="button button--small" @click="control('pause')">暂停</button>
                 <button v-if="current.execution_status==='paused'" class="button button--small" @click="control('resume')">继续</button>
@@ -394,9 +394,9 @@ export const AnalysisPanel = {
 
           <section v-if="manifest" class="analysis-results">
             <nav class="result-tabs">
-              <button :class="{active:activeTab==='summary'}" @click="activeTab='summary'">极简结论</button>
-              <button :class="{active:activeTab==='dashboard'}" @click="activeTab='dashboard';loadDetails(true)">数据看板</button>
-              <button :class="{active:activeTab==='report'}" @click="activeTab='report'">完整报告</button>
+              <button :class="{active:activeTab==='summary'}" @click="activeTab='summary'">分析结论</button>
+              <button :class="{active:activeTab==='dashboard'}" @click="activeTab='dashboard';loadDetails(true)">指标与图表</button>
+              <button :class="{active:activeTab==='report'}" @click="activeTab='report'">详细报告</button>
             </nav>
             <div v-if="activeTab==='summary'" class="result-pane">
               <div class="markdown" v-html="md(manifest.summary)"></div>
