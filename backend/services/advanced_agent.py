@@ -571,9 +571,25 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         return {"run_id": run_id, "status": "failed", "stop_reason": "daily_model_budget_exceeded"}
     budget = dict(run.get("budget") or RunStore.default_budget())
     configured_limit = budget.get("model_tokens")
+    configured_tokens = (
+        int(configured_limit) if configured_limit is not None else int(quota["remaining"])
+    )
+    quota_limited = int(quota["remaining"]) < configured_tokens
+    minimum_viable_tokens = min(configured_tokens, 50_000)
+    if int(quota["remaining"]) < minimum_viable_tokens:
+        store.update_status(
+            run_id, "failed", outcome="failed", stop_reason="daily_model_budget_exceeded",
+        )
+        store.append_event(run_id, "budget.exhausted", {
+            "kind": "daily_model_tokens", "stage": "before_analysis_run",
+            "remaining": int(quota["remaining"]), "minimum_required": minimum_viable_tokens,
+        })
+        return {
+            "run_id": run_id, "status": "failed",
+            "stop_reason": "daily_model_budget_exceeded",
+        }
     budget["model_tokens"] = min(
-        int(configured_limit) if configured_limit is not None else int(quota["remaining"]),
-        int(quota["remaining"]),
+        configured_tokens, int(quota["remaining"]),
     )
     with database.transaction() as connection:
         connection.execute(
@@ -595,6 +611,9 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         finalizer=finalizer.finalize,
         context_window=int(provider.get("context_window") or 32_768),
         max_output_tokens=int(provider.get("max_output_tokens") or 4_096),
+        model_budget_stop_reason=(
+            "daily_model_budget_exceeded" if quota_limited else "model_budget_exceeded"
+        ),
     )
     history = [
         {"role": item["role"], "content": item["content"]}

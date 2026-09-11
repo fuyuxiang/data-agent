@@ -24,7 +24,7 @@ class ContextBuilder:
         governed = {
             "contract": contract,
             "plan": (plan or {}).get("payload") if plan else None,
-            "evidence": evidence_summary[-20:],
+            "evidence": self._compact_evidence(evidence_summary),
             "skills": skills[:8],
             "remaining_budget": remaining_budget,
         }
@@ -34,12 +34,29 @@ class ContextBuilder:
         used = len(json.dumps(first, ensure_ascii=False))
         for group in reversed(groups):
             size = len(json.dumps(group, ensure_ascii=False, default=str))
-            if selected and used + size > self.character_budget:
-                break
+            if used + size > self.character_budget:
+                continue
             selected.append(group)
             used += size
         selected.reverse()
         return [first, *(message for group in selected for message in group)]
+
+    @staticmethod
+    def _compact_evidence(evidence_summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep durable evidence metadata without duplicating full tool payloads."""
+        compact: list[dict[str, Any]] = []
+        for item in evidence_summary[-24:]:
+            value = {
+                key: item.get(key)
+                for key in ("tool", "status", "refs", "completeness", "validation_status")
+                if item.get(key) not in (None, [], "")
+            }
+            preview = item.get("preview")
+            if preview is not None and item.get("tool") != "validate_result":
+                rendered = json.dumps(preview, ensure_ascii=False, default=str)
+                value["preview"] = rendered if len(rendered) <= 1200 else rendered[:1200] + "…"
+            compact.append(value)
+        return compact
 
     @staticmethod
     def _groups(history: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

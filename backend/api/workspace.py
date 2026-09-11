@@ -14,7 +14,7 @@ from ..core.database import utcnow
 from ..services.memory import consolidate_memories, search_memories
 from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
-from ..services.saas import DEFAULT_TENANT_ID, assert_workspace_limit, product_status
+from ..services.saas import DEFAULT_TENANT_ID, assert_workspace_limit, product_status, seed_demo_workspace
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
     api_errors,
@@ -74,6 +74,25 @@ def bootstrap():
             "mcp": "mcp_integrations" in features,
             "exports": ["csv", "xlsx", "docx", "pptx", "html"] if "result_delivery" in features else [],
         },
+    )
+
+
+@bp.post("/api/demo/seed")
+@api_errors
+def seed_demo():
+    wid = workspace_id()
+    require_workspace_access(wid, write=True)
+    result = seed_demo_workspace(db(), wid, current_user_id())
+    return ok(
+        created=result["created"],
+        source=_public_source(result["source"]),
+        onboarding=result["onboarding"],
+        recommended_questions=[
+            "活跃合作商家总数是多少，各省份如何分布？",
+            "哪些城市的商家供给存在明显差异？",
+            "结合盈利状态、补贴和履约成本，分析需要优先关注的城市。",
+            "生成一份城市经营简报，包含结论、证据、风险和建议。",
+        ],
     )
 
 

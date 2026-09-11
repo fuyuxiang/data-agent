@@ -146,7 +146,10 @@ def test_stdio_mcp_disabled_outside_explicit_test_mode(app, monkeypatch):
         app.config["TESTING"] = old_testing
 
 
-def test_daily_quota_blocks_model_turn_before_provider_call(app, client, monkeypatch):
+@pytest.mark.parametrize("daily_limit,used_tokens", [(1, 1), (50_000, 1)])
+def test_daily_quota_blocks_model_turn_before_provider_call(
+    app, client, monkeypatch, daily_limit, used_tokens,
+):
     class Completions:
         def __init__(self):
             self.calls = []
@@ -161,11 +164,13 @@ def test_daily_quota_blocks_model_turn_before_provider_call(app, client, monkeyp
         "backend.services.advanced_agent.resolve_provider",
         lambda _provider_id=None, _workspace_id="default": ({"model": "fake"}, fake),
     )
-    app.config["SETTINGS"] = replace(app.config["SETTINGS"], daily_token_limit=1)
+    app.config["SETTINGS"] = replace(
+        app.config["SETTINGS"], daily_token_limit=daily_limit,
+    )
     database = app.extensions["meridian_db"]
     database.put(
         "usage_events",
-        {"id": "quota-used", "workspace_id": "default", "total_tokens": 1},
+        {"id": "quota-used", "workspace_id": "default", "total_tokens": used_tokens},
         workspace_id="default",
     )
     session = client.post("/api/sessions", json={"name": "quota"}).get_json()["item"]
@@ -458,11 +463,6 @@ def test_sensitive_integrations_require_workspace_owner(app):
     assert editor.post(
         "/api/hooks", json={"event": "turn_end", "action": {"type": "noop"}},
     ).status_code == 403
-    assert editor.put(
-        "/api/feishu-bot", json={"app_id": "blocked", "app_secret": "blocked"},
-    ).status_code == 403
-
-
 def test_multipart_upload_uses_authenticated_active_workspace(app):
     client = app.test_client()
     client.post(
@@ -617,6 +617,46 @@ def test_database_urls_enforce_transport_security(app, monkeypatch):
             datasets._build_database_url({
                 "driver": "postgresql", "host": "db.example.test", "database": "analytics",
             }, "default")
+
+
+def test_database_private_network_policy_follows_environment(app, monkeypatch):
+    from backend.services import datasets
+
+    captured = []
+    monkeypatch.delenv("MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", raising=False)
+    monkeypatch.setattr(
+        datasets, "validate_outbound_host",
+        lambda *_args, **kwargs: captured.append(kwargs["allow_private"]) or ["127.0.0.1"],
+    )
+    with app.app_context():
+        datasets._build_database_url({
+            "driver": "mysql", "host": "127.0.0.1", "database": "analytics",
+        }, "default")
+        assert captured.pop() is True
+
+        app.config["SETTINGS"] = replace(app.config["SETTINGS"], environment="production")
+        monkeypatch.setenv("MERIDIAN_DATABASE_HOST_ALLOWLIST", "127.0.0.1")
+        datasets._build_database_url({
+            "driver": "mysql", "host": "127.0.0.1", "database": "analytics",
+        }, "default")
+        assert captured.pop() is False
+
+        monkeypatch.setenv("MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", "1")
+        datasets._build_database_url({
+            "driver": "mysql", "host": "127.0.0.1", "database": "analytics",
+        }, "default")
+        assert captured.pop() is True
+
+
+def test_mysql_driver_errors_are_actionable_without_connection_details():
+    from backend.services.datasets import _database_connection_error
+
+    class DriverError(Exception):
+        pass
+
+    assert "认证失败" in _database_connection_error(DriverError(1045, "Access denied"), "mysql")
+    assert "数据库不存在" in _database_connection_error(DriverError(1049, "Unknown database"), "mysql")
+    assert "主机、端口" in _database_connection_error(DriverError(2003, "Can't connect"), "mysql")
 
 
 def test_job_manager_has_a_bounded_queue(app):

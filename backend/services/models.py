@@ -5,7 +5,15 @@ import time
 from urllib.parse import urlsplit
 
 from flask import current_app
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    OpenAI,
+    RateLimitError,
+)
 
 from ..core.database import Database
 from .security import SecretVault, mask_secret, validate_outbound_url
@@ -126,12 +134,28 @@ def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
     effective_workspace = workspace_id or "default"
     ensure_quota(_db(), effective_workspace)
     started = time.perf_counter()
-    response = client.chat.completions.create(
-        model=provider["model"],
-        messages=[{"role": "user", "content": "Reply with OK only."}],
-        temperature=0,
-        max_tokens=8,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=provider["model"],
+            messages=[{"role": "user", "content": "Reply with OK only."}],
+            temperature=0,
+            max_tokens=8,
+        )
+    except APIConnectionError as exc:
+        host = urlsplit(str(provider.get("base_url") or "")).hostname or "模型服务"
+        raise ConnectionError(
+            f"无法连接 {host}。请检查网络、代理和 Base URL；请求尚未到达模型服务。"
+        ) from exc
+    except AuthenticationError as exc:
+        raise ValueError("API Key 无效，或该 Key 没有访问此模型的权限。") from exc
+    except NotFoundError as exc:
+        raise ValueError(f"模型 ID“{provider['model']}”不存在，或当前 API Key 无权访问。") from exc
+    except RateLimitError as exc:
+        raise ConnectionError("模型服务请求受限，请检查调用频率、账户余额或套餐额度。") from exc
+    except BadRequestError as exc:
+        raise ValueError("模型服务拒绝了测试参数，请确认模型 ID 与 OpenAI-Compatible 协议匹配。") from exc
+    except APIStatusError as exc:
+        raise ConnectionError(f"模型服务返回 HTTP {exc.status_code}，请稍后重试或检查服务状态。") from exc
     record_usage(
         _db(), effective_workspace, response_usage(response, provider["model"]),
         operation="provider_test",

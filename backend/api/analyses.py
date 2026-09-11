@@ -119,6 +119,27 @@ def _auto_confirm_requested(payload: dict[str, Any], objective: str) -> bool:
     return not any(term in objective for term in complex_terms)
 
 
+def _analysis_budget(payload: dict[str, Any]) -> dict[str, Any]:
+    """Give interactive analyses enough room for multi-step evidence work.
+
+    Model-token usage is cumulative input plus output across every reasoning
+    round. A 100k run cap is therefore too small for a normal analysis that
+    needs schema discovery, several queries, validation and charts. Explicit
+    budgets remain supported for governed API callers.
+    """
+    configured = payload.get("budget")
+    if isinstance(configured, dict):
+        return configured
+    mode = str(payload.get("execution_mode") or "auto")
+    budget = RunStore.default_budget()
+    budget["model_tokens"] = {
+        "quick": 100_000,
+        "auto": 160_000,
+        "deep": 240_000,
+    }.get(mode, 160_000)
+    return budget
+
+
 def _confirm_and_enqueue(run: dict[str, Any], contract: TaskContract, expected_version: int) -> tuple[dict, dict]:
     confirmed = _store().add_contract(
         run["id"], contract, expected_version=expected_version, confirmed_by=current_user_id(),
@@ -172,7 +193,8 @@ def create_analysis():
         workspace_id=wid, session_id=session["id"], actor_id=current_user_id(),
         source_scope=source_ids, allowed_tool_ids=allowed_tools,
         provider_id=provider_id or session.get("provider_id"), parent_run_id=payload.get("parent_run_id"),
-        skill_id=skill_id, run_kind=str(payload.get("run_kind") or "analysis"), budget=payload.get("budget"),
+        skill_id=skill_id, run_kind=str(payload.get("run_kind") or "analysis"),
+        budget=_analysis_budget(payload),
         idempotency_key=idempotency_key,
     )
     if created:

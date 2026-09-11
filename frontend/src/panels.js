@@ -10,12 +10,11 @@ export const SourcesPanel = {
   props: { ctx: Object },
   data: () => ({
     connectOpen: false, connectMode: 'database',
-    dbForm: { name: '', driver: 'sqlite', database: '', host: '', port: '', username: '', password: '' },
+    dbForm: { name: '', driver: 'sqlite', database: '', host: '127.0.0.1', port: '', username: '', password: '', ssl_mode: 'preferred' },
     httpForm: { name: '', url: '', json_path: '' },
     sheetForm: { name: 'Google Sheet', url: '', gid: '0' },
     larkForm: { name: '飞书多维表格', app_id: '', app_secret: '', app_token: '', table_id: '' },
-    activeId: '', preview: null, profile: null, detailTab: 'preview',
-    sql: '', queryResult: null, chart: null,
+    activeId: '', preview: null, profile: null, detailTab: 'preview', previewTable: '', selectedTables: [],
     cleanOps: { drop_duplicates: true, trim_text: true, fill_missing: false, winsorize: false },
     sourceSets: [], selectedSet: '',
     members: [], governance: { name: '', description: '', classification: 'internal', sensitivity: 'internal', retention_policy: '', restricted: false, authorized_user_ids: [] },
@@ -23,67 +22,117 @@ export const SourcesPanel = {
   computed: {
     state() { return this.ctx.state; },
     active() { return this.state.sources.find(item => item.id === this.activeId) || null; },
+    hasDemoSource() { return this.state.sources.some(item => item.sample_seed?.id === 'instant_retail_city_pack'); },
     isWorkspaceOwner() { return !this.state.user || this.state.workspaceRole === 'owner'; },
   },
   watch: { 'state.sources': { handler(items) { if (!this.activeId && items.length) this.select(items[0].id); }, immediate: true } },
   mounted() { this.loadSets(); this.loadMembers(); },
   methods: {
+    syncDatabaseDefaults() {
+      const ports = { postgresql: '5432', mysql: '3306', sqlserver: '1433' };
+      this.dbForm.port = ports[this.dbForm.driver] || '';
+      if (this.dbForm.driver !== 'sqlite' && !this.dbForm.host) this.dbForm.host = '127.0.0.1';
+      this.dbForm.ssl_mode = this.dbForm.driver === 'mysql' ? 'preferred' : this.dbForm.driver === 'postgresql' ? 'prefer' : '';
+    },
     async loadSets() { this.sourceSets = (await api(withWorkspace('/api/source-sets', this.state.workspaceId))).items; },
     async loadMembers() { this.members = (await api(`/api/workspaces/${this.state.workspaceId}/members`)).items; },
     async saveSet() { const ids=this.ctx.activeSession()?.source_ids||[];if(!ids.length)return this.ctx.fail(new Error('请先为当前会话选择数据源'));const name=prompt('数据组合名称：','常用分析数据')||'';if(!name)return;await api('/api/source-sets',{method:'POST',body:{name,source_ids:ids,workspace_id:this.state.workspaceId}});await this.loadSets();this.ctx.toast('当前数据源组合已保存','保存成功'); },
     async applySet() { if(!this.selectedSet)return;const session=this.ctx.activeSession();if(!session)return;const result=await api(`/api/source-sets/${this.selectedSet}/apply`,{method:'POST',body:{session_id:session.id}});Object.assign(session,result.session);this.ctx.toast('当前会话的数据源已切换','组合已应用'); },
+    async attachToCurrentSession(sources) {
+      const session = this.ctx.activeSession();
+      if (!session || !sources?.length) return;
+      const sourceIds = [...new Set([...(session.source_ids || []), ...sources.map(item => item.id)])];
+      const response = await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: { source_ids: sourceIds } });
+      Object.assign(session, response.item);
+    },
     async upload(event) {
       const files = [...event.target.files];
       if (!files.length) return;
       const form = new FormData(); files.forEach(file => form.append('files', file)); form.append('workspace_id', this.state.workspaceId);
       await this.ctx.run('正在读取数据文件', async () => {
         const result = await api('/api/sources/upload', { method: 'POST', body: form });
-        this.state.sources.unshift(...result.items); this.activeId = result.items[0].id; await this.select(this.activeId);
+        this.state.sources.unshift(...result.items);
+        await this.attachToCurrentSession(result.items);
+        this.activeId = result.items[0].id; await this.select(this.activeId);
+        this.ctx.toast('上传的数据已自动加入当前分析', '数据范围已更新');
       });
       event.target.value = '';
     },
+    async loadDemo() {
+      await this.ctx.run('正在载入完整演示环境', async () => {
+        const result = await api('/api/demo/seed', { method: 'POST', body: { workspace_id: this.state.workspaceId } });
+        await this.ctx.bootstrap();
+        this.activeId = result.source.id;
+        await this.select(result.source.id);
+        this.ctx.toast('已加入演示数据、正式指标、业务知识和推荐问题，可直接进入智能分析', result.created.length ? '演示环境已就绪' : '演示环境已存在');
+      }, false);
+    },
     async connect() {
+      if (this.connectMode === 'database') {
+        if (!this.dbForm.database.trim()) return this.ctx.fail(new Error(this.dbForm.driver === 'sqlite' ? '请输入 SQLite 文件路径' : '请输入数据库名称'));
+        if (this.dbForm.driver !== 'sqlite' && !this.dbForm.host.trim()) return this.ctx.fail(new Error('请输入数据库主机'));
+      }
       await this.ctx.run('正在验证数据连接', async () => {
         const paths = { database:'/api/sources/database', http:'/api/sources/http', sheets:'/api/sources/google-sheets', lark:'/api/sources/lark-table' };
         const forms = { database:this.dbForm, http:this.httpForm, sheets:this.sheetForm, lark:this.larkForm };
         const path = paths[this.connectMode];
         const form = forms[this.connectMode];
         const result = await api(path, { method: 'POST', body: { ...form, workspace_id: this.state.workspaceId } });
-        this.state.sources.unshift(result.item); this.connectOpen = false; await this.select(result.item.id);
+        this.state.sources.unshift(result.item);
+        await this.attachToCurrentSession([result.item]);
+        this.connectOpen = false; await this.select(result.item.id);
+        this.ctx.toast('新连接已自动加入当前分析', '数据范围已更新');
       });
     },
     async select(id) {
-      this.activeId = id; this.preview = this.profile = this.queryResult = this.chart = null;
+      this.activeId = id; this.preview = this.profile = null; this.detailTab = 'preview'; this.previewTable = ''; this.selectedTables = [];
       await this.ctx.run('', async () => {
         const source = (await api(`/api/sources/${id}`)).item;
         const index = this.state.sources.findIndex(item => item.id === id); if (index >= 0) this.state.sources[index] = source;
+        if (source.kind === 'database') {
+          const allTables = (source.tables || []).map(table => table.source_name || table.name);
+          this.selectedTables = Array.isArray(source.analysis_tables) ? [...source.analysis_tables] : allTables;
+          this.previewTable = this.selectedTables[0] || allTables[0] || '';
+        }
         this.governance = { name: source.name || '', description: source.description || '', classification: source.classification || 'internal', sensitivity: source.sensitivity || source.classification || 'internal', retention_policy: source.retention_policy || '', restricted: Array.isArray(source.authorized_user_ids), authorized_user_ids: [...(source.authorized_user_ids || [])] };
-        const result = await api(`/api/sources/${id}/preview?limit=100`); this.preview = result.preview;
-        this.sql = `SELECT * FROM "${this.preview.table}" LIMIT 200`;
+        await this.loadPreview(this.previewTable);
       }, false);
     },
-    toggleUse(source) {
+    async loadPreview(tableName = '') {
+      if (!this.activeId) return;
+      this.previewTable = tableName || this.previewTable;
+      const table = this.previewTable ? `&table=${encodeURIComponent(this.previewTable)}` : '';
+      const result = await api(`/api/sources/${this.activeId}/preview?limit=100${table}`);
+      this.preview = result.preview; this.detailTab = 'preview';
+    },
+    async saveTableSelection() {
+      if (!this.active || this.active.kind !== 'database') return;
+      const result = await api(`/api/sources/${this.active.id}`, { method: 'PATCH', body: { analysis_tables: this.selectedTables } });
+      const index = this.state.sources.findIndex(item => item.id === this.active.id);
+      if (index >= 0) this.state.sources[index] = result.item;
+      this.ctx.toast(`${this.selectedTables.length} 张表可用于当前数据源的 Agent 查询`, '表范围已更新');
+    },
+    async toggleAllTables() {
+      const allTables = (this.active?.tables || []).map(table => table.source_name || table.name);
+      this.selectedTables = this.selectedTables.length === allTables.length ? [] : allTables;
+      await this.saveTableSelection();
+    },
+    async toggleUse(source) {
       const session = this.ctx.activeSession(); if (!session) return;
       const ids = new Set(session.source_ids || []); ids.has(source.id) ? ids.delete(source.id) : ids.add(source.id);
-      session.source_ids = [...ids]; api(`/api/sessions/${session.id}`, { method: 'PATCH', body: { source_ids: session.source_ids } }).catch(this.ctx.fail);
+      try {
+        const response = await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: { source_ids: [...ids] } });
+        Object.assign(session, response.item);
+        this.ctx.toast(ids.has(source.id) ? `已将“${source.name}”加入当前分析` : `已将“${source.name}”移出当前分析`, '分析范围已更新');
+      } catch (error) { this.ctx.fail(error); }
     },
     async loadProfile() { const result = await api(`/api/sources/${this.activeId}/profile`); this.profile = result.profile; this.detailTab = 'profile'; },
-    async runQuery() {
-      await this.ctx.run('正在执行只读查询', async () => {
-        const result = await api('/api/query', { method: 'POST', body: { source_ids: [this.activeId], sql: this.sql, workspace_id: this.state.workspaceId } });
-        this.queryResult = result.result; this.detailTab = 'query';
-      });
-    },
-    async createChart() {
-      if (!this.queryResult) return;
-      const result = await api('/api/charts/spec', { method: 'POST', body: { result_id: this.queryResult.id, title: this.active.name, workspace_id: this.state.workspaceId } });
-      this.chart = result.item.spec;
-    },
     async applyClean() {
       const operations = Object.entries(this.cleanOps).filter(([, enabled]) => enabled).map(([type]) => ({ type, strategy: 'median' }));
       await this.ctx.run('正在生成清洗后的派生数据集', async () => {
         const result = await api(`/api/sources/${this.activeId}/clean/apply`, { method: 'POST', body: { operations, workspace_id: this.state.workspaceId } });
-        this.state.sources.unshift(result.item); this.ctx.toast('已保留原始数据并生成清洗版', '数据处理完成');
+        this.state.sources.unshift(result.item); await this.attachToCurrentSession([result.item]);
+        this.ctx.toast('已保留原始数据，清洗版已加入当前分析', '数据处理完成');
       });
     },
     async saveGovernance() {
@@ -100,7 +149,7 @@ export const SourcesPanel = {
   },
   template: `
     <section class="workspace-page">
-      <header class="surface-header page-heading"><div><h1>数据源管理</h1><p>接入并治理用于分析的数据库、文件和业务接口，查询默认只读执行。</p></div><div class="header-cluster"><label class="button button--primary"><Icon name="upload"/>上传文件<input hidden multiple type="file" accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload"></label><button class="button" @click="connectOpen=true"><Icon name="plus"/>新建连接</button></div></header>
+      <header class="surface-header page-heading"><div><h1>数据管理</h1><p>接入、检查并授权 Agent 可以使用的数据。</p></div><div class="header-cluster"><button v-if="!hasDemoSource" class="button button--quiet" @click="loadDemo"><Icon name="play"/>载入演示数据</button><label class="button button--primary"><Icon name="upload"/>上传文件<input hidden multiple type="file" accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload"></label><button class="button" @click="connectOpen=true"><Icon name="plus"/>新建连接</button></div></header>
       <div class="catalog-layout">
         <aside class="record-rail">
           <div class="rail-heading"><b>数据源</b><span>{{ state.sources.length }}</span></div><div class="source-set-bar"><select v-model="selectedSet" @change="applySet"><option value="">已保存组合</option><option v-for="item in sourceSets" :key="item.id" :value="item.id">{{ item.name }}</option></select><button @click="saveSet" title="保存当前组合"><Icon name="plus"/></button></div>
@@ -110,11 +159,11 @@ export const SourcesPanel = {
           <EmptyState v-if="!state.sources.length" icon="database" title="还没有数据源" text="上传文件或连接数据库、业务 API。"/>
         </aside>
         <main v-if="active" class="detail-pane">
-          <div class="detail-title"><div><span class="eyebrow">{{ {file:'文件',database:'数据库',http:'业务接口',sheets:'在线表格',lark:'飞书表格'}[active.kind] || active.kind }}数据源</span><h2>{{ active.name }}</h2><p>{{ active.filename || active.endpoint || '派生数据集' }}</p></div><div class="header-cluster"><label class="check-control"><input type="checkbox" :checked="ctx.activeSession()?.source_ids?.includes(active.id)" @change="toggleUse(active)">用于当前会话</label><button class="icon-button danger" @click="remove(active)" title="归档"><Icon name="close"/></button></div></div>
-          <nav class="tab-bar"><button :class="{active:detailTab==='preview'}" @click="detailTab='preview'">数据预览</button><button :class="{active:detailTab==='profile'}" @click="loadProfile">质量画像</button><button :class="{active:detailTab==='query'}" @click="detailTab='query'">SQL 控制台</button><button :class="{active:detailTab==='clean'}" @click="detailTab='clean'">数据处理</button><button :class="{active:detailTab==='governance'}" @click="detailTab='governance'">安全与治理</button></nav>
-          <div v-if="detailTab==='preview' && preview" class="panel-stack"><div class="metric-strip"><div><small>记录数</small><b>{{ ctx.number(preview.rows) }}</b></div><div><small>字段数</small><b>{{ preview.columns.length }}</b></div><div><small>数据表</small><b>{{ preview.table }}</b></div></div><DataTable :rows="preview.data" :columns="preview.columns"/></div>
+          <div class="detail-title"><div><span class="eyebrow">{{ {file:'文件',database:'数据库',http:'业务接口',sheets:'在线表格',lark:'飞书表格'}[active.kind] || active.kind }}数据源</span><h2>{{ active.name }}</h2><p>{{ active.filename || active.endpoint || '派生数据集' }}</p></div><div class="header-cluster"><label class="check-control source-scope-control"><input type="checkbox" :checked="ctx.activeSession()?.source_ids?.includes(active.id)" @change="toggleUse(active)">{{ ctx.activeSession()?.source_ids?.includes(active.id) ? '已加入当前分析' : '加入当前分析' }}</label><button class="icon-button danger" @click="remove(active)" title="归档"><Icon name="close"/></button></div></div>
+          <section v-if="active.kind==='database'" class="database-table-scope"><header><div><b>数据表范围</b><small>勾选 Agent 可以查询的表，点击表名切换预览</small></div><button class="button button--quiet" @click="toggleAllTables">{{ selectedTables.length === (active.tables || []).length ? '清空' : '全选' }}</button></header><div class="database-table-list"><div v-for="table in active.tables" :key="table.source_name || table.name" class="database-table-item" :class="{active:previewTable===(table.source_name || table.name)}"><label><input type="checkbox" :value="table.source_name || table.name" v-model="selectedTables" @change="saveTableSelection"><span><b>{{ table.name }}</b><small>{{ table.object_type==='view' ? '视图' : '数据表' }} · {{ table.columns || table.schema?.length || 0 }} 个字段</small></span></label><button @click="loadPreview(table.source_name || table.name)">预览</button></div></div></section>
+          <nav class="tab-bar"><button :class="{active:detailTab==='preview'}" @click="loadPreview(previewTable)">数据预览</button><button v-if="active.kind!=='database'" :class="{active:detailTab==='profile'}" @click="loadProfile">数据质量</button><button v-if="active.kind!=='database'" :class="{active:detailTab==='clean'}" @click="detailTab='clean'">数据处理</button><button :class="{active:detailTab==='governance'}" @click="detailTab='governance'">访问权限</button></nav>
+          <div v-if="detailTab==='preview' && preview" class="panel-stack"><div class="metric-strip"><div><small>{{ preview.sampled ? '预览行数' : '记录数' }}</small><b>{{ ctx.number(preview.rows) }}</b></div><div><small>字段数</small><b>{{ preview.columns.length }}</b></div><div><small>数据表</small><b>{{ preview.table }}</b></div></div><p v-if="preview.sampled" class="form-hint">远程数据库仅执行有上限的只读预览，不会将整张表加载到应用内存。</p><DataTable :rows="preview.data" :columns="preview.columns"/></div>
           <div v-if="detailTab==='profile'" class="panel-stack"><div v-if="profile" class="metric-strip"><div class="score"><small>质量评分</small><b>{{ profile.quality_score }}</b><em>/100</em></div><div><small>缺失单元格</small><b>{{ ctx.number(profile.missing_cells) }}</b></div><div><small>重复记录</small><b>{{ ctx.number(profile.duplicate_rows) }}</b></div><div><small>数值字段</small><b>{{ profile.numeric_columns.length }}</b></div></div><DataTable v-if="profile" :rows="profile.columns"/><EmptyState v-else icon="chart" title="尚未生成画像" text="点击“质量画像”即可检查缺失、重复、分布和异常值。"/></div>
-          <div v-if="detailTab==='query'" class="panel-stack"><div class="sql-editor"><header><span>只读 SQL</span><button class="button button--small button--primary" @click="runQuery"><Icon name="play"/>运行</button></header><textarea v-model="sql" spellcheck="false"></textarea></div><div v-if="queryResult" class="result-block"><div class="block-heading"><div><b>查询结果</b><small>{{ queryResult.rows }} 行 · {{ queryResult.columns.length }} 列</small></div><button class="button button--small" @click="createChart"><Icon name="chart"/>生成图表</button></div><DataTable :rows="queryResult.data" :columns="queryResult.columns"/><ChartView v-if="chart" :spec="chart"/></div></div>
           <div v-if="detailTab==='clean'" class="panel-stack"><div class="settings-card"><h3>非破坏性数据处理</h3><p>处理结果会保存为新的派生数据集，原始数据保持不变。</p><div class="option-grid"><label><input v-model="cleanOps.drop_duplicates" type="checkbox">删除重复记录</label><label><input v-model="cleanOps.trim_text" type="checkbox">清理文本空白</label><label><input v-model="cleanOps.fill_missing" type="checkbox">用中位数/众数填补缺失</label><label><input v-model="cleanOps.winsorize" type="checkbox">1%–99% 缩尾处理</label></div><button class="button button--primary" @click="applyClean">生成派生数据集</button></div></div>
           <div v-if="detailTab==='governance'" class="panel-stack"><div class="settings-card"><h3>数据资产信息</h3><p>这些策略会贯穿预览、查询、Agent、派生表、看板与导出。</p><div class="form-grid"><label><span>名称</span><input v-model.trim="governance.name"></label><label><span>分类</span><select v-model="governance.classification"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>敏感级别</span><select v-model="governance.sensitivity"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>保留策略</span><input v-model="governance.retention_policy" placeholder="例如：financial-7y"></label><label class="span-2"><span>资产说明</span><textarea v-model="governance.description"></textarea></label></div></div><div class="settings-card"><h3>细粒度访问范围</h3><p v-if="isWorkspaceOwner">留空表示工作空间成员按角色访问；开启后只有勾选成员可看到并使用。当前所有者必须保留访问权。</p><p v-else>仅工作空间所有者可修改成员白名单；你仍可维护非权限类资产信息。</p><label class="check-control"><input type="checkbox" v-model="governance.restricted" :disabled="!isWorkspaceOwner">启用数据源成员白名单</label><div v-if="governance.restricted" class="option-grid governance-members"><label v-for="member in members" :key="member.user_id"><input type="checkbox" :value="member.user_id" v-model="governance.authorized_user_ids" :disabled="!isWorkspaceOwner">{{ member.name || member.email }} <small>{{ member.role }}</small></label></div><button class="button button--primary" @click="saveGovernance">保存治理策略</button></div></div>
         </main>
@@ -122,7 +171,7 @@ export const SourcesPanel = {
       </div>
       <Modal :open="connectOpen" title="连接外部数据" @close="connectOpen=false">
         <nav class="segmented"><button :class="{active:connectMode==='database'}" @click="connectMode='database'">SQL</button><button :class="{active:connectMode==='http'}" @click="connectMode='http'">HTTP</button><button :class="{active:connectMode==='sheets'}" @click="connectMode='sheets'">Sheets</button><button :class="{active:connectMode==='lark'}" @click="connectMode='lark'">飞书表格</button></nav>
-        <div v-if="connectMode==='database'" class="form-grid"><label><span>连接名称</span><input v-model="dbForm.name" placeholder="生产经营库"></label><label><span>数据库类型</span><select v-model="dbForm.driver"><option value="sqlite">SQLite</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option></select></label><label class="span-2"><span>数据库 / SQLite 文件路径</span><input v-model="dbForm.database" placeholder="database 或 /path/to/file.sqlite"></label><template v-if="dbForm.driver!=='sqlite'"><label><span>主机</span><input v-model="dbForm.host"></label><label><span>端口</span><input v-model="dbForm.port"></label><label><span>用户名</span><input v-model="dbForm.username"></label><label><span>密码</span><input v-model="dbForm.password" type="password"></label></template></div>
+        <div v-if="connectMode==='database'" class="form-grid"><label><span>连接名称</span><input v-model="dbForm.name" placeholder="生产经营库"></label><label><span>数据库类型</span><select v-model="dbForm.driver" @change="syncDatabaseDefaults"><option value="sqlite">SQLite</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option></select></label><label class="span-2"><span>{{ dbForm.driver==='sqlite' ? 'SQLite 文件路径' : '数据库名称' }}</span><input v-model="dbForm.database" :placeholder="dbForm.driver==='sqlite' ? '例如 C:\\data\\sales.sqlite' : '例如 sales' "></label><template v-if="dbForm.driver!=='sqlite'"><label><span>主机</span><input v-model="dbForm.host" placeholder="127.0.0.1"></label><label><span>端口</span><input v-model="dbForm.port" inputmode="numeric"></label><label><span>用户名</span><input v-model="dbForm.username" autocomplete="username"></label><label><span>密码</span><input v-model="dbForm.password" type="password" autocomplete="current-password"></label><label v-if="dbForm.driver==='mysql'"><span>SSL 模式</span><select v-model="dbForm.ssl_mode"><option value="preferred">优先使用（推荐）</option><option value="disabled">关闭（仅本地开发）</option><option value="required">必须使用</option><option value="verify-ca">验证 CA</option><option value="verify-identity">验证 CA 与主机名</option></select></label><p v-if="dbForm.driver==='mysql'" class="form-hint span-2">本机 MySQL 通常使用 127.0.0.1:3306；账号至少需要目标库的 SELECT 和 SHOW VIEW 权限。</p></template></div>
         <div v-else-if="connectMode==='http'" class="form-grid"><label><span>连接名称</span><input v-model="httpForm.name" placeholder="订单服务"></label><label class="span-2"><span>JSON 地址</span><input v-model="httpForm.url" placeholder="https://api.example.com/orders"></label><label class="span-2"><span>数据路径（可选）</span><input v-model="httpForm.json_path" placeholder="data.items"></label></div>
         <div v-else-if="connectMode==='sheets'" class="form-grid"><label><span>连接名称</span><input v-model="sheetForm.name"></label><label class="span-2"><span>公开 Google Sheets 链接或 ID</span><input v-model="sheetForm.url" placeholder="https://docs.google.com/spreadsheets/d/…"></label><label><span>工作表 GID</span><input v-model="sheetForm.gid"></label></div>
         <div v-else class="form-grid"><label><span>连接名称</span><input v-model="larkForm.name"></label><label><span>App ID</span><input v-model="larkForm.app_id"></label><label><span>App Secret</span><input type="password" v-model="larkForm.app_secret"></label><label><span>App Token</span><input v-model="larkForm.app_token"></label><label><span>Table ID</span><input v-model="larkForm.table_id"></label></div>

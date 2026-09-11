@@ -6,6 +6,7 @@
 .vscode/
 
 # Python caches
+.venv/
 .ruff_cache/
 __pycache__/
 *.py[cod]

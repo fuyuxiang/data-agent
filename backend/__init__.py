@@ -122,16 +122,6 @@ def create_app(test_config: dict | None = None) -> Flask:
 
         job_manager = get_job_manager(app)
         atexit.register(job_manager.shutdown)
-        from .services.feishu_bot import start_long_connection
-
-        for connector in database.list("connectors", limit=5000):
-            if connector.get("type") == "lark_app" and connector.get("purpose") == "feishu_bot":
-                start_long_connection(app, connector)
-    if not app.config.get("TESTING") and os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") != "1":
-        from .services.scheduler import start_scheduler
-
-        scheduler = start_scheduler(app)
-        atexit.register(scheduler.stop)
 
     @app.before_request
     def establish_request_context():
@@ -170,7 +160,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def verify_csrf_token():
         if app.config.get("TESTING") or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
             return None
-        if request.path in {"/api/auth/register", "/api/auth/login", "/api/auth/send-code", "/api/auth/reset-password"} or request.path in {"/api/integrations/events", "/api/feishu-bot/events"}:
+        if request.path in {"/api/auth/register", "/api/auth/login", "/api/auth/send-code", "/api/auth/reset-password"} or request.path == "/api/integrations/events":
             return None
         if not session.get("user_id"):
             return None
@@ -196,7 +186,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def require_authenticated_workspace():
         if not request.path.startswith("/api/") or request.path in {"/api/health", "/api/ready", "/api/metrics"}:
             return None
-        if request.path.startswith("/api/auth/") or request.path in {"/api/integrations/events", "/api/feishu-bot/events"}:
+        if request.path.startswith("/api/auth/") or request.path == "/api/integrations/events":
             return None
         users = database.list("users", include_archived=True, limit=1)
         if not users:
@@ -234,7 +224,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"ok": False, "error": "当前成员只有只读权限"}), 403
         owner_only_prefixes = (
             "/api/providers", "/api/models", "/api/mcp", "/api/connectors",
-            "/api/compute", "/api/system/", "/api/hooks", "/api/feishu-bot",
+            "/api/compute", "/api/system/", "/api/hooks",
             "/api/warehouse/engines", "/api/lifecycle",
         )
         if (
@@ -303,7 +293,6 @@ def create_app(test_config: dict | None = None) -> Flask:
         return jsonify({
             "ok": status == 200, "database": database_status, "storage_writable": storage_ready,
             "owner_configured": owner_ready, "model_provider_configured": provider_ready,
-            "scheduler": "disabled" if os.getenv("MERIDIAN_DISABLE_SCHEDULER", "0") == "1" else "enabled",
             "sandbox": sandbox,
         }), status
 

@@ -15,6 +15,8 @@ from .rendering import build_manifest_payload
 
 
 NUMBER_RE = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+ORDERED_LIST_NUMBER_RE = re.compile(r"^\s*(?:[#>*+-]\s*)*\d+[.)、]\s*")
+ACADEMIC_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}[-/](?:19|20)?\d{2}(?:[-/]\d{1,2})?(?!\d)")
 
 
 def _result_for_ref(database: Database, workspace_id: str, ref_id: str) -> dict | None:
@@ -40,8 +42,15 @@ def _expand_result_refs(
     if not ref_id or ref_id in seen:
         return []
     seen.add(ref_id)
-    if _result_for_ref(database, workspace_id, ref_id):
-        return [ref_id]
+    result = _result_for_ref(database, workspace_id, ref_id)
+    if result:
+        # A query action may expose both a DatasetRef (dref_*) and the
+        # underlying query result (qry_*). They are two handles for the same
+        # evidence, not two independently validated results. Canonicalizing to
+        # the immutable query-result id prevents a PASS validation on qry_*
+        # from being rejected merely because the matching dref_* was also
+        # recorded by the query tool.
+        return [str(result["id"])]
     with database.connect() as connection:
         row = connection.execute(
             "SELECT manifest_id FROM publications WHERE id=? AND workspace_id=?",
@@ -97,7 +106,13 @@ def _claim_sentences(answer: str) -> list[str]:
 
 def _claim_numbers(text: str) -> list[dict[str, Any]]:
     output = []
+    structural_spans = [match.span() for match in ACADEMIC_YEAR_RE.finditer(text)]
+    ordered = ORDERED_LIST_NUMBER_RE.match(text)
+    if ordered:
+        structural_spans.append(ordered.span())
     for match in NUMBER_RE.finditer(text):
+        if any(start <= match.start() and match.end() <= end for start, end in structural_spans):
+            continue
         raw = match.group(0)
         plain = raw.replace(",", "").rstrip("%")
         try:
@@ -112,6 +127,13 @@ def _claim_numbers(text: str) -> list[dict[str, Any]]:
     return output
 
 
+def _definition_number_matches(number: dict[str, Any], definition: dict[str, Any]) -> bool:
+    return (
+        number["percentage"] == definition["percentage"]
+        and math.isclose(number["value"], definition["value"], rel_tol=1e-6, abs_tol=1e-9)
+    )
+
+
 def _numbers_match(number: dict[str, Any], cell_value: float) -> bool:
     candidates = [number["value"]]
     if number["percentage"]:
@@ -121,17 +143,22 @@ def _numbers_match(number: dict[str, Any], cell_value: float) -> bool:
 
 def _build_claims(
     database: Database, workspace_id: str, answer: str, refs: list[str],
+    *, definition_numbers: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     cells = _evidence_cells(database, workspace_id, refs)
+    definition_numbers = definition_numbers or []
     claims = []
     for text in _claim_sentences(answer):
         numbers = _claim_numbers(text)
         matched = []
+        matched_definitions = []
         unmatched = []
         for number in numbers:
             found = next((cell for cell in cells if _numbers_match(number, cell["value"])), None)
             if found:
                 matched.append({"number": number["text"], **found})
+            elif any(_definition_number_matches(number, item) for item in definition_numbers):
+                matched_definitions.append(number["text"])
             else:
                 unmatched.append(number["text"])
         semantic_refs = list(dict.fromkeys(
@@ -140,7 +167,8 @@ def _build_claims(
         ))
         claims.append({
             "text": text, "evidence_refs": refs, "evidence_cells": matched,
-            "definition_refs": semantic_refs, "numbers": numbers,
+            "definition_refs": semantic_refs, "definition_numbers": matched_definitions,
+            "numbers": numbers,
             "unmatched_numbers": unmatched,
             "numeric_replay": "PASS" if not unmatched else "FAIL",
         })
@@ -205,11 +233,11 @@ class ResultService:
             for ref in all_refs
             for resolved in _expand_result_refs(self.db, run["workspace_id"], ref)
         ))
-        referenced = [
-            item for item in successful
-            if any(ref in refs for ref in item.get("refs") or [])
-        ]
-        complete = bool(refs) and all(item.get("completeness") == "complete" for item in referenced)
+        complete = bool(refs) and all(
+            (result := _result_for_ref(self.db, run["workspace_id"], ref))
+            and result.get("completeness") == "complete"
+            for ref in refs
+        )
         validated_refs = {
             resolved
             for item in successful if item.get("validation_status") == "PASS"
@@ -217,12 +245,22 @@ class ResultService:
             for resolved in _expand_result_refs(self.db, run["workspace_id"], ref)
         }
         validated = bool(refs) and set(refs).issubset(validated_refs)
-        claims = _build_claims(self.db, run["workspace_id"], answer, refs)
+        unresolved_failed = failed if not (complete and validated) else []
+        definition_text = [json.dumps(contract["payload"], ensure_ascii=False)]
+        for ref in refs:
+            evidence_result = _result_for_ref(self.db, run["workspace_id"], ref)
+            if evidence_result and evidence_result.get("sql"):
+                definition_text.append(str(evidence_result["sql"]))
+        definition_numbers = _claim_numbers("\n".join(definition_text))
+        claims = _build_claims(
+            self.db, run["workspace_id"], answer, refs,
+            definition_numbers=definition_numbers,
+        )
         subject = refs[0] if refs else f"run:{run_id}"
         validation = ValidationEngine(self.db, rules).evaluate(
             run_id=run_id, workspace_id=run["workspace_id"], subject_ref=subject,
             context={
-                "successful": successful, "failed": failed, "refs": refs,
+                "successful": successful, "failed": unresolved_failed, "refs": refs,
                 "complete": complete, "validated": validated, "claims": claims,
             },
         )

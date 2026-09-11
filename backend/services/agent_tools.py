@@ -9,9 +9,8 @@ import pandas as pd
 from flask import current_app
 
 from ..core.database import Database
-from .analytics import ANALYSIS_METHODS, clean_frame, profile, run_analysis_with_frames
+from .analytics import ANALYSIS_METHODS, clean_frame, profile as profile_frame, run_analysis_with_frames
 from .authorization import require_result_access, require_sources_access
-from .charts import catalog as chart_catalog
 from .charts import make_spec, normalize_chart_type, select_charts
 from .datasets import (
     delete_derived_tables,
@@ -69,8 +68,20 @@ BUILTIN_TOOLS = [
     ),
     _function(
         "query_data",
-        "Execute one read-only SQL query over the selected sources and return a bounded result table.",
-        {"sql": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 5000}},
+        (
+            "Execute one read-only SQL query over the selected sources and return a bounded result table. "
+            "Call get_schema first, then use each table's exact query_name without a source-id/source-name prefix. "
+            "For uploaded files use DuckDB SQL, double-quote identifiers containing spaces or punctuation, and never use backticks. "
+            "In UNION queries every SELECT branch must include its own FROM clause; wrap the UNION in a CTE or subquery "
+            "before ordering by a CASE expression. For medians use MEDIAN(column); QUANTILE_CONT requires an explicit "
+            "quantile argument in DuckDB. "
+            "When the run contains a database plus other sources, pass the one source_id needed for this query in source_ids; "
+            "query sources separately because cross-source federation is intentionally disabled."
+        ),
+        {
+            "sql": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+            "source_ids": {"type": "array", "items": {"type": "string"}},
+        },
         ["sql"],
     ),
     _function(
@@ -97,7 +108,11 @@ BUILTIN_TOOLS = [
     ),
     _function(
         "select_chart",
-        "Rank supported chart types from the visualization intent, available columns, and optional query result.",
+        (
+            "Optionally rank the three best chart types from the visualization intent and available columns. "
+            "The result already contains the supported type ids; call this at most once for an intended chart, "
+            "then call generate_chart. Skip it when the chart type is already clear."
+        ),
         {
             "user_intent": {"type": "string"},
             "available_columns": {"type": "array", "items": {"type": "string"}},
@@ -175,7 +190,14 @@ EXTRA_TOOLS = [
     _function("workspace_grep", "Regex-search bounded UTF-8 workspace text files.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}, "max_results": {"type": "integer"}}, ["pattern"]),
     _function("workspace_read_file", "Read a bounded workspace text, document, PDF, or spreadsheet file.", {"file_path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "sheet_name": {"type": "string"}}, ["file_path"]),
     _function("structured_output", "Validate and return machine-readable output.", {"output": {}, "required_fields": {"type": "array", "items": {"type": "string"}}}, ["output"]),
-    _function("load_analysis_skill", "Load a named analysis Skill SOP.", {"name": {"type": "string"}}, ["name"]),
+    _function(
+        "load_analysis_skill",
+        (
+            "Load a named analysis Skill SOP. Built-in ids are executive-summary, quality-audit, "
+            "and trend-diagnosis; common underscore aliases are also accepted."
+        ),
+        {"name": {"type": "string"}}, ["name"],
+    ),
     _function("task_create", "Create a persistent workspace task.", {"title": {"type": "string"}, "description": {"type": "string"}, "assignee": {"type": "string"}, "blocks": {"type": "array", "items": {"type": "string"}}, "blocked_by": {"type": "array", "items": {"type": "string"}}}, ["title"]),
     _function("task_get", "Get one workspace task.", {"task_id": {"type": "string"}}, ["task_id"]),
     _function("task_list", "List workspace tasks.", {"status": {"type": "string"}, "assignee": {"type": "string"}}),
@@ -315,6 +337,8 @@ def _combined_schema(context: AgentToolContext) -> dict:
     for source_index, (source, schema) in enumerate(schemas, 1):
         tables = []
         for table in schema.get("tables", []):
+            if not table.get("columns"):
+                continue
             alias = table["name"]
             if table_counts.get(alias, 0) > 1 and source_index > 1:
                 alias = re.sub(r"[^\w\u4e00-\u9fff]+", "_", f"{source['name']}_{alias}").strip("_")[:80]
@@ -326,7 +350,16 @@ def _combined_schema(context: AgentToolContext) -> dict:
         )
         if item.get("status") == "approved" and item.get("source_id") in context.source_ids
     ]
-    return {"sources": combined, "semantic_metrics": semantic_metrics}
+    file_sources = any(source.get("kind") != "database" for source in sources)
+    return {
+        "sources": combined,
+        "semantic_metrics": semantic_metrics,
+        "query_instructions": {
+            "dialect": "duckdb" if file_sources else str(sources[0].get("driver") or "native_sql"),
+            "table_reference": "只使用 tables[].query_name，不要添加 source_id 或数据源名称前缀",
+            "identifier_quote": '上传文件使用双引号（"），不要使用反引号（`）',
+        },
+    }
 
 
 def _frame(context: AgentToolContext, args: dict):
@@ -343,6 +376,33 @@ def _frame(context: AgentToolContext, args: dict):
         actor_id=context.actor_id or "local-default", action="analyze",
     )[0]
     return source_table(source, args.get("table") or args.get("table_name"))[1], ""
+
+
+def _resolve_frame_columns(frame: pd.DataFrame, requested: list[Any]) -> list[str]:
+    """Resolve model-supplied column names without treating SQL quotes as data."""
+    actual = [str(value) for value in frame.columns]
+    normalized: dict[str, str] = {}
+    for column in actual:
+        key = column.strip()
+        normalized.setdefault(key, column)
+
+    resolved: list[str] = []
+    missing: list[str] = []
+    for value in requested:
+        raw = str(value).strip()
+        candidate = raw
+        while len(candidate) >= 2 and (candidate[0], candidate[-1]) in {
+            ('"', '"'), ("'", "'"), ('`', '`'), ('[', ']'),
+        }:
+            candidate = candidate[1:-1].strip()
+        match = raw if raw in actual else normalized.get(candidate)
+        if match is None:
+            missing.append(raw)
+        else:
+            resolved.append(match)
+    if missing:
+        raise ValueError(f"分析字段不存在：{', '.join(missing)}")
+    return resolved
 
 
 def _search_mcp(context: AgentToolContext, query: str, limit: int, server_filter: str = "") -> list[dict]:
@@ -538,8 +598,14 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         ])
         return {"plan": output["plan"], "result": public}, events
     if name == "query_data":
+        requested_source_ids = [str(value) for value in args.get("source_ids") or context.source_ids]
+        if not requested_source_ids:
+            raise ValueError("请选择数据源")
+        outside_scope = set(requested_source_ids) - set(context.source_ids)
+        if outside_scope:
+            raise PermissionError("查询请求包含本次分析范围外的数据源")
         result = execute_query(
-            context.source_ids, str(args.get("sql") or ""), context.workspace_id,
+            requested_source_ids, str(args.get("sql") or ""), context.workspace_id,
             int(args.get("limit", 1000)), actor_id=context.actor_id or "local-default",
         )
         context.latest_result_id = result["id"]
@@ -550,14 +616,11 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         frame, result_id = _frame(context, args)
         columns = args.get("columns")
         if columns:
-            missing = [str(value) for value in columns if value not in frame.columns]
-            if missing:
-                raise ValueError(f"分析字段不存在：{', '.join(missing)}")
-            frame = frame[[str(value) for value in columns]]
+            frame = frame[_resolve_frame_columns(frame, columns)]
         from ..data_cleaning import profile as cleaning_profile
 
         markdown, _plotly_charts = cleaning_profile(frame, None)
-        structured = profile(frame)
+        structured = profile_frame(frame)
         if len(frame) > 1 and len(structured["numeric_columns"]) > 0:
             chart = make_spec(
                 frame, chart_type="histogram", title="数值列分布",
@@ -625,7 +688,10 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         candidates = select_charts(str(args.get("user_intent") or ""), columns, 3)
         return {
             "result_id": result_id or None, "recommended": candidates[0]["type"],
-            "candidates": candidates, "catalog": chart_catalog(),
+            # Do not return the entire chart catalog here. It is available from
+            # the dedicated chart-catalog API and used to add tens of thousands
+            # of redundant characters to every subsequent model request.
+            "candidates": candidates,
         }, events
     if name == "generate_chart":
         if args.get("sql") and not args.get("result_id"):
@@ -991,9 +1057,18 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
     if name == "load_analysis_skill":
         from .skills import get_skill, public_skill
 
-        skill = get_skill(str(args.get("name") or ""), context.workspace_id)
+        requested_name = str(args.get("name") or "").strip()
+        aliases = {
+            "data_quality": "quality-audit",
+            "quality_audit": "quality-audit",
+            "executive_summary": "executive-summary",
+            "trend_diagnosis": "trend-diagnosis",
+        }
+        skill = get_skill(aliases.get(requested_name, requested_name), context.workspace_id)
         if not skill:
-            raise ValueError("Skill 不存在")
+            raise ValueError(
+                "Skill 不存在；内置 Skill 为 executive-summary、quality-audit、trend-diagnosis"
+            )
         return public_skill(skill, include_prompt=True), events
     if name == "task_create":
         item = {

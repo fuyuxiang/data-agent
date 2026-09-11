@@ -20,6 +20,7 @@ from sqlglot import expressions as sql_exp
 from flask import current_app
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import DBAPIError, NoSuchModuleError
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
@@ -267,9 +268,14 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
     }
     if production and not database_allowlist:
         raise ValueError("生产环境连接数据库前必须配置 MERIDIAN_DATABASE_HOST_ALLOWLIST")
+    private_network_setting = os.getenv("MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", "").strip()
+    allow_private_network = (
+        private_network_setting == "1" if private_network_setting
+        else settings().environment != "production"
+    )
     validate_outbound_host(
         str(url.host), port, allowlist=database_allowlist,
-        allow_private=os.getenv("MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK", "0") == "1",
+        allow_private=allow_private_network,
     )
     query = {str(key): str(value) for key, value in url.query.items()}
     if "odbc_connect" in {key.lower() for key in query}:
@@ -342,9 +348,35 @@ def _build_database_url(config: dict, workspace_id: str) -> str:
     return _harden_database_url(raw, config, workspace_id)
 
 
+def _database_connection_error(exc: Exception, backend: str) -> str:
+    """Translate driver errors without exposing credentials or raw connection URLs."""
+    label = {"mysql": "MySQL", "postgresql": "PostgreSQL", "mssql": "SQL Server"}.get(
+        backend, "数据库",
+    )
+    original = getattr(exc, "orig", exc)
+    arguments = getattr(original, "args", ())
+    code = arguments[0] if arguments and isinstance(arguments[0], int) else None
+    if backend == "mysql":
+        if code == 1045:
+            return "MySQL 认证失败，请检查用户名、密码以及该账号允许登录的主机"
+        if code == 1049:
+            return "MySQL 数据库不存在，请检查数据库名称"
+        if code in {1044, 1142, 1143, 1227}:
+            return "MySQL 账号权限不足，请授予目标数据库的 SELECT 和 SHOW VIEW 权限"
+        if code in {2002, 2003}:
+            return "无法连接 MySQL，请确认服务已启动，并检查主机、端口和防火墙"
+        if code == 2026:
+            return "MySQL SSL 握手失败，请检查服务端证书或调整 SSL 模式"
+    return f"{label} 连接失败，请检查主机、端口、数据库名称、账号权限和 SSL 配置"
+
+
 def register_database(config: dict, workspace_id: str) -> dict:
     url = _build_database_url(config, workspace_id)
-    engine = _database_engine(url)
+    backend = make_url(url).get_backend_name().lower()
+    try:
+        engine = _database_engine(url)
+    except (ImportError, ModuleNotFoundError, NoSuchModuleError) as exc:
+        raise ValueError("数据库驱动未安装，请联系管理员安装对应的 Python 驱动") from exc
     schema_name = str(config.get("schema") or "").strip()[:128] or None
     tables = []
     try:
@@ -364,6 +396,8 @@ def register_database(config: dict, workspace_id: str) -> dict:
                         for col in columns
                     ],
                 })
+    except DBAPIError as exc:
+        raise ValueError(_database_connection_error(exc, backend)) from exc
     finally:
         engine.dispose()
     source_id = db().new_id("src")
@@ -967,7 +1001,59 @@ def schema_for_source(source: dict) -> dict:
     return {"source_id": source["id"], "tables": tables}
 
 
+def _database_preview(source: dict, table_name: str | None, limit: int) -> dict:
+    tables = list(source.get("tables") or [])
+    if not tables:
+        raise ValueError("数据库中没有可预览的数据表或视图")
+    selected = None
+    if table_name:
+        requested = str(table_name).strip()
+        selected = next((
+            table for table in tables
+            if requested in {str(table.get("name") or ""), str(table.get("source_name") or "")}
+        ), None)
+        if selected is None:
+            raise ValueError(f"数据表不存在：{requested}")
+    else:
+        selected = tables[0]
+
+    vault = SecretVault(current_app.config["VAULT_KEY"])
+    url = (vault.open(source.get("credential", ""), {}) or {}).get("url")
+    if not url:
+        raise ValueError("数据库凭据不可用，请重新建立连接")
+    engine = _database_engine(url)
+    backend = engine.dialect.name
+    bounded_limit = max(1, min(int(limit), 500))
+    try:
+        with engine.connect() as connection:
+            _configure_read_only(connection, settings().query_timeout_seconds)
+            qualified = _qualified_table(engine, selected)
+            statement = bounded_read_only_sql(
+                f"SELECT * FROM {qualified}", bounded_limit + 1, _dialect_name(engine),
+            )
+            frame = pd.read_sql(text(statement), connection)
+    except DBAPIError as exc:
+        raise ValueError(_database_connection_error(exc, backend)) from exc
+    finally:
+        engine.dispose()
+    truncated = len(frame) > bounded_limit
+    if truncated:
+        frame = frame.head(bounded_limit).copy()
+    _enforce_result_size(frame)
+    return {
+        "source_id": source["id"],
+        "table": str(selected.get("name") or selected.get("source_name") or "data"),
+        "rows": int(len(frame)),
+        "columns": [str(column) for column in frame.columns],
+        "data": frame_records(frame, bounded_limit),
+        "sampled": True,
+        "truncated": truncated,
+    }
+
+
 def preview_source(source: dict, table_name: str | None = None, limit: int = 100) -> dict:
+    if source.get("kind") == "database":
+        return _database_preview(source, table_name, limit)
     name, frame = source_table(source, table_name)
     return {
         "source_id": source["id"],
@@ -982,10 +1068,14 @@ def _query_table_scope(sources: list[dict]) -> set[str]:
     allowed: set[str] = set()
     if len(sources) == 1 and sources[0].get("kind") == "database":
         source = sources[0]
-        selected = {str(value) for value in source.get("analysis_tables") or [] if str(value)}
+        configured = source.get("analysis_tables")
+        selected = (
+            {str(value) for value in configured if str(value)}
+            if isinstance(configured, list) else None
+        )
         for table in source.get("tables") or []:
             name = str(table.get("source_name") or table.get("name") or "").strip()
-            if selected and name not in selected and str(table.get("name") or "") not in selected:
+            if selected is not None and name not in selected and str(table.get("name") or "") not in selected:
                 continue
             schema_name = str(table.get("schema_name") or source.get("schema_name") or "").strip()
             if name:
@@ -995,7 +1085,13 @@ def _query_table_scope(sources: list[dict]) -> set[str]:
         return allowed
     used: set[str] = set()
     for source in sources:
-        for table_name in source_frames(source):
+        for table_name, frame in source_frames(source).items():
+            # Spreadsheet files often retain placeholder sheets with zero
+            # columns. DuckDB cannot register those frames and they are not
+            # queryable tables, so keep them visible in asset metadata but out
+            # of the SQL catalog.
+            if not len(frame.columns):
+                continue
             base = _sanitize_table_name(table_name)
             name = base if base not in used else _sanitize_table_name(f"{source['name']}_{base}")
             used.add(name)
@@ -1072,6 +1168,8 @@ def execute_query(
             used: set[str] = set()
             for source in sources:
                 for table_name, frame in source_frames(source).items():
+                    if not len(frame.columns):
+                        continue
                     base = _sanitize_table_name(table_name)
                     name = base
                     if name in used:

@@ -191,6 +191,23 @@ def update_source(source_id: str):
         for key in ("name", "description", "classification", "sensitivity", "retention_policy")
         if key in payload
     }
+    if "analysis_tables" in payload:
+        if source.get("kind") != "database":
+            raise ValueError("仅数据库数据源支持设置分析表范围")
+        values = payload["analysis_tables"]
+        if not isinstance(values, list):
+            raise ValueError("analysis_tables 必须是表名数组")
+        available = {
+            str(alias): str(table.get("source_name") or table.get("name") or "")
+            for table in source.get("tables") or []
+            for alias in (table.get("name"), table.get("source_name"))
+            if alias
+        }
+        requested = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+        unknown = [value for value in requested if value not in available]
+        if unknown:
+            raise ValueError(f"数据表不存在或不在当前连接中：{', '.join(unknown[:5])}")
+        allowed["analysis_tables"] = list(dict.fromkeys(available[value] for value in requested))
     if "authorized_user_ids" in payload:
         require_workspace_access(source["workspace_id"], owner=True)
         values = payload["authorized_user_ids"]

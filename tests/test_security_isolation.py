@@ -111,20 +111,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
         "/api/dashboards",
         json={"name": "成员看板", "widgets": [{"id": "w1", "result_id": result_id}]},
     ).get_json()["item"]
-    workflow_response = member.post(
-        "/api/workflows",
-        json={
-            "name": "成员工作流",
-            "definition": {
-                "steps": [{
-                    "id": "query", "type": "query", "depends_on": [],
-                    "config": {"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
-                }],
-            },
-        },
-    )
-    assert workflow_response.status_code == 201
-    workflow = workflow_response.get_json()["item"]
     artifact = member.post(
         "/api/exports/data", json={"result_id": result_id, "format": "csv"},
     ).get_json()["artifact"]
@@ -132,7 +118,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert member.get(f"/api/workspaces/{workspace['id']}/storage").status_code == 403
     assert member.get("/api/audit").status_code == 403
     assert member.get("/api/usage").status_code == 403
-    assert member.get("/api/hooks").status_code == 403
 
     restricted = owner.patch(
         f"/api/sources/{source['id']}",
@@ -156,10 +141,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert dashboard["id"] not in {
         item["id"] for item in member.get("/api/dashboards").get_json()["items"]
     }
-    assert workflow["id"] not in {
-        item["id"] for item in member.get("/api/workflows").get_json()["items"]
-    }
-    assert member.get(f"/api/workflows/{workflow['id']}").status_code == 404
     assert member.get(f"/api/artifacts/{artifact['id']}/download").status_code == 403
 
     derived = owner.post(

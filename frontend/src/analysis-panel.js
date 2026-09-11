@@ -1,30 +1,27 @@
 import { api, withWorkspace } from './api.js';
-import { ChartView, DataTable, EmptyState, Icon, Modal, StatusPill, renderMarkdown } from './components.js';
+import { ChartView, DataTable, Icon, StatusPill, renderMarkdown } from './components.js';
 
 const { nextTick } = Vue;
 const TERMINAL = new Set(['finished', 'failed', 'cancelled']);
 const ACTIVE = new Set(['queued', 'running', 'waiting_job', 'cancelling']);
 
 export const AnalysisPanel = {
-  components: { ChartView, DataTable, EmptyState, Icon, Modal, StatusPill },
+  components: { ChartView, DataTable, Icon, StatusPill },
   props: { ctx: Object },
   data: () => ({
     prompt: '', executionMode: 'auto', current: null, events: [], eventCursor: 0, result: null, evidence: null,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
-    demoLoading: false,
-    artifacts: [], attachments: [],
+    artifacts: [], attachments: [], sourcePickerOpen: false,
     clarificationAnswer: '', feedbackSent: '',
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
-    emailOpen: false, emailMode: 'eml', email: {
-      recipients: '', subject: '', body: '', connector_id: '',
-      kinds: ['summary_docx', 'report_docx', 'dashboard_png'],
-    },
+    artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png'],
   }),
   computed: {
     state() { return this.ctx.state; },
     session() { return this.ctx.activeSession(); },
     selectedSources() { return this.ctx.selectedSources(); },
-    businessSpace() { return this.state.businessSpaces.find(item => item.id === (this.session?.business_space_id || this.state.activeBusinessSpaceId)) || null; },
+    availableSources() { return this.state.sources.filter(item => item.status === 'ready'); },
+    demoMode() { return this.selectedSources.some(item => item.sample_seed?.id === 'instant_retail_city_pack'); },
     contract() { return this.current?.contract || null; },
     manifest() { return this.result?.manifest?.payload || null; },
     processing() { return ACTIVE.has(this.current?.execution_status); },
@@ -51,18 +48,6 @@ export const AnalysisPanel = {
     md: renderMarkdown,
     split(value) {
       return String(value || '').split(/[，,\n]/).map(item => item.trim()).filter(Boolean);
-    },
-    percent(value) { return Math.round(Number(value || 0) * 100); },
-    async seedDemo() {
-      if (this.demoLoading) return;
-      this.demoLoading = true;
-      try {
-        await api(withWorkspace('/api/onboarding/demo', this.state.workspaceId), { method: 'POST' });
-        await this.ctx.bootstrap();
-        this.ctx.toast('已接入样例数据、业务口径和审批指标，可直接发起经营分析', '演示空间已准备');
-      } catch (error) {
-        this.ctx.fail(error);
-      } finally { this.demoLoading = false; }
     },
     syncContract() {
       const value = this.contract?.payload || {};
@@ -134,6 +119,11 @@ export const AnalysisPanel = {
     async send() {
       const objective = this.prompt.trim();
       if (!this.canSend) return;
+      if (!this.selectedSources.length) {
+        this.sourcePickerOpen = true;
+        this.ctx.fail(new Error('请先选择至少一个数据源，再发起分析'));
+        return;
+      }
       this.prompt = '';
       try {
         const response = await api('/api/analyses', {
@@ -141,8 +131,7 @@ export const AnalysisPanel = {
           headers: { 'Idempotency-Key': 'analysis-' + crypto.randomUUID() },
           body: {
             session_id: this.session.id, objective,
-            business_space_id: this.businessSpace?.id || null,
-            source_ids: this.businessSpace?.source_ids || this.session.source_ids || [],
+            source_ids: this.session.source_ids || [],
             provider_id: this.session.provider_id || null,
             execution_mode: this.executionMode, auto_confirm: this.executionMode !== 'deep',
             confirm_required: this.executionMode === 'deep',
@@ -150,6 +139,43 @@ export const AnalysisPanel = {
         });
         await this.setRun(response.item);
       } catch (error) { this.ctx.fail(error); }
+    },
+    async toggleSource(source) {
+      if (!this.session) return;
+      const ids = new Set(this.session.source_ids || []);
+      ids.has(source.id) ? ids.delete(source.id) : ids.add(source.id);
+      try {
+        const response = await api(`/api/sessions/${this.session.id}`, {
+          method: 'PATCH', body: { source_ids: [...ids] },
+        });
+        Object.assign(this.session, response.item);
+      } catch (error) { this.ctx.fail(error); }
+    },
+    retryWithSources() {
+      this.current = null; this.events = []; this.result = null; this.artifacts = [];
+      this.sourcePickerOpen = true;
+    },
+    retryFailed() {
+      const objective = this.contract?.payload?.objective || '';
+      this.current = null; this.events = []; this.result = null; this.artifacts = [];
+      this.prompt = objective;
+      nextTick(() => this.$refs.composer?.focus());
+    },
+    stopReasonLabel(reason) {
+      const labels = {
+        model_budget_exceeded: '本次模型调用预算已耗尽',
+        daily_model_budget_exceeded: '今日模型调用额度已耗尽',
+        model_unavailable: '模型服务暂时不可用',
+        run_time_budget_exceeded: '任务执行时间超过上限',
+        repeated_tool_failures: '数据工具连续执行失败',
+        publication_gate_blocked: '分析结果未通过发布校验',
+      };
+      return labels[reason] || reason || '未知原因';
+    },
+    gateReasons() {
+      if (!this.current?.source_scope?.length) return ['本次分析未带入数据源，Agent 无法执行数据查询'];
+      const partial = [...this.events].reverse().find(item => item.type === 'analysis.partial');
+      return (partial?.payload?.validation?.blocking_issues || []).map(item => item.reason).filter(Boolean).slice(0, 3);
     },
     contractPayload() {
       return {
@@ -227,31 +253,10 @@ export const AnalysisPanel = {
     async generateArtifacts() {
       try {
         const response = await api('/api/analyses/' + this.current.id + '/artifacts', {
-          method: 'POST', body: { kinds: this.email.kinds },
+          method: 'POST', body: { kinds: this.artifactKinds },
         });
         this.artifacts = response.items || [];
         this.ctx.toast('两个 Word 与四图 PNG 已绑定当前发布版本', '成果已生成');
-      } catch (error) { this.ctx.fail(error); }
-    },
-    async addToReport() {
-      if (!this.current?.publication) return;
-      try {
-        await api('/api/reports', { method: 'POST', body: {
-          workspace_id: this.state.workspaceId, run_id: this.current.id,
-          title: (this.contract?.payload?.objective || '经营分析') + '报告',
-        } });
-        this.ctx.toast('已在分析报告中创建草稿，可继续编辑并发布', '已加入报告');
-      } catch (error) { this.ctx.fail(error); }
-    },
-    async createSubscription() {
-      if (!this.businessSpace) return this.ctx.fail(new Error('当前分析未绑定业务空间'));
-      try {
-        await api('/api/subscriptions', { method: 'POST', body: {
-          workspace_id: this.state.workspaceId, business_space_id: this.businessSpace.id,
-          name: (this.contract?.payload?.objective || '分析') + '订阅', question: this.contract?.payload?.objective || '',
-          frequency: 'daily', delivery_time: '09:00', channel: 'in_app',
-        } });
-        this.ctx.toast('默认每天 09:00 站内送达，可在“经营洞察”中修改', '订阅已创建');
       } catch (error) { this.ctx.fail(error); }
     },
     async feedback(rating) {
@@ -261,27 +266,6 @@ export const AnalysisPanel = {
       try {
         await api('/api/feedback', { method: 'POST', body: { workspace_id: this.state.workspaceId, run_id: this.current.id, rating, category } });
         this.feedbackSent = rating; this.ctx.toast('反馈将进入管理员的质量运营闭环', '感谢反馈');
-      } catch (error) { this.ctx.fail(error); }
-    },
-    openEmail() {
-      this.email.subject = '数据分析成果 · ' + (this.session?.name || this.current?.id || '');
-      this.email.body = this.manifest?.summary || '';
-      this.emailOpen = true;
-    },
-    async deliverEmail() {
-      try {
-        const suffix = this.emailMode === 'smtp' ? 'send' : 'eml';
-        const response = await api('/api/analyses/' + this.current.id + '/email/' + suffix, {
-          method: 'POST',
-          headers: { 'Idempotency-Key': 'mail-' + crypto.randomUUID() },
-          body: this.email,
-        });
-        if (response.eml?.download_url) location.href = response.eml.download_url;
-        this.emailOpen = false;
-        this.ctx.toast(
-          this.emailMode === 'smtp' ? 'SMTP 已处理当前发布版本' : '.eml 含真实 MIME 附件',
-          this.emailMode === 'smtp' ? '邮件已发送' : '邮件文件已生成',
-        );
       } catch (error) { this.ctx.fail(error); }
     },
     async branch(mode) {
@@ -307,45 +291,37 @@ export const AnalysisPanel = {
   },
   template: `
     <section class="chat-surface">
-      <header class="surface-header chat-header">
-        <div class="agent-title"><span class="agent-title__icon"><Icon name="brain" :size="18"/></span><div><small>智能分析</small><h1>{{ session?.name || '新分析' }}</h1></div></div>
-        <div class="header-cluster">
-          <span class="trust-chip"><Icon name="check" :size="14"/>指标口径与数据权限已生效</span>
-          <span class="source-chip"><i :class="{on:businessSpace}"></i>{{ businessSpace?.name || '未绑定业务空间' }}</span>
-          <StatusPill v-if="current" :status="current.execution_status"/>
-        </div>
-      </header>
-
       <div ref="feed" class="chat-feed" :class="{'chat-feed--empty':!current}">
         <div v-if="!current" class="welcome-block">
           <section class="agent-welcome">
-            <div class="welcome-glyph"><Icon name="brain" :size="24"/></div>
-            <div class="agent-welcome__copy"><h2>新建分析</h2><p>描述业务问题即可开始。系统会在当前业务空间内匹配指标口径与数据权限，复杂问题将在执行前确认分析范围。</p></div>
+            <div class="welcome-glyph"><Icon name="brain" :size="22"/></div>
+            <div class="agent-welcome__copy"><span class="welcome-kicker">智能分析</span><h2>今天想了解什么？</h2><p>用业务语言描述问题，Agent 会完成查询、分析、验证并生成可信结论。</p></div>
           </section>
-          <section class="context-strip" aria-label="当前分析上下文">
-            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="dashboard" :size="17"/></span><span><small>当前业务空间</small><b>{{ businessSpace?.name || '等待管理员发布' }}</b></span><Icon name="chevron" :size="14"/></button>
-            <button @click="ctx.go('home')"><span class="context-strip__icon"><Icon name="chart" :size="17"/></span><span><small>可用指标</small><b>{{ businessSpace?.metric_ids?.length || 0 }} 个认证指标</b></span><Icon name="chevron" :size="14"/></button>
-            <button @click="ctx.go('reports')"><span class="context-strip__icon"><Icon name="book" :size="17"/></span><span><small>成果管理</small><b>报告、订阅与分享</b></span><Icon name="chevron" :size="14"/></button>
-          </section>
-          <section class="suggestion-section">
-            <header><div><b>常用分析</b><small>选择任务模板，或在下方输入具体问题</small></div><span>基于当前业务空间</span></header>
-            <div class="prompt-grid">
-              <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标、结构与数据质量</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
-              <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化、贡献度与风险信号</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
-              <button @click="usePrompt('分析核心数值的时间趋势，并说明可验证的变化')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>趋势洞察</b><small>走势、拐点与同比环比</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
-              <button @click="usePrompt('生成一份适合经营会的分析摘要，包含结论、证据和建议')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论、证据与行动建议</small></span><Icon class="prompt-arrow" name="chevron" :size="14"/></button>
+          <div class="home-readiness">
+            <div class="source-picker-wrap">
+              <button class="empty-data-action" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database"/><span><b>{{ selectedSources.length ? '已选择 '+selectedSources.length+' 个数据源' : '选择分析数据' }}</b><small>{{ selectedSources.length ? selectedSources.map(item=>item.name).join('、') : '发起分析前需要先确定数据范围' }}</small></span><Icon name="chevron"/></button>
+              <section v-if="sourcePickerOpen" class="source-picker">
+                <header><b>本次分析的数据范围</b><button @click="ctx.go('sources')">管理数据源</button></header>
+                <button v-for="source in availableSources" :key="source.id" :class="{selected:session?.source_ids?.includes(source.id)}" @click="toggleSource(source)"><span class="source-picker-check"><Icon v-if="session?.source_ids?.includes(source.id)" name="check" :size="13"/></span><span><b>{{ source.name }}</b><small>{{ source.kind==='database' ? '数据库' : '文件' }} · {{ source.tables?.length || 0 }} 张表</small></span></button>
+                <p v-if="!availableSources.length">还没有可用数据源，请先上传文件或建立数据库连接。</p>
+              </section>
             </div>
-          </section>
-          <section v-if="state.onboarding && ['owner','editor'].includes(state.workspaceRole) && !businessSpace" class="onboarding-card">
-            <header>
-              <div><b>工作空间就绪度</b><small>{{ percent(state.onboarding.score) }}% 完成 · {{ state.entitlements?.plan?.name || '未开通' }}</small></div>
-              <button class="button button--small button--primary" :disabled="demoLoading" @click="seedDemo"><Icon name="database"/>{{ demoLoading ? '准备中' : '载入演示数据' }}</button>
-            </header>
-            <ol>
-              <li v-for="step in state.onboarding.steps" :key="step.id" :class="{done:step.done}">
-                <i></i><button @click="ctx.go(step.route)">{{ step.name }}</button><small>{{ step.done ? '已完成' : step.description }}</small>
-              </li>
-            </ol>
+            <span class="trust-note"><Icon name="check" :size="14"/>自动核对指标口径、权限与结论证据</span>
+          </div>
+          <section class="suggestion-section">
+            <header><div><b>{{ demoMode ? '演示问题' : '试试这样问' }}</b></div></header>
+            <div v-if="demoMode" class="prompt-grid">
+              <button @click="usePrompt('活跃合作商家总数是多少，各省份如何分布？')"><span class="prompt-icon"><Icon name="table"/></span><span><b>供给规模</b><small>总量与省份分布</small></span></button>
+              <button @click="usePrompt('哪些城市的商家供给存在明显差异？')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>城市差异</b><small>识别结构异常</small></span></button>
+              <button @click="usePrompt('结合盈利状态、补贴和履约成本，分析需要优先关注的城市。')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>经营诊断</b><small>定位重点城市</small></span></button>
+              <button @click="usePrompt('生成一份城市经营简报，包含结论、证据、风险和建议。')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论、证据与建议</small></span></button>
+            </div>
+            <div v-else class="prompt-grid">
+              <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标与结构</small></span></button>
+              <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化与贡献度</small></span></button>
+              <button @click="usePrompt('分析核心数值的时间趋势，并说明可验证的变化')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>趋势洞察</b><small>走势与关键拐点</small></span></button>
+              <button @click="usePrompt('生成一份适合经营会的分析摘要，包含结论、证据和建议')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论与行动建议</small></span></button>
+            </div>
           </section>
         </div>
 
@@ -388,8 +364,17 @@ export const AnalysisPanel = {
               <div class="process-list"><article v-for="event in events" :key="event.sequence"><i></i><div><b>{{ eventLabel(event) }}</b><small>#{{ event.sequence }} · {{ ctx.time(event.created_at) }}</small><pre v-if="['tool.failed','model.failed'].includes(event.type)">{{ JSON.stringify(event.payload, null, 2) }}</pre></div></article></div>
             </details>
             <div v-if="current.execution_status==='waiting_input' && current.stop_reason==='clarification_required'" class="clarification-card"><h3>{{ clarification?.question || '还需要补充一个条件' }}</h3><div v-if="clarification?.options?.length" class="clarification-options"><button v-for="item in clarification.options" :key="item" class="button button--small" @click="answerClarification(item)">{{ item }}</button></div><div class="clarification-answer"><input v-model="clarificationAnswer" @keyup.enter="answerClarification()" placeholder="输入补充信息"><button class="button button--primary" @click="answerClarification()">继续分析</button></div></div>
-            <p v-if="current.execution_status==='failed'" class="analysis-blocked">任务未完成：{{ current.stop_reason }}。系统未生成伪造成果。</p>
-            <p v-if="current.quality_status && current.quality_status!=='passed' && current.execution_status==='finished'" class="analysis-blocked">验证门禁状态：{{ current.quality_status }}；当前只能回看部分状态，不能正式导出或发送。</p>
+            <div v-if="current.execution_status==='failed'" class="analysis-blocked">
+              <b>任务未完成：{{ stopReasonLabel(current.stop_reason) }}</b>
+              <span>系统已保留执行记录，但不会生成未经验证的成果。</span>
+              <button class="button button--small" @click="retryFailed">带入原问题重新分析</button>
+            </div>
+            <div v-if="current.quality_status && current.quality_status!=='passed' && current.execution_status==='finished'" class="analysis-blocked">
+              <b>{{ !current.source_scope?.length ? '本次分析没有带入数据' : '分析结果未通过发布校验' }}</b>
+              <span v-for="reason in gateReasons()" :key="reason">{{ reason }}</span>
+              <small>系统已阻止未经证据验证的结果导出或发送。</small>
+              <button v-if="!current.source_scope?.length" class="button button--small" @click="retryWithSources">选择数据并重新分析</button>
+            </div>
           </section>
 
           <section v-if="manifest" class="analysis-results">
@@ -416,10 +401,7 @@ export const AnalysisPanel = {
             </div>
             <footer class="result-actions">
               <button class="button button--primary" @click="branch('followup')"><Icon name="chat"/>继续追问</button>
-              <button class="button" @click="addToReport"><Icon name="book"/>加入报告</button>
-              <button class="button" @click="createSubscription"><Icon name="workflow"/>建立订阅</button>
               <button class="button" @click="generateArtifacts"><Icon name="download"/>导出成果</button>
-              <button class="button" @click="openEmail">分享</button>
               <a v-for="item in artifacts" :key="item.id" class="button button--small" :href="item.download_url">{{ item.filename }}</a>
             </footer>
             <div class="result-feedback"><span>这个结果对你有帮助吗？</span><button :class="{active:feedbackSent==='correct'}" @click="feedback('correct')">准确</button><button :class="{active:feedbackSent==='partially_correct'}" @click="feedback('partially_correct')">部分准确</button><button :class="{active:feedbackSent==='incorrect'}" @click="feedback('incorrect')">需要纠正</button></div>
@@ -431,15 +413,5 @@ export const AnalysisPanel = {
         <div class="composer__input"><textarea ref="composer" v-model="prompt" :disabled="processing" @keydown="keydown" placeholder="描述分析问题；Enter 发送，Shift+Enter 换行"></textarea><button type="submit" :disabled="!canSend" aria-label="发起分析"><Icon name="play"/></button></div>
         <div class="composer__hint"><span><Icon name="check" :size="13"/>结论附带指标口径与可回放证据</span><label>分析模式<select v-model="executionMode"><option value="auto">智能判断</option><option value="quick">快速问数</option><option value="deep">深度分析</option></select></label></div>
       </form>
-
-      <Modal :open="emailOpen" title="发送已发布成果" @close="emailOpen=false"><div class="form-grid">
-        <label class="span-2"><span>收件人（逗号分隔）</span><input v-model="email.recipients" type="text"></label>
-        <label class="span-2"><span>主题</span><input v-model="email.subject"></label>
-        <label class="span-2"><span>正文</span><textarea v-model="email.body"></textarea></label>
-        <label><span>发送方式</span><select v-model="emailMode"><option value="eml">下载含附件 .eml</option><option value="smtp">SMTP 真实发送</option></select></label>
-        <label v-if="emailMode==='smtp'"><span>SMTP 连接器 ID</span><input v-model="email.connector_id"></label>
-        <fieldset class="span-2"><legend>附件（默认全选）</legend><label v-for="kind in ['summary_docx','report_docx','dashboard_png']" :key="kind"><input type="checkbox" :value="kind" v-model="email.kinds">{{ kind }}</label></fieldset>
-        <p class="form-note span-2">.eml 含真实 MIME 附件；mailto 仅能作为不含附件的文本回退。</p>
-      </div><template #footer><button class="button" @click="emailOpen=false">取消</button><button class="button button--primary" @click="deliverEmail">{{ emailMode==='smtp'?'发送':'生成 .eml' }}</button></template></Modal>
     </section>`,
 };

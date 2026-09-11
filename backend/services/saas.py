@@ -422,8 +422,8 @@ def _register_sample_source(workspace_id: str) -> dict[str, Any]:
 def _ensure_sample_knowledge(database: Database, workspace_id: str) -> int:
     from .knowledge import save_entry
 
-    existing_keys = {
-        str((item.get("sample_seed") or {}).get("key") or "")
+    existing_entries = {
+        str((item.get("sample_seed") or {}).get("key") or ""): item
         for item in database.list("knowledge_entries", workspace_id=workspace_id, limit=5000)
         if (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID
     }
@@ -457,16 +457,20 @@ def _ensure_sample_knowledge(database: Database, workspace_id: str) -> int:
             "type": "context_note",
             "name": "即时零售经营分析背景",
             "topic": "即时零售经营分析背景",
-            "content": "样例用于演示从数据接入、口径沉淀、指标审批到受治理分析交付的 SaaS 主路径。",
+            "content": "样例用于演示从数据接入、口径沉淀、指标审批到可信分析与报告交付的 Data Agent 核心主路径。",
             "tags": ["demo", "instant-retail"],
         },
     ]
     created = 0
     for payload in payloads:
         key = payload.pop("key")
-        if key in existing_keys:
+        current = existing_entries.get(key)
+        desired = {**payload, "sample_seed": {"id": SAMPLE_SEED_ID, "key": key}}
+        if current:
+            if any(current.get(field) != value for field, value in desired.items()):
+                save_entry(desired, workspace_id, current["id"])
             continue
-        save_entry({**payload, "sample_seed": {"id": SAMPLE_SEED_ID, "key": key}}, workspace_id)
+        save_entry(desired, workspace_id)
         created += 1
     return created
 

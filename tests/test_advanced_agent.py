@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import io
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from backend.agent.contracts import ModelResponse, ModelToolCall, TaskContract, ToolSpec
 from backend.agent.context import ContextBuilder
-from backend.agent.loop import AgentLoop
+from backend.agent.loop import AgentLoop, _should_wrap_up, _tool_message
 from backend.agent.model import (
     ChatCompletionsAdapter,
     ModelProtocolError,
@@ -25,15 +26,18 @@ from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
 from backend.services.results.manifests import ResultService
 
 
-def _contract(source_ids=()):
+def _contract(source_ids=(), objective="按区域核对销售额"):
     return TaskContract.from_payload({
-        "objective": "按区域核对销售额", "coverage": "所选数据的全部记录",
+        "objective": objective, "coverage": "所选数据的全部记录",
         "dimensions": ["区域"], "deliverables": ["summary"],
         "source_scope": list(source_ids),
     })
 
 
-def _confirmed_run(app, *, source_ids=(), allowed=("query", "validate"), budget=None):
+def _confirmed_run(
+    app, *, source_ids=(), allowed=("query", "validate"), budget=None,
+    objective="按区域核对销售额",
+):
     database = app.extensions["meridian_db"]
     session = database.put(
         "sessions", {"id": database.new_id("ses"), "workspace_id": "default", "owner_id": "local-default"},
@@ -44,7 +48,10 @@ def _confirmed_run(app, *, source_ids=(), allowed=("query", "validate"), budget=
         workspace_id="default", session_id=session["id"], actor_id="local-default",
         source_scope=list(source_ids), allowed_tool_ids=list(allowed), budget=budget,
     )
-    store.add_contract(run["id"], _contract(source_ids), expected_version=0, confirmed_by="local-default")
+    store.add_contract(
+        run["id"], _contract(source_ids, objective),
+        expected_version=0, confirmed_by="local-default",
+    )
     store.add_plan(run["id"], {
         "tasks": [{"id": "analyze", "title": "分析", "status": "open", "depends_on": []}],
     }, reason="test", expected_version=0)
@@ -71,6 +78,18 @@ def test_analysis_api_requires_versioned_confirmation_and_uses_typed_job(client,
     assert confirmed.status_code == 200
     job = confirmed.get_json()["job"]
     assert job["typed"] is True
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("quick", 100_000), ("auto", 160_000), ("deep", 240_000),
+])
+def test_interactive_analysis_budget_matches_execution_mode(client, mode, expected):
+    response = client.post("/api/analyses", json={
+        "objective": "分析成绩分布", "execution_mode": mode,
+        "confirm_required": True,
+    })
+    assert response.status_code == 201
+    assert response.get_json()["item"]["budget"]["model_tokens"] == expected
 
 
 def test_analysis_attachments_are_bounded_and_contract_scope_locks(client):
@@ -125,6 +144,39 @@ def test_single_agent_loop_publishes_only_after_independent_validation(app):
     assert {item["tool_id"] for item in store.actions(run["id"])} == {"query", "validate"}
 
 
+def test_agent_deterministically_removes_unverified_numeric_claim_before_retry(app):
+    store, run = _confirmed_run(app)
+    store.db.put("query_results", {
+        "id": "result-repair", "workspace_id": "default", "source_ids": [],
+        "rows": 1, "columns": ["total_sales"], "data": [{"total_sales": 745}],
+        "completeness": "complete", "accuracy": "exact",
+    }, workspace_id="default")
+    registry = ToolRegistry()
+    registry.register(ToolSpec("query", "query", {"type": "object", "properties": {}}), lambda _args: {
+        "result_id": "result-repair", "output_refs": ["result-repair"], "completeness": "complete",
+    })
+    registry.register(ToolSpec("validate", "validate", {"type": "object", "properties": {}}), lambda _args: {
+        "output_refs": ["result-repair"], "completeness": "complete", "validation_status": "PASS",
+    })
+    model = ScriptedModelAdapter([
+        ModelResponse("scripted_test", "fixture", "", (
+            ModelToolCall("q1", "query", {}), ModelToolCall("v1", "validate", {}),
+        ), "tool_calls", None, {"total_tokens": 20}),
+        ModelResponse(
+            "scripted_test", "fixture",
+            "销售额合计为 745 元。\n未经核对的预测为 999 元。",
+            (), "stop", None, {"total_tokens": 5},
+        ),
+    ])
+    result = AgentLoop(
+        store=store, model=model, tools=ToolExecutor(store, registry),
+        finalizer=ResultService(store.db).finalize,
+    ).run(run["id"], runner_id="test-runner", history=[])
+    assert result.outcome == "complete"
+    assert result.answer == "销售额合计为 745 元。"
+    assert len(store.decisions(run["id"])) == 2
+
+
 def test_publication_gate_blocks_partial_or_unvalidated_result(app):
     store, run = _confirmed_run(app, allowed=("query",))
     registry = ToolRegistry()
@@ -142,6 +194,121 @@ def test_publication_gate_blocks_partial_or_unvalidated_result(app):
     assert result.status == "finished"
     assert result.outcome == "partial"
     assert result.publication_id is None
+
+
+def test_agent_strips_provider_think_blocks_before_finalization(app):
+    store, run = _confirmed_run(app, allowed=())
+    captured = {}
+
+    def finalize(_run_id, answer, _evidence):
+        captured["answer"] = answer
+        return {"published": False, "quality_status": "failed"}
+
+    model = ScriptedModelAdapter([ModelResponse(
+        "scripted_test", "fixture", "<think>private reasoning 1 2 3</think>\n\n可见结论。",
+        (), "stop", None, {"total_tokens": 1},
+    )])
+    result = AgentLoop(
+        store=store, model=model, tools=ToolExecutor(store, ToolRegistry()), finalizer=finalize,
+    ).run(run["id"], runner_id="test-runner", history=[])
+
+    assert captured["answer"] == "可见结论。"
+    assert result.answer == "可见结论。"
+
+
+def test_agent_enforces_validation_before_publishing(app):
+    store, run = _confirmed_run(app, allowed=("query_data", "validate_result"))
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec("query_data", "query", {"type": "object", "properties": {}}),
+        lambda _args: {"output_refs": ["result-1"], "completeness": "complete"},
+    )
+    registry.register(
+        ToolSpec("validate_result", "validate", {"type": "object", "properties": {"result_id": {"type": "string"}}}),
+        lambda args: {
+            "output_refs": [args["result_id"]], "completeness": "complete",
+            "validation_status": "PASS",
+        },
+    )
+    model = ScriptedModelAdapter([
+        ModelResponse(
+            "scripted_test", "fixture", "", (ModelToolCall("q1", "query_data", {}),),
+            "tool_calls", None, {"total_tokens": 1},
+        ),
+        ModelResponse("scripted_test", "fixture", "结果已核对。", (), "stop", None, {"total_tokens": 1}),
+    ])
+
+    def finalize(_run_id, answer, evidence):
+        assert answer == "结果已核对。"
+        assert any(
+            item["tool"] == "validate_result" and item["validation_status"] == "PASS"
+            for item in evidence
+        )
+        return {"published": True, "quality_status": "passed", "publication_id": "publication-1"}
+
+    result = AgentLoop(
+        store=store, model=model, tools=ToolExecutor(store, registry), finalizer=finalize,
+    ).run(run["id"], runner_id="test-runner", history=[])
+    assert result.status == "finished"
+    assert {item["tool_id"] for item in store.actions(run["id"])} == {"query_data", "validate_result"}
+
+
+def test_agent_cannot_answer_selected_data_question_without_current_query(app):
+    store, run = _confirmed_run(app, source_ids=("source-1",), allowed=("query_data",))
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec("query_data", "query", {"type": "object", "properties": {}}),
+        lambda _args: {"output_refs": ["result-1"], "completeness": "complete"},
+    )
+    model = ScriptedModelAdapter([
+        ModelResponse("scripted_test", "fixture", "历史里没找到数据。", (), "stop", None, {"total_tokens": 1}),
+        ModelResponse(
+            "scripted_test", "fixture", "", (ModelToolCall("q1", "query_data", {}),),
+            "tool_calls", None, {"total_tokens": 1},
+        ),
+        ModelResponse("scripted_test", "fixture", "当前数据已查询。", (), "stop", None, {"total_tokens": 1}),
+    ])
+
+    result = AgentLoop(
+        store=store, model=model, tools=ToolExecutor(store, registry),
+        finalizer=lambda *_args: {"published": True, "quality_status": "passed", "publication_id": "publication-1"},
+    ).run(run["id"], runner_id="test-runner", history=[])
+
+    assert result.status == "finished"
+    assert result.answer == "当前数据已查询。"
+    assert [item["tool_id"] for item in store.actions(run["id"])] == ["query_data"]
+
+
+def test_query_data_may_narrow_to_one_source_inside_run_scope(app, source):
+    from backend.services.advanced_agent import build_executor
+
+    store, run = _confirmed_run(
+        app, source_ids=(source["id"], "other-selected-source"), allowed=("query_data",),
+    )
+    context = store.acquire_lease(run["id"], "source-subset-test")
+    decision = store.record_decision(run["id"], ModelResponse(
+        "scripted_test", "fixture", "", (), "tool_calls", None, {"total_tokens": 0},
+    ))
+    executor = build_executor(app.extensions["meridian_db"], store.get_run(run["id"]))
+    with app.app_context():
+        queried = executor.execute(
+            context=context, decision_id=decision["id"], call_id="query",
+            tool_id="query_data", arguments={
+                "source_ids": [source["id"]], "sql": "SELECT COUNT(*) AS rows FROM data",
+            },
+        )
+    assert queried.result.status.value == "SUCCEEDED"
+    assert queried.value["source_ids"] == [source["id"]]
+
+    with app.app_context():
+        blocked = executor.execute(
+            context=context, decision_id=decision["id"], call_id="outside",
+            tool_id="query_data", arguments={
+                "source_ids": ["outside-run-scope"], "sql": "SELECT 1 AS value",
+            },
+        )
+    assert blocked.result.status.value == "FAILED"
+    assert blocked.result.error_code == "permission_denied"
 
 
 def test_publication_gate_replays_numeric_claims_against_result_cells(app, source):
@@ -176,6 +343,60 @@ def test_publication_gate_replays_numeric_claims_against_result_cells(app, sourc
         claims = ResultService(store.db).claims(run["id"], workspace_id="default")
         assert claims[-1]["payload"]["numeric_replay"] == "PASS"
         assert claims[-1]["payload"]["evidence_cells"][0]["column"] == "total_sales"
+
+
+def test_publication_gate_accepts_recovered_auxiliary_failure_and_contract_numbers(app, source):
+    from backend.services.datasets import execute_query
+
+    store, run = _confirmed_run(
+        app, source_ids=(source["id"],),
+        objective="按 60 分及格线分析 2024-2025-1 学期数据",
+    )
+    with app.app_context():
+        result = execute_query(
+            [source["id"]],
+            "SELECT SUM(sales) AS total_sales FROM data WHERE sales <= 200", "default",
+            actor_id="local-default",
+        )
+        dataset_ref_id = store.db.new_id("dref")
+        with store.db.transaction() as connection:
+            connection.execute(
+                """INSERT INTO dataset_refs(id,workspace_id,run_id,payload,created_at,updated_at)
+                   VALUES(?,?,?,?,datetime('now'),datetime('now'))""",
+                (
+                    dataset_ref_id, "default", run["id"],
+                    json.dumps({"location": {"query_result_id": result["id"]}}),
+                ),
+            )
+        evidence = [
+            {
+                "tool": "query_data", "status": "SUCCEEDED",
+                "refs": [dataset_ref_id, result["id"]],
+                "completeness": "complete", "validation_status": "not_evaluated",
+            },
+            {
+                "tool": "select_chart", "status": "SUCCEEDED", "refs": [result["id"]],
+                "completeness": "unknown", "validation_status": "not_evaluated",
+            },
+            {
+                "tool": "query_data", "status": "FAILED", "refs": [],
+                "completeness": "unknown", "validation_status": "not_evaluated",
+            },
+            {
+                "tool": "validate_result", "status": "SUCCEEDED", "refs": [result["id"]],
+                "completeness": "complete", "validation_status": "PASS",
+            },
+        ]
+        published = ResultService(store.db).finalize(
+            run["id"],
+            "1. 2024-2025-1 学期采用 60 分及格线和 200 元查询上限，销售额证据值为 745 元。",
+            evidence,
+        )
+        assert published["published"] is True
+        checks = {item["rule_id"]: item for item in published["validation"]["items"]}
+        assert checks["tool_failures"]["status"] == "PASS"
+        assert checks["result_completeness"]["status"] == "PASS"
+        assert checks["numeric_claim_replay"]["status"] == "PASS"
 
 
 def test_tool_executor_enforces_effective_tools_and_budget(app):
@@ -257,6 +478,50 @@ def test_context_builder_keeps_only_complete_tool_groups_and_respects_budget():
     assert messages[-1]["content"] == "latest"
     assert not any(message.get("tool_call_id") == "other" for message in messages)
     assert not any(message.get("content") == "old" * 2000 for message in messages)
+
+
+def test_context_builder_compacts_repeated_evidence_previews():
+    builder = ContextBuilder(context_window=8000, max_output_tokens=1000)
+    messages = builder.build(
+        system="policy", contract={"objective": "test"}, plan=None, history=[],
+        evidence_summary=[{
+            "tool": "query_data", "status": "SUCCEEDED", "refs": [f"result-{index}"],
+            "completeness": "complete", "validation_status": "PASS", "preview": "x" * 5000,
+        } for index in range(30)],
+        skills=[], remaining_budget={"model_tokens": 10000},
+    )
+    governed = messages[0]["content"]
+    assert governed.count("result-") == 24
+    assert len(governed) < 40_000
+
+
+def test_agent_enters_wrap_up_with_evidence_before_budget_is_exhausted():
+    evidence = [{"tool": "query_data", "status": "SUCCEEDED", "refs": ["result-1"]}]
+    assert not _should_wrap_up({"model_tokens": 100_000}, {"model_tokens": 54_999}, evidence)
+    assert _should_wrap_up({"model_tokens": 100_000}, {"model_tokens": 55_000}, evidence)
+    assert not _should_wrap_up({"model_tokens": 100_000}, {"model_tokens": 90_000}, [])
+
+
+def test_agent_tool_messages_are_bounded():
+    rendered = _tool_message({"catalog": "x" * 50_000})
+    assert len(rendered) < 12_100
+    assert "tool result truncated" in rendered
+
+
+def test_quota_limited_agent_reports_daily_budget_reason(app):
+    store, run = _confirmed_run(
+        app, allowed=(), budget=RunStore.default_budget() | {"model_tokens": 5_000},
+    )
+    model = ScriptedModelAdapter([ModelResponse(
+        "scripted_test", "fixture", "不会发布", (), "stop", None,
+        {"total_tokens": 5_001},
+    )])
+    result = AgentLoop(
+        store=store, model=model, tools=ToolExecutor(store, ToolRegistry()),
+        finalizer=lambda *_args: {"published": False},
+        model_budget_stop_reason="daily_model_budget_exceeded",
+    ).run(run["id"], runner_id="test-runner", history=[])
+    assert result.stop_reason == "daily_model_budget_exceeded"
 
 
 @pytest.mark.parametrize("payload,match", [
