@@ -27,11 +27,21 @@ frontend/dist/
 test-results/
 playwright-report/
 
+# Local generated artifacts
+build/
+dist/
+.chart-data-*/
+.codex-finalizer/
+artifacts/competition_*/
+
 # Runtime logs and pid files
 logs/
 backend/logs/
 *.log
 *.pid
+
+# Local Windows executable build outputs
+*.exe
 
 # Local runtime data
 storage/

@@ -46,6 +46,13 @@ export const AnalysisPanel = {
   beforeUnmount() { clearTimeout(this.pollingTimer); },
   methods: {
     md: renderMarkdown,
+    formatResultValue(value) {
+      if (value === null || value === undefined || Number.isNaN(value)) return '不可用';
+      if (typeof value === 'number') {
+        return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value);
+      }
+      return String(value);
+    },
     split(value) {
       return String(value || '').split(/[，,\n]/).map(item => item.trim()).filter(Boolean);
     },
@@ -297,6 +304,12 @@ export const AnalysisPanel = {
             <div class="welcome-glyph"><Icon name="brain" :size="22"/></div>
             <div class="agent-welcome__copy"><span class="welcome-kicker">智能分析</span><h2>今天想了解什么？</h2><p>用业务语言描述问题，Agent 会完成查询、分析、验证并生成可信结论。</p></div>
           </section>
+          <section class="analysis-capability-strip">
+            <article><b>数据范围</b><span>{{ selectedSources.length ? selectedSources.length + ' 个数据源已选择' : '待选择数据源' }}</span></article>
+            <article><b>指标口径</b><span>优先使用已认证指标</span></article>
+            <article><b>证据校验</b><span>结论需可回放核对</span></article>
+            <article><b>成果输出</b><span>报告与图表可导出</span></article>
+          </section>
           <div class="home-readiness">
             <div class="source-picker-wrap">
               <button class="empty-data-action" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database"/><span><b>{{ selectedSources.length ? '已选择 '+selectedSources.length+' 个数据源' : '选择分析数据' }}</b><small>{{ selectedSources.length ? selectedSources.map(item=>item.name).join('、') : '发起分析前需要先确定数据范围' }}</small></span><Icon name="chevron"/></button>
@@ -384,8 +397,8 @@ export const AnalysisPanel = {
               <button :class="{active:activeTab==='report'}" @click="activeTab='report'">详细报告</button>
             </nav>
             <div v-if="activeTab==='summary'" class="result-pane">
-              <div class="markdown" v-html="md(manifest.summary)"></div>
-              <div class="kpi-grid"><article v-for="item in manifest.kpis" :key="item.id"><small>{{ item.label }}</small><b>{{ item.value ?? '不可用' }}</b><span v-if="item.unavailable_reason">{{ item.unavailable_reason }}</span></article></div>
+              <div v-if="manifest.kpis?.length" class="kpi-grid summary-kpi-grid"><article v-for="item in manifest.kpis" :key="item.id"><small>{{ item.label }}</small><b>{{ formatResultValue(item.value) }}</b><span v-if="item.unavailable_reason">{{ item.unavailable_reason }}</span></article></div>
+              <div class="markdown analysis-summary-markdown" v-html="md(manifest.summary)"></div>
               <details><summary>局限与验证范围</summary><ul><li v-for="item in manifest.limitations" :key="item">{{ item }}</li></ul></details>
               <details v-if="evidence" class="evidence-drawer"><summary>查看结论依据（{{ evidence.claims?.length || 0 }} 条）</summary><div class="claim-list"><article v-for="claim in evidence.claims" :key="claim.id"><header><StatusPill :status="claim.payload?.status==='validated'?'completed':'draft'" :label="claim.payload?.numeric_replay==='PASS'?'已复算':'待核对'"/><span v-for="ref in claim.payload?.definition_refs || []" :key="ref">{{ ref }}</span></header><p>{{ claim.payload?.text }}</p><small>{{ claim.payload?.evidence_cells?.length || 0 }} 个数据单元格可回放</small></article></div></details>
             </div>

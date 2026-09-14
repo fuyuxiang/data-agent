@@ -69,8 +69,11 @@ def restore_backup(
             archive.extractall(extract_root, members=members, filter="data")
 
         database = extract_root / "storage" / "meridian.sqlite3"
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        try:
             integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        finally:
+            connection.close()
         if integrity != "ok":
             raise ValueError(f"恢复后的数据库完整性校验失败：{integrity}")
         os.replace(extract_root / "storage", destination / "storage")

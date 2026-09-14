@@ -202,7 +202,27 @@ export const ToastStack = {
   template: `<Teleport to="body"><div class="toast-stack" aria-live="polite"><TransitionGroup name="toast"><div v-for="item in items" :key="item.id" class="toast" :data-tone="item.tone"><Icon :name="item.tone === 'error' ? 'warning' : 'check'"/><div><strong>{{ item.title }}</strong><p v-if="item.message">{{ item.message }}</p></div></div></TransitionGroup></div></Teleport>`,
 };
 
+function normalizeMarkdownTables(value) {
+  const lines = String(value || '').replace(/\r\n/g, '\n').split('\n');
+  const isTableSeparator = line => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+  return lines.filter((line, index) => {
+    if (line.trim()) return true;
+    const previous = lines[index - 1]?.trim() || '';
+    const next = lines[index + 1]?.trim() || '';
+    const nextNext = lines[index + 2]?.trim() || '';
+    return !(previous.startsWith('|') && next.startsWith('|') && !isTableSeparator(nextNext));
+  }).join('\n');
+}
+
+function wrapMarkdownTables(html) {
+  return String(html || '')
+    .replace(/<table>/g, '<div class="markdown-table-wrap"><table>')
+    .replace(/<\/table>/g, '</table></div>');
+}
+
 export function renderMarkdown(value) {
-  const raw = window.marked ? window.marked.parse(value || '') : String(value || '').replace(/\n/g, '<br>');
-  return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
+  const normalized = normalizeMarkdownTables(value);
+  const raw = window.marked ? window.marked.parse(normalized) : normalized.replace(/\n/g, '<br>');
+  const enhanced = wrapMarkdownTables(raw);
+  return window.DOMPurify ? window.DOMPurify.sanitize(enhanced) : enhanced;
 }

@@ -4,6 +4,7 @@ import os
 import time
 from urllib.parse import urlsplit
 
+import httpx
 from flask import current_app
 from openai import (
     APIConnectionError,
@@ -38,6 +39,18 @@ def _provider_url(value: str, *, allow_loopback: bool = False) -> str:
     if allow_loopback and hostname in {"localhost", "127.0.0.1", "::1"}:
         return value
     return validate_outbound_url(value)
+
+
+def _trust_model_proxy_env() -> bool:
+    """Model calls should not silently inherit broken desktop proxy env vars.
+
+    The Codex/desktop runtime and some Windows shells may expose placeholder
+    proxies such as 127.0.0.1:9. Let administrators opt in when a real outbound
+    proxy is required, but default to direct connections for model providers.
+    """
+    return os.getenv("MERIDIAN_MODEL_TRUST_ENV_PROXY", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def save_provider(
@@ -120,7 +133,12 @@ def resolve_provider(
     if not api_key:
         return provider | {"model": model}, None
     base_url = _provider_url(base_url, allow_loopback=bool(provider.get("allow_loopback")))
-    return provider | {"model": model, "base_url": base_url}, OpenAI(api_key=api_key, base_url=base_url, timeout=60)
+    return provider | {"model": model, "base_url": base_url}, OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=60,
+        http_client=httpx.Client(timeout=60, trust_env=_trust_model_proxy_env()),
+    )
 
 
 def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:

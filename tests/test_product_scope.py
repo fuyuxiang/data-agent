@@ -21,6 +21,42 @@ def test_retired_product_surfaces_are_not_exposed(client):
         assert client.get(path).status_code == 404
 
 
+def test_agent_tool_surface_matches_focused_product(app):
+    from backend.services.agent_tools import AgentToolContext, tool_schemas
+
+    context = AgentToolContext(app.extensions["meridian_db"], "default", "welcome", ["source-demo"])
+    exposed = {item["function"]["name"] for item in tool_schemas(context)}
+
+    assert {
+        "get_schema",
+        "query_data",
+        "list_semantic_metrics",
+        "query_metric",
+        "query_knowledge",
+        "generate_chart",
+        "export_report",
+    }.issubset(exposed)
+    assert exposed.isdisjoint({
+        "propose_dashboard_outline",
+        "generate_dashboard",
+        "list_feishu_bitable_tables",
+        "load_feishu_bitable",
+        "team_create",
+        "team_delete",
+        "team_list",
+        "team_status",
+        "send_message",
+        "agent_delegate",
+        "team_plan_create",
+        "team_delegate",
+        "workflow_create",
+        "workflow_create_custom",
+        "workflow_list",
+        "workflow_start",
+        "workflow_status",
+    })
+
+
 def test_demo_seed_populates_the_focused_analysis_flow(client):
     first = client.post("/api/demo/seed", json={"workspace_id": "default"})
     assert first.status_code == 200, first.get_json()

@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
-from flask import current_app
 
 from ..core.database import Database
 from .analytics import ANALYSIS_METHODS, clean_frame, profile as profile_frame, run_analysis_with_frames
@@ -23,7 +22,7 @@ from .datasets import (
 from .exports import export_data, export_report
 from .knowledge import search as search_knowledge
 from .memory import search_memories
-from .security import SecretVault, safe_http_request
+from .security import safe_http_request
 from .semantic import execute_metric_query, visible_metrics
 from .workspace_tools import WorkspaceFiles
 
@@ -180,12 +179,8 @@ EXTRA_TOOLS = [
     _function("propose_ppt_outline", "Return a presentation outline for user review.", {"title": {"type": "string"}, "slides": {"type": "array", "items": {"type": "object"}}}),
     _function("generate_ppt", "Generate a PPTX from a query result and grounded outline.", {"result_id": {"type": "string"}, "title": {"type": "string"}, "filename": {"type": "string"}, "slides": {"type": "array", "items": {"type": "object"}}, "summary": {"type": "string"}, "insights": {"type": "array", "items": {"type": "string"}}}),
     _function("set_ppt_color_scheme", "Select a validated color scheme for later PPT generation.", {"scheme": {"type": "string"}, "colors": {"type": "array", "items": {"type": "string"}}}, ["scheme"]),
-    _function("propose_dashboard_outline", "Return a dashboard widget outline for user review.", {"name": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}}),
-    _function("generate_dashboard", "Create a refreshable dashboard from widget query results or SQL.", {"name": {"type": "string"}, "description": {"type": "string"}, "widgets": {"type": "array", "items": {"type": "object"}}, "color_scheme": {"type": "string"}}, ["name", "widgets"]),
     _function("ask_user", "Ask the user for missing information; the question is surfaced as a structured event.", {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 6}, "choices": {"type": "array", "items": {"type": "string"}}, "multi_select": {"type": "boolean"}}, ["question"]),
     _function("browse_webpage", "Read bounded text from an explicitly provided public HTTP(S) page.", {"url": {"type": "string"}, "max_chars": {"type": "integer"}}, ["url"]),
-    _function("list_feishu_bitable_tables", "List tables in a Feishu Bitable using configured application credentials.", {"bitable": {"type": "string"}}, ["bitable"]),
-    _function("load_feishu_bitable", "Load a bounded Feishu Bitable snapshot as an analyzable source.", {"bitable": {"type": "string"}, "table_id": {"type": "string"}, "source_name": {"type": "string"}, "max_records": {"type": "integer"}}, ["bitable"]),
     _function("workspace_glob", "Page through safe workspace file metadata.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "max_results": {"type": "integer"}, "cursor": {"type": "integer"}}, ["pattern"]),
     _function("workspace_grep", "Regex-search bounded UTF-8 workspace text files.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}, "max_results": {"type": "integer"}}, ["pattern"]),
     _function("workspace_read_file", "Read a bounded workspace text, document, PDF, or spreadsheet file.", {"file_path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "sheet_name": {"type": "string"}}, ["file_path"]),
@@ -202,19 +197,6 @@ EXTRA_TOOLS = [
     _function("task_get", "Get one workspace task.", {"task_id": {"type": "string"}}, ["task_id"]),
     _function("task_list", "List workspace tasks.", {"status": {"type": "string"}, "assignee": {"type": "string"}}),
     _function("task_update", "Update a task and its dependencies.", {"task_id": {"type": "string"}, "status": {"type": "string"}, "assignee": {"type": "string"}, "description": {"type": "string"}, "add_blocks": {"type": "array", "items": {"type": "string"}}, "add_blocked_by": {"type": "array", "items": {"type": "string"}}}, ["task_id"]),
-    _function("team_create", "Create a persistent analyst team with a fixed evidence reviewer.", {"name": {"type": "string"}, "description": {"type": "string"}, "members": {"type": "array", "items": {"type": "object"}}}, ["name", "members"]),
-    _function("team_delete", "Delete an inactive team; evidence requires force confirmation.", {"name": {"type": "string"}, "force": {"type": "boolean"}}, ["name"]),
-    _function("team_list", "List persistent analyst teams."),
-    _function("team_status", "Get a team and recent mailbox messages.", {"name": {"type": "string"}}, ["name"]),
-    _function("send_message", "Send a team mailbox message.", {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, ["team_name", "recipient", "message"]),
-    _function("agent_delegate", "Run one bounded delegated reasoning task with read-only evidence tools.", {"prompt": {"type": "string"}, "description": {"type": "string"}, "team_name": {"type": "string"}, "member_name": {"type": "string"}}, ["prompt"]),
-    _function("team_plan_create", "Create and validate a dependency-aware team plan without running it.", {"team_name": {"type": "string"}, "goal": {"type": "string"}, "assignments": {"type": "array", "items": {"type": "object"}}}, ["team_name", "goal", "assignments"]),
-    _function("team_delegate", "Start, retry, or revise a bounded parallel team plan.", {"team_name": {"type": "string"}, "goal": {"type": "string"}, "plan_id": {"type": "string"}, "retry_plan_id": {"type": "string"}, "retry_task_ids": {"type": "array", "items": {"type": "string"}}, "review_plan_id": {"type": "string"}, "review_task_ids": {"type": "array", "items": {"type": "string"}}, "assignments": {"type": "array", "items": {"type": "object"}}, "source_ids": {"type": "array", "items": {"type": "string"}}, "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 300}, "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8}, "result_max_tokens": {"type": "integer", "minimum": 400, "maximum": 2500}}, ["team_name"]),
-    _function("workflow_create", "Create and publish an auditable workflow from a built-in template.", {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string"}, "template": {"type": "string"}, "source_key": {"type": "string"}}),
-    _function("workflow_create_custom", "Create and publish a custom dependency-aware Agent workflow.", {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string"}, "source_key": {"type": "string"}, "agents": {"type": "array", "items": {"type": "object"}}}, ["name", "agents"]),
-    _function("workflow_list", "List published workspace workflows."),
-    _function("workflow_start", "Start a published workflow.", {"name": {"type": "string"}, "workflow_id": {"type": "string"}, "workflow_version_id": {"type": "string"}, "inputs": {"type": "object"}}),
-    _function("workflow_status", "Get durable workflow run status and events.", {"run_id": {"type": "string"}}, ["run_id"]),
     _function("read_tool_result", "Read or search a recoverable oversized tool result.", {"artifact_id": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "query": {"type": "string"}}, ["artifact_id"]),
     _function("plan_complete", "Return a completed coordinator plan.", {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}}, ["summary", "steps"]),
 ]
@@ -222,12 +204,10 @@ EXTRA_TOOLS = [
 DEFAULT_EXTRA_TOOL_NAMES = frozenset({
     "workspace_status", "get_table_detail", "create_analysis_table", "clean_data",
     "propose_excel_export", "propose_report_outline", "propose_ppt_outline",
-    "generate_ppt", "set_ppt_color_scheme", "propose_dashboard_outline",
-    "generate_dashboard", "ask_user", "browse_webpage", "list_feishu_bitable_tables",
-    "load_feishu_bitable", "workspace_glob", "workspace_grep", "workspace_read_file",
+    "generate_ppt", "set_ppt_color_scheme",
+    "ask_user", "browse_webpage", "workspace_glob", "workspace_grep", "workspace_read_file",
     "structured_output", "load_analysis_skill", "task_get", "task_list",
-    "team_list", "team_status", "workflow_list", "workflow_status", "read_tool_result",
-    "plan_complete",
+    "read_tool_result", "plan_complete",
 })
 
 
@@ -246,7 +226,6 @@ class AgentToolContext:
     read_paths: set[str] = field(default_factory=set)
     ppt_color_scheme: dict = field(default_factory=dict)
     outlines: list[dict] = field(default_factory=list)
-    dashboard_ids: list[str] = field(default_factory=list)
     tool_result_ids: list[str] = field(default_factory=list)
     knowledge_document_ids: list[str] | None = None
     semantic_metric_ids: list[str] | None = None
@@ -434,29 +413,6 @@ def _named_record(context: AgentToolContext, collection: str, name: str) -> dict
     return item
 
 
-def _feishu_credentials(context: AgentToolContext) -> dict:
-    candidates = [
-        item for item in context.sources()
-        if item.get("kind") == "lark_table" and item.get("credential")
-    ] if context.source_ids else []
-    if not candidates:
-        candidates = [
-            item for item in context.database.list("sources", workspace_id=context.workspace_id, limit=5000)
-            if item.get("kind") == "lark_table" and item.get("credential")
-        ]
-    if not candidates:
-        candidates = [
-            item for item in context.database.list("connectors", workspace_id=context.workspace_id, limit=5000)
-            if item.get("type") == "lark_app" and item.get("credential")
-        ]
-    if not candidates:
-        raise ValueError("请先配置飞书应用凭据或连接一个飞书多维表格数据源")
-    secret = SecretVault(current_app.config["VAULT_KEY"]).open(candidates[0]["credential"], {})
-    if not secret.get("app_id") or not secret.get("app_secret"):
-        raise ValueError("飞书应用凭据不完整")
-    return secret
-
-
 def _task(context: AgentToolContext, task_id: str) -> dict:
     item = context.database.get("tasks", task_id)
     if not item or item.get("workspace_id", "default") != context.workspace_id:
@@ -491,62 +447,6 @@ def _assert_task_graph(context: AgentToolContext, candidate: dict) -> None:
 
     for task_id in graph:
         visit(task_id)
-
-
-def _dashboard_from_tool(context: AgentToolContext, args: dict) -> dict:
-    widgets = args.get("widgets")
-    if not isinstance(widgets, list) or not widgets or len(widgets) > 50:
-        raise ValueError("看板需要 1–50 个组件")
-    built = []
-    for index, raw in enumerate(widgets):
-        if not isinstance(raw, dict):
-            raise ValueError("看板组件必须是对象")
-        widget = dict(raw)
-        result_id = str(widget.get("result_id") or "")
-        if widget.get("sql"):
-            query = execute_query(
-                context.source_ids, str(widget["sql"]), context.workspace_id,
-                int(widget.get("limit", 1000)), actor_id=context.actor_id or "local-default",
-            )
-            result_id = query["id"]
-        if not result_id:
-            result_id = context.latest_result_id
-        if not result_id:
-            raise ValueError(f"看板组件 {index + 1} 缺少 SQL 或 result_id")
-        require_result_access(
-            context.database, context.database.get("query_results", result_id),
-            workspace_id=context.workspace_id, actor_id=context.actor_id or "local-default",
-        )
-        frame = load_result_frame(result_id)
-        kind = str(widget.get("type") or widget.get("chart_type") or "")
-        base = {
-            **widget, "id": str(widget.get("id") or context.database.new_id("widget")),
-            "title": str(widget.get("title") or f"组件 {index + 1}")[:100], "result_id": result_id,
-        }
-        if kind in {"kpi", "KPI_Card"}:
-            row = frame.iloc[0] if not frame.empty else None
-            base.update({
-                "type": "kpi", "kpi_value": str(row.iloc[0]) if row is not None else "—",
-                "kpi_sub": str(row.iloc[1]) if row is not None and len(row) > 1 else "",
-            })
-        else:
-            base["chart"] = make_spec(
-                frame, chart_type=kind or None, title=base["title"],
-                x=widget.get("x"), y=widget.get("y"), group=widget.get("group"),
-                options=widget.get("options") or {},
-            )
-        built.append(base)
-    return context.database.put(
-        "dashboards",
-        {
-            "id": context.database.new_id("dash"), "workspace_id": context.workspace_id,
-            "name": str(args.get("name") or "分析看板")[:100],
-            "description": str(args.get("description") or "")[:500],
-            "widgets": built, "layout": {"columns": 12}, "revision": 1,
-        },
-        workspace_id=context.workspace_id,
-    )
-
 
 def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict, list[tuple[str, dict]]]:
     if name not in _allowed_agent_tool_names(context):
@@ -937,10 +837,10 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         )
         context.latest_result_id = query["id"]
         return {"source": _public_record(derived), "result_id": query["id"], "operations": operation_log}, events
-    if name in {"propose_excel_export", "propose_report_outline", "propose_ppt_outline", "propose_dashboard_outline"}:
+    if name in {"propose_excel_export", "propose_report_outline", "propose_ppt_outline"}:
         event_type = {
             "propose_excel_export": "excel_outline", "propose_report_outline": "report_outline",
-            "propose_ppt_outline": "ppt_outline", "propose_dashboard_outline": "dashboard_outline",
+            "propose_ppt_outline": "ppt_outline",
         }[name]
         proposal = {"type": event_type, **args, "requires_confirmation": True}
         context.outlines.append(proposal)
@@ -978,11 +878,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             normalized.append(value)
         context.ppt_color_scheme = {"name": scheme, "colors": normalized}
         return context.ppt_color_scheme, events
-    if name == "generate_dashboard":
-        dashboard = _dashboard_from_tool(context, args)
-        context.dashboard_ids.append(dashboard["id"])
-        events.append(("dashboard", {"id": dashboard["id"], "name": dashboard["name"]}))
-        return {"dashboard": dashboard, "url": f"/api/dashboards/{dashboard['id']}"}, events
     if name == "ask_user":
         question = str(args.get("question") or "").strip()
         choices = args.get("options") if args.get("options") is not None else args.get("choices")
@@ -1012,34 +907,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             text = re.sub(r"\s+", " ", text)
         limit = max(100, min(int(args.get("max_chars", 12000)), 20000))
         return {"url": response.url, "status": response.status_code, "content": text[:limit]}, events
-    if name in {"list_feishu_bitable_tables", "load_feishu_bitable"}:
-        from .feishu import list_tables, read_records
-
-        credentials = _feishu_credentials(context)
-        if name == "list_feishu_bitable_tables":
-            return list_tables(credentials, args.get("bitable")), events
-        if name == "load_feishu_bitable":
-            loaded = read_records(
-                credentials, args.get("bitable"), args.get("table_id", ""),
-                max(1, min(int(args.get("max_records", 500)), 500)),
-            )
-            frame = pd.json_normalize(loaded["records"])
-            if not len(frame.columns):
-                raise ValueError("飞书数据表中没有可分析字段")
-            source = register_derived_tables(
-                {"data": frame}, context.workspace_id,
-                name=str(args.get("source_name") or "飞书多维表格快照"),
-                actor_id=context.actor_id or "local-default",
-            )
-            source = context.database.patch("sources", source["id"], {
-                "kind": "lark_table_snapshot", "endpoint": loaded["url"],
-                "lineage": {
-                    "operation": "feishu_snapshot", "app_token": loaded["app_token"],
-                    "table_id": loaded["table_id"], "limited": loaded["limited"],
-                },
-            }) or source
-            context.source_ids.append(source["id"])
-            return {"source": _public_record(source), **{key: loaded[key] for key in ("url", "record_count", "limited")}}, events
     if name.startswith("workspace_"):
         files = WorkspaceFiles(context.database, context.workspace_id, context.read_paths, context.session_id)
         if name == "workspace_glob":
@@ -1099,240 +966,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         item["blocked_by"] = list(dict.fromkeys([*(item.get("blocked_by") or []), *(args.get("add_blocked_by") or [])]))
         _assert_task_graph(context, item)
         return context.database.put("tasks", item, workspace_id=context.workspace_id), events
-    if name in {
-        "team_create", "team_delete", "team_list", "team_status", "send_message",
-        "agent_delegate", "team_plan_create", "team_delegate",
-    }:
-        teams = context.database.list("teams", workspace_id=context.workspace_id, limit=5000)
-        if name == "team_create":
-            members = args.get("members")
-            if not isinstance(members, list) or not 1 <= len(members) <= 8:
-                raise ValueError("团队需要 1–8 名成员")
-            team_name = str(args.get("name") or "").strip()[:100]
-            if not team_name or any(item.get("name") == team_name for item in teams):
-                raise ValueError("团队名称为空或已存在")
-            normalized = []
-            names = set()
-            for index, raw in enumerate(members, 1):
-                if not isinstance(raw, dict):
-                    raise ValueError("团队成员必须是对象")
-                profile = context.database.get("agent_profiles", str(raw.get("profile_id") or ""))
-                if profile and profile.get("workspace_id", "default") != context.workspace_id:
-                    raise PermissionError("成员配置不属于当前工作空间")
-                member_name = str(raw.get("name") or (profile or {}).get("name") or f"成员 {index}")[:100]
-                if member_name in names:
-                    raise ValueError("团队成员名称不能重复")
-                names.add(member_name)
-                normalized.append({
-                    **raw, "name": member_name,
-                    "role": str(raw.get("role") or (profile or {}).get("role") or "分析顾问")[:1000],
-                    "instructions": str(raw.get("instructions") or (profile or {}).get("instructions") or "")[:8000],
-                    "tools": raw.get("tools") or (profile or {}).get("tools") or ["query", "analysis", "knowledge"],
-                })
-            item = context.database.put(
-                "teams",
-                {
-                    "id": context.database.new_id("team"), "workspace_id": context.workspace_id,
-                    "name": team_name, "objective": str(args.get("description") or "")[:2000],
-                    "members": normalized, "lead_profile_id": normalized[0].get("profile_id"),
-                    "quality_reviewer": {"name": "固定证据复核员", "role": "quality_reviewer"},
-                    "status": "ready",
-                },
-                workspace_id=context.workspace_id,
-            )
-            return item, events
-        if name == "team_list":
-            return {"items": teams}, events
-        if name == "agent_delegate" and not args.get("team_name"):
-            from .teams import delegate_once
-
-            return delegate_once(
-                team=None, member=None, prompt=str(args.get("prompt") or ""),
-                description=str(args.get("description") or ""), workspace_id=context.workspace_id,
-                source_ids=context.source_ids, session_id=context.session_id, actor_id=context.actor_id,
-            ), events
-        team = next((item for item in teams if item.get("name") == args.get("team_name") or item.get("name") == args.get("name")), None)
-        if not team:
-            raise ValueError("团队不存在")
-        if name == "team_delete":
-            runs = [
-                item for item in context.database.list("team_runs", workspace_id=context.workspace_id, limit=5000)
-                if item.get("team_id") == team["id"]
-            ]
-            if any(item.get("status") in {"queued", "running"} for item in runs):
-                raise PermissionError("运行中的团队不能删除")
-            messages = [
-                item for item in context.database.list("team_messages", workspace_id=context.workspace_id, limit=5000)
-                if item.get("team_id") == team["id"]
-            ]
-            has_evidence = bool(messages or runs)
-            if has_evidence and args.get("force") is not True:
-                raise PermissionError("团队有邮箱或复核证据，查看 team_status 后需 force=true")
-            context.database.archive("teams", team["id"])
-            return {"archived": True, "team_id": team["id"], "evidence_retained": has_evidence}, events
-        if name == "team_status":
-            messages = [item for item in context.database.list("team_messages", workspace_id=context.workspace_id) if item.get("team_id") == team["id"]]
-            runs = [item for item in context.database.list("team_runs", workspace_id=context.workspace_id) if item.get("team_id") == team["id"]]
-            plans = [item for item in context.database.list("team_plans", workspace_id=context.workspace_id) if item.get("team_id") == team["id"]]
-            return {"team": team, "messages": messages[:100], "runs": runs[:50], "plans": plans[:50]}, events
-        if name == "send_message":
-            item = context.database.put(
-                "team_messages",
-                {
-                    "id": context.database.new_id("teammsg"), "workspace_id": context.workspace_id,
-                    "team_id": team["id"], "sender": "leader", "recipients": [args.get("recipient", "*")],
-                    "content": str(args.get("message") or "")[:8000], "read_by": [],
-                },
-                workspace_id=context.workspace_id,
-            )
-            return item, events
-        from .teams import create_team_plan, delegate_once, retry_team_run, start_team_plan, start_team_run
-
-        if name == "agent_delegate":
-            member = None
-            if args.get("member_name"):
-                member = next((item for item in team["members"] if item.get("name") == args["member_name"]), None)
-                if not member:
-                    raise ValueError("团队成员不存在")
-            return delegate_once(
-                team=team, member=member or team["members"][0], prompt=str(args.get("prompt") or ""),
-                description=str(args.get("description") or ""), workspace_id=context.workspace_id,
-                source_ids=context.source_ids, session_id=context.session_id, actor_id=context.actor_id,
-            ), events
-        if name == "team_plan_create":
-            return create_team_plan(team, {
-                "goal": args.get("goal"), "assignments": args.get("assignments"),
-                "source_ids": context.source_ids,
-            }), events
-        if args.get("plan_id"):
-            plan = _named_record(context, "team_plans", str(args["plan_id"]))
-            plan, run, job = start_team_plan(team, plan, {
-                "source_ids": args.get("source_ids") or context.source_ids,
-                "session_id": context.session_id,
-                "actor_id": context.actor_id,
-                "timeout_seconds": args.get("timeout_seconds"),
-                "max_concurrency": args.get("max_concurrency"),
-                "result_max_tokens": args.get("result_max_tokens"),
-            })
-            return {"plan": plan, "run": run, "job": job}, events
-        if args.get("review_plan_id"):
-            plan = _named_record(context, "team_plans", str(args["review_plan_id"]))
-            if not plan.get("run_id"):
-                raise ValueError("团队计划尚未执行")
-            run = _named_record(context, "team_runs", str(plan["run_id"]))
-            if run.get("status") != "needs_review":
-                raise ValueError("只有 needs_review 状态的团队计划可按复核意见修订")
-            review_ids = [str(value) for value in args.get("review_task_ids") or []]
-            selected = review_ids or [item["id"] for item in run.get("tasks") or []]
-            reset = retry_team_run(run, selected)
-            rerun, job = start_team_run(team, {
-                "timeout_seconds": args.get("timeout_seconds"),
-                "max_concurrency": args.get("max_concurrency"),
-                "result_max_tokens": args.get("result_max_tokens"),
-            }, existing_run=reset)
-            context.database.patch("team_plans", plan["id"], {"status": "running"})
-            return {"plan": plan, "run": rerun, "job": job, "review_task_ids": selected}, events
-        if args.get("retry_plan_id"):
-            plan = _named_record(context, "team_plans", str(args["retry_plan_id"]))
-            if not plan.get("run_id"):
-                raise ValueError("团队计划尚未执行")
-            run = _named_record(context, "team_runs", str(plan["run_id"]))
-            reset = retry_team_run(run, [str(value) for value in args.get("retry_task_ids") or []] or None)
-            rerun, job = start_team_run(team, {
-                "timeout_seconds": args.get("timeout_seconds"),
-                "max_concurrency": args.get("max_concurrency"),
-                "result_max_tokens": args.get("result_max_tokens"),
-            }, existing_run=reset)
-            context.database.patch("team_plans", plan["id"], {"status": "running"})
-            return {"plan": plan, "run": rerun, "job": job}, events
-
-        run, job = start_team_run(team, {
-            "task": args.get("goal"), "assignments": args.get("assignments"),
-            "source_ids": args.get("source_ids") or context.source_ids,
-            "session_id": context.session_id,
-            "actor_id": context.actor_id,
-            "timeout_seconds": args.get("timeout_seconds"),
-            "max_concurrency": args.get("max_concurrency"),
-            "result_max_tokens": args.get("result_max_tokens"),
-        })
-        return {"run": run, "job": job}, events
-    if name in {"workflow_create", "workflow_create_custom"}:
-        from .workflows import create_published_workflow, template_definition
-
-        mode = str(args.get("mode") or "full_auto")
-        if name == "workflow_create":
-            template = str(args.get("template") or "analysis")
-            definition = template_definition(template, str(args.get("source_key") or "source_ids"))
-        else:
-            agents = args.get("agents")
-            if not isinstance(agents, list) or not 1 <= len(agents) <= 8:
-                raise ValueError("自定义工作流需要 1–8 个 Agent")
-            names = [str(item.get("name") or "").strip() for item in agents if isinstance(item, dict)]
-            if len(names) != len(agents) or any(not value for value in names) or len(set(names)) != len(names):
-                raise ValueError("Agent 名称不能为空或重复")
-            name_to_id = {value: f"agent_{index}" for index, value in enumerate(names, 1)}
-            steps = []
-            seen = set()
-            for raw, agent_name in zip(agents, names):
-                instructions = str(raw.get("instructions") or "").strip()
-                if not instructions:
-                    raise ValueError(f"Agent {agent_name} 缺少 instructions")
-                dependencies = [str(value) for value in raw.get("depends_on") or []]
-                if any(value not in seen for value in dependencies):
-                    raise ValueError(f"Agent {agent_name} 只能依赖列表中更早的 Agent")
-                allowed = raw.get("allowed_tools") or ["get_schema", "query_data"]
-                if any(value not in {"get_schema", "query_data"} for value in allowed):
-                    raise PermissionError("自定义工作流 Agent 只能使用 get_schema 和 query_data")
-                profile = context.database.put(
-                    "agent_profiles",
-                    {
-                        "id": context.database.new_id("profile"), "workspace_id": context.workspace_id,
-                        "name": agent_name, "role": str(raw.get("role") or agent_name)[:1000],
-                        "instructions": instructions[:8000], "tools": allowed, "enabled": True,
-                    },
-                    workspace_id=context.workspace_id,
-                )
-                steps.append({
-                    "id": name_to_id[agent_name], "name": agent_name, "type": "agent",
-                    "depends_on": [name_to_id[value] for value in dependencies],
-                    "config": {
-                        "prompt": instructions, "agent_profile_id": profile["id"],
-                        "allowed_tools": allowed,
-                    },
-                })
-                seen.add(agent_name)
-            definition = {"steps": steps, "source_key": str(args.get("source_key") or "source_ids")}
-        workflow = create_published_workflow(
-            workspace_id=context.workspace_id, name=str(args.get("name") or "分析工作流"),
-            description=str(args.get("description") or ""), definition=definition, mode=mode,
-        )
-        return workflow, events
-    if name in {"workflow_list", "workflow_start", "workflow_status"}:
-        if name == "workflow_list":
-            return {"items": [
-                item for item in context.database.list("workflows", workspace_id=context.workspace_id)
-                if item.get("status") == "published"
-            ]}, events
-        if name == "workflow_status":
-            run = _named_record(context, "workflow_runs", str(args.get("run_id") or ""))
-            history = [item for item in context.database.list("workflow_events", workspace_id=context.workspace_id) if item.get("run_id") == run["id"]]
-            return {"run": run, "events": history}, events
-        from .workflows import start_workflow
-
-        workflow_ref = str(args.get("workflow_id") or args.get("name") or "")
-        if args.get("workflow_version_id"):
-            version = _named_record(context, "workflow_versions", str(args["workflow_version_id"]))
-            workflow = _named_record(context, "workflows", str(version["workflow_id"]))
-            workflow = {**workflow, "definition": version["definition"], "version": version["version"], "current_version_id": version["id"]}
-        else:
-            workflow = _named_record(context, "workflows", workflow_ref)
-        if workflow.get("status") != "published":
-            raise ValueError("工作流尚未发布")
-        run = start_workflow(
-            {**workflow, "definition": workflow.get("published_definition") or workflow["definition"]},
-            args.get("inputs") or {}, actor_id=context.actor_id,
-        )
-        return {"run": run}, events
     if name == "read_tool_result":
         item = context.database.get("tool_results", str(args.get("artifact_id") or ""))
         if not item or item.get("workspace_id") != context.workspace_id or item.get("session_id") != context.session_id:

@@ -7,10 +7,10 @@ const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
 const productRoutes = [
   { id: 'chat', label: '智能分析', icon: 'chat' },
-  { id: 'sources', label: '数据管理', icon: 'database', adminOnly: true },
+  { id: 'sources', label: '数据资产', icon: 'database', adminOnly: true },
   { id: 'semantic', label: '指标中心', icon: 'chart', adminOnly: true },
-  { id: 'knowledge', label: '业务知识', icon: 'book', adminOnly: true },
-  { id: 'settings', label: '系统设置', icon: 'settings', adminOnly: true, utility: true },
+  { id: 'knowledge', label: '知识库', icon: 'book', adminOnly: true },
+  { id: 'settings', label: '系统管理', icon: 'settings', adminOnly: true, utility: true },
 ];
 
 const Root = {
@@ -191,7 +191,7 @@ const Root = {
     const routes=computed(()=>productRoutes.filter(item=>canAdmin.value||!item.adminOnly));
     const routeGroups=computed(()=>[
       {id:'analysis',label:'分析',items:routes.value.filter(item=>item.id==='chat')},
-      {id:'configuration',label:'配置',items:routes.value.filter(item=>item.id!=='chat'&&!item.utility)},
+      {id:'configuration',label:'数据治理',items:routes.value.filter(item=>item.id!=='chat'&&!item.utility)},
     ]);
     const activeRoute=computed(()=>productRoutes.find(item=>item.id===state.route)||productRoutes[0]);
     const userInitial=computed(()=>(state.user?.name||state.user?.email||'本')[0].toUpperCase());
@@ -201,7 +201,7 @@ const Root = {
     <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark">经纬</span><p>正在验证会话…</p></div>
     <main v-else-if="state.authRequired" class="auth-screen">
       <form class="auth-panel" @submit.prevent="submitAuth">
-        <header><span class="brand__mark"><i></i><i></i><i></i></span><div><h1>经纬</h1><p>企业数据分析工作台</p></div></header>
+        <header><span class="brand__mark"><i></i><i></i><i></i></span><div><h1>经纬</h1><p>企业智能分析平台</p></div></header>
         <div class="segmented" v-if="state.registrationOpen&&!state.auth.invitation_token"><button type="button" :class="{active:state.authMode==='login'}" @click="state.authMode='login';state.authError=''">登录</button><button type="button" :class="{active:state.authMode==='register'}" @click="state.authMode='register';state.authError=''">创建所有者</button></div>
         <label v-if="state.authMode==='register'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" required maxlength="80"></label>
         <label v-if="state.authMode==='register' && state.bootstrapRequired && !state.auth.invitation_token"><span>初始化令牌</span><input v-model="state.auth.bootstrap_token" type="password" autocomplete="off" required><small>由部署管理员从 MERIDIAN_BOOTSTRAP_TOKEN 安全交付。</small></label>
@@ -225,7 +225,7 @@ const Root = {
         </nav>
         <section class="sidebar-sessions"><header><span>分析记录</span><button @click="newSession()" title="新建分析"><Icon name="plus"/></button></header><div v-for="session in state.sessions.slice(0,5)" :key="session.id" class="sidebar-session-row" :class="{active:session.id===state.activeSessionId}"><button class="sidebar-session-main" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button><span class="sidebar-session-actions"><button @click.stop="openSessionDialog('rename',session)" :aria-label="'重命名 '+session.name" title="重命名"><Icon name="edit" :size="14"/></button><button class="danger" @click.stop="openSessionDialog('delete',session)" :aria-label="'删除 '+session.name" title="删除"><Icon name="trash" :size="14"/></button></span></div></section>
         <footer class="sidebar-footer">
-          <button v-if="canAdmin" class="sidebar-utility" :class="{active:state.route==='settings'}" @click="go('settings')"><Icon name="settings" :size="16"/><span>系统设置</span></button>
+          <button v-if="canAdmin" class="sidebar-utility" :class="{active:state.route==='settings'}" @click="go('settings')"><Icon name="settings" :size="16"/><span>系统管理</span></button>
           <button class="command-entry" @click="state.commandOpen=true"><Icon name="search" :size="15"/><span>全局搜索</span><kbd>⌘ K</kbd></button>
           <div v-if="state.user" class="sidebar-profile"><span class="user-avatar">{{ userInitial }}</span><div><b>{{ state.user.name || '企业用户' }}</b><small>{{ state.workspaceRole || '成员' }}</small></div><button @click="logout" title="退出登录"><Icon name="chevron" :size="15"/></button></div>
         </footer>

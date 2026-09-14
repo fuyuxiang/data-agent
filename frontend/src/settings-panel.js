@@ -100,7 +100,13 @@ export const SettingsPanel = {
   },
   template: `
     <section class="workspace-page">
-      <header class="surface-header page-heading"><div><h1>系统设置</h1><p>只保留成员权限、模型、工具连接和审计四项系统级配置。</p></div></header>
+      <header class="surface-header page-heading enterprise-hero"><div><span class="eyebrow">ADMINISTRATION</span><h1>系统管理</h1><p>管理成员权限、模型服务、工具连接与审计记录，确保分析能力在受控环境中运行。</p></div></header>
+      <section class="enterprise-kpis admin-kpis">
+        <article><small>成员</small><b>{{ members.length || 1 }}</b><span>{{ members.length ? '当前工作空间' : '本地所有者' }}</span></article>
+        <article><small>模型服务</small><b>{{ providers.length }}</b><span>{{ providers.filter(item=>item.has_api_key).length }} 个密钥就绪</span></article>
+        <article><small>工具连接</small><b>{{ tools.length }}</b><span>受控 MCP 服务</span></article>
+        <article><small>审计事件</small><b>{{ audit.length }}</b><span>最近 100 条</span></article>
+      </section>
       <div class="settings-layout">
         <nav class="settings-nav">
           <button :class="{active:tab==='members'}" @click="tab='members'"><Icon name="users"/>成员与权限</button>

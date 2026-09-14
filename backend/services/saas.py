@@ -22,12 +22,11 @@ DEFAULT_PLANS: list[dict[str, Any]] = [
         "price_model": "按工作空间订阅",
         "features": [
             "data_sources", "governed_agent", "knowledge_base", "semantic_layer",
-            "dashboards", "result_delivery",
+            "result_delivery",
         ],
         "limits": {
             "workspaces": 1, "members": 5, "sources": 10,
             "knowledge_entries": 200, "semantic_metrics": 50,
-            "dashboards": 3, "workflows": 0, "schedules": 0, "hooks": 0,
             "monthly_agent_runs": 100,
         },
         "value_points": ["可信问数", "指标口径沉淀", "标准报告导出"],
@@ -39,16 +38,14 @@ DEFAULT_PLANS: list[dict[str, Any]] = [
         "price_model": "按租户订阅",
         "features": [
             "data_sources", "governed_agent", "knowledge_base", "semantic_layer",
-            "dashboards", "result_delivery", "automation", "feishu_bot",
-            "mcp_integrations", "warehouse",
+            "result_delivery", "mcp_integrations", "warehouse",
         ],
         "limits": {
             "workspaces": 8, "members": 80, "sources": 200,
             "knowledge_entries": 5000, "semantic_metrics": 800,
-            "dashboards": 50, "workflows": 80, "schedules": 80, "hooks": 80,
             "monthly_agent_runs": 5000,
         },
-        "value_points": ["跨团队复用", "自动化月报/周报", "协同机器人入口"],
+        "value_points": ["跨团队复用", "可信分析", "受控工具连接"],
     },
     {
         "id": "enterprise",
@@ -57,14 +54,12 @@ DEFAULT_PLANS: list[dict[str, Any]] = [
         "price_model": "年度合同",
         "features": [
             "data_sources", "governed_agent", "knowledge_base", "semantic_layer",
-            "dashboards", "result_delivery", "automation", "feishu_bot",
-            "mcp_integrations", "warehouse", "workspace_governance", "audit",
+            "result_delivery", "mcp_integrations", "warehouse", "workspace_governance", "audit",
             "lifecycle_management",
         ],
         "limits": {
             "workspaces": None, "members": None, "sources": None,
             "knowledge_entries": None, "semantic_metrics": None,
-            "dashboards": None, "workflows": None, "schedules": None, "hooks": None,
             "monthly_agent_runs": None,
         },
         "value_points": ["权限与审计", "大数据引擎接入", "企业级交付与运维"],
@@ -96,18 +91,6 @@ SOLUTION_CATALOG: list[dict[str, Any]] = [
         ],
         "required_features": ["data_sources", "knowledge_base", "semantic_layer", "audit"],
         "success_metrics": ["核心指标覆盖率", "问数一次命中率", "审计可追溯率"],
-    },
-    {
-        "id": "report-factory",
-        "name": "自动化分析报告工厂",
-        "target_customer": "例行周报、月报、专题复盘生产团队",
-        "customer_problem": "固定报告大量手工复制粘贴，图表和结论复核成本高，交付格式不标准。",
-        "product_flow": [
-            "配置数据组合", "编排分析工作流", "加入审批与失败重试",
-            "自动生成看板/Word/图片", "邮件或飞书触达业务方",
-        ],
-        "required_features": ["automation", "dashboards", "result_delivery", "feishu_bot"],
-        "success_metrics": ["报告生产时长", "人工复制步骤减少量", "定时交付成功率"],
     },
 ]
 
@@ -173,8 +156,7 @@ def product_status(database: Database, workspace_id: str, actor_id: str) -> dict
             {"id": "define", "name": "定义", "description": "沉淀指标、业务规则和语义模型，统一分析口径。"},
             {"id": "ask", "name": "分析", "description": "先确认需求理解，再由 Agent 查询、计算和解释。"},
             {"id": "validate", "name": "验证", "description": "保留 SQL、证据、质量门禁和运行日志，避免伪造成果。"},
-            {"id": "deliver", "name": "交付", "description": "发布看板、Word、图片和邮件/飞书触达。"},
-            {"id": "automate", "name": "自动化", "description": "把高频分析沉淀为工作流、调度和团队协作。"},
+            {"id": "deliver", "name": "交付", "description": "从已验证分析直接生成 Excel、Word、PPT 或 HTML 报告。"},
         ],
         "actor_id": actor_id,
     }
@@ -252,11 +234,6 @@ def onboarding_status(database: Database, workspace_id: str) -> dict[str, Any]:
         item for item in database.list("agent_runs", workspace_id=workspace_id, limit=5000)
         if item.get("execution_status") == "finished"
     ])
-    dashboard_count = len(database.list("dashboards", workspace_id=workspace_id, limit=5000))
-    workflow_count = len([
-        item for item in database.list("workflows", workspace_id=workspace_id, limit=5000)
-        if item.get("status") == "published"
-    ])
     steps = [
         {
             "id": "connect_data", "name": "接入数据",
@@ -277,16 +254,6 @@ def onboarding_status(database: Database, workspace_id: str) -> dict[str, Any]:
             "id": "run_analysis", "name": "完成一次受治理分析",
             "description": "确认需求理解后执行 Agent，并生成可追溯结果。",
             "done": run_count > 0, "count": run_count, "route": "chat",
-        },
-        {
-            "id": "deliver_dashboard", "name": "形成可交付成果",
-            "description": "发布看板、报告或可发送的分析附件。",
-            "done": dashboard_count > 0, "count": dashboard_count, "route": "dashboards",
-        },
-        {
-            "id": "automate_repeat", "name": "沉淀自动化流程",
-            "description": "把高频分析固化为工作流、调度和协作任务。",
-            "done": workflow_count > 0, "count": workflow_count, "route": "automation",
         },
     ]
     required_done = all(item["done"] for item in steps[:4])

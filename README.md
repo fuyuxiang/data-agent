@@ -75,7 +75,19 @@ python -m pip install --require-hashes -r requirements.lock
 python app.py
 ```
 
-启动后访问 <http://127.0.0.1:5001>。开发环境中，全新实例默认进入无账号的本地模式；生产环境会要求先创建第一位系统所有者，密码至少 12 位。
+启动后默认监听 `0.0.0.0:5001`，本机访问 <http://127.0.0.1:5001>；局域网其他电脑可使用 `http://本机IP:5001` 访问。开发环境中，全新实例默认进入无账号的本地模式；生产环境会要求先创建第一位系统所有者，密码至少 12 位。
+
+Windows 也可以直接使用项目根目录的脚本启动，不依赖 `.exe` 打包产物：
+
+```powershell
+.\start-dataagent.bat
+```
+
+脚本会自动创建 `.venv`、安装 Python 依赖、检查或构建前端资源，并默认监听 `0.0.0.0:5001`；如果端口已被占用，会自动选择一个可用端口。需要指定端口时可执行：
+
+```powershell
+.\start-dataagent.bat -Port 5010
+```
 
 ### 首次使用
 
@@ -158,7 +170,7 @@ flowchart TB
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MERIDIAN_ENV` | `development` | `development` / `production` / `test` |
-| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `127.0.0.1` / `5001` | HTTP 监听地址与端口 |
+| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `0.0.0.0` / `5001` | HTTP 监听地址与端口 |
 | `MERIDIAN_STORAGE_DIR` | `./storage` | SQLite、上传文件、知识、交付物和回收站根目录 |
 | `MERIDIAN_SECRET_KEY` | 开发环境自动生成 | 会话签名密钥；生产环境至少 32 字符 |
 | `MERIDIAN_ENCRYPTION_KEY` | 开发环境复用会话密钥 | 外部凭据静态加密密钥；生产必须独立持久化 |

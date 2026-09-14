@@ -89,8 +89,13 @@ def create_backup(
     with tempfile.TemporaryDirectory(prefix="meridian-backup-") as temp_dir:
         snapshot = Path(temp_dir) / "meridian.sqlite3"
         plain_archive = Path(temp_dir) / "backup.tar.gz" if encryption_key else output
-        with sqlite3.connect(database) as source, sqlite3.connect(snapshot) as target:
+        source = sqlite3.connect(database)
+        target = sqlite3.connect(snapshot)
+        try:
             source.backup(target)
+        finally:
+            target.close()
+            source.close()
         with tarfile.open(plain_archive, "w:gz") as archive:
             archive.add(snapshot, arcname="storage/meridian.sqlite3")
             file_count += 1
