@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -237,6 +239,61 @@ def _checked_sqlite_path(url: URL, workspace_id: str) -> str:
     return str(path)
 
 
+def _application_host_aliases() -> set[str]:
+    """Hosts that point at this DataAgent deployment rather than a remote DB server."""
+
+    candidates: list[str] = []
+    try:
+        candidates.extend(settings().allowed_origins)
+        candidates.extend(settings().trusted_hosts)
+    except RuntimeError:
+        pass
+    candidates.extend(
+        value.strip()
+        for value in os.getenv("MERIDIAN_DATABASE_LOCAL_HOST_ALIASES", "").split(",")
+        if value.strip()
+    )
+    aliases: set[str] = set()
+    for value in candidates:
+        if not value:
+            continue
+        parsed = urlparse(value if "://" in value else f"//{value}")
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if host and host not in {"*", "0.0.0.0", "::"}:
+            aliases.add(host)
+    return aliases
+
+
+def _should_use_loopback_for_local_mysql(host: str, resolved_addresses: list[str]) -> bool:
+    """Route the app's own public host/IP to loopback for local MySQL connections.
+
+    Operators often add the MySQL service from the server-hosted UI and naturally
+    enter the same public address used to open DataAgent. The database service is
+    intentionally bound to 127.0.0.1 in that deployment shape, so keeping the
+    public IP would fail unless the unsafe public MySQL port is opened.
+    """
+
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if normalized and normalized in _application_host_aliases():
+        return True
+    for address in resolved_addresses:
+        try:
+            if ipaddress.ip_address(address).is_loopback:
+                return True
+        except ValueError:
+            continue
+    try:
+        local_names = {
+            socket.gethostname().strip().lower().rstrip("."),
+            socket.getfqdn().strip().lower().rstrip("."),
+        }
+    except OSError:
+        local_names = set()
+    return bool(normalized and normalized in local_names)
+
+
 def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) -> str:
     try:
         url = make_url(str(raw_url)) if not isinstance(raw_url, URL) else raw_url
@@ -273,7 +330,7 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
         private_network_setting == "1" if private_network_setting
         else settings().environment != "production"
     )
-    validate_outbound_host(
+    resolved_addresses = validate_outbound_host(
         str(url.host), port, allowlist=database_allowlist,
         allow_private=allow_private_network,
     )
@@ -295,6 +352,8 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
         query = {key: value for key, value in query.items() if key.lower() not in {"sslmode", "connect_timeout"}}
         query.update({"sslmode": ssl_mode, "connect_timeout": str(connect_timeout)})
     elif backend == "mysql":
+        if _should_use_loopback_for_local_mysql(str(url.host), resolved_addresses):
+            url = url.set(host="127.0.0.1")
         ssl_mode = str(config.get("ssl_mode") or ("verify-identity" if production else "preferred")).lower()
         if ssl_mode not in {"disabled", "preferred", "required", "verify-ca", "verify-identity"}:
             raise ValueError("MySQL ssl_mode 无效")
@@ -355,7 +414,13 @@ def _database_connection_error(exc: Exception, backend: str) -> str:
     )
     original = getattr(exc, "orig", exc)
     arguments = getattr(original, "args", ())
-    code = arguments[0] if arguments and isinstance(arguments[0], int) else None
+    code = next(
+        (
+            int(item) for item in arguments
+            if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+        ),
+        None,
+    )
     if backend == "mysql":
         if code == 1045:
             return "MySQL 认证失败，请检查用户名、密码以及该账号允许登录的主机"
@@ -364,10 +429,14 @@ def _database_connection_error(exc: Exception, backend: str) -> str:
         if code in {1044, 1142, 1143, 1227}:
             return "MySQL 账号权限不足，请授予目标数据库的 SELECT 和 SHOW VIEW 权限"
         if code in {2002, 2003}:
-            return "无法连接 MySQL，请确认服务已启动，并检查主机、端口和防火墙"
+            return (
+                "无法连接 MySQL，请确认服务已启动，并检查主机、端口和防火墙。"
+                "如果连接的是当前服务器上的 MySQL，请主机填写 127.0.0.1，不要填写服务器公网 IP"
+            )
         if code == 2026:
             return "MySQL SSL 握手失败，请检查服务端证书或调整 SSL 模式"
-    return f"{label} 连接失败，请检查主机、端口、数据库名称、账号权限和 SSL 配置"
+    local_hint = "；如果连接当前服务器上的 MySQL，请主机填写 127.0.0.1，不要填写服务器公网 IP" if backend == "mysql" else ""
+    return f"{label} 连接失败，请检查主机、端口、数据库名称、账号权限和 SSL 配置{local_hint}"
 
 
 def register_database(config: dict, workspace_id: str) -> dict:

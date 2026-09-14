@@ -648,6 +648,23 @@ def test_database_private_network_policy_follows_environment(app, monkeypatch):
         assert captured.pop() is True
 
 
+def test_mysql_uses_loopback_for_current_deployment_host(app, monkeypatch):
+    from backend.services import datasets
+
+    monkeypatch.setattr(datasets, "validate_outbound_host", lambda *_args, **_kwargs: ["39.105.208.170"])
+    app.config["SETTINGS"] = replace(
+        app.config["SETTINGS"],
+        allowed_origins=["http://39.105.208.170"],
+        trusted_hosts=[],
+    )
+    with app.app_context():
+        mysql = make_url(datasets._build_database_url({
+            "driver": "mysql", "host": "39.105.208.170", "database": "student_db",
+            "username": "dataagent", "password": "secret",
+        }, "default"))
+        assert mysql.host == "127.0.0.1"
+
+
 def test_mysql_driver_errors_are_actionable_without_connection_details():
     from backend.services.datasets import _database_connection_error
 
