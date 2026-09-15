@@ -61,10 +61,15 @@ def update_provider(provider_id: str):
 def delete_provider(provider_id: str):
     if provider_id == "environment-default":
         raise ValueError("环境变量模型配置不能删除")
-    require_workspace_record("providers", provider_id)
+    provider = require_workspace_record("providers", provider_id)
     if not db().archive("providers", provider_id):
         raise FileNotFoundError("模型配置不存在")
-    return ok(archived=True)
+    cleared_sessions = 0
+    for session in db().list("sessions", workspace_id=provider.get("workspace_id", "default"), limit=5000):
+        if session.get("provider_id") == provider_id:
+            db().patch("sessions", session["id"], {"provider_id": None}, workspace_id=session["workspace_id"])
+            cleared_sessions += 1
+    return ok(archived=True, cleared_sessions=cleared_sessions)
 
 
 @bp.post("/api/providers/<provider_id>/test")

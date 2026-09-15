@@ -41,6 +41,35 @@ def test_provider_connection_error_is_actionable(app, client, monkeypatch):
     assert "检查网络、代理和 Base URL" in response.get_json()["error"]
 
 
+def test_delete_provider_clears_session_references(app, client):
+    database = app.extensions["meridian_db"]
+    provider_id = "provider-to-delete"
+    database.put(
+        "providers",
+        {
+            "id": provider_id,
+            "workspace_id": "default",
+            "name": "待删除模型",
+            "base_url": "https://model.example.test/v1",
+            "model": "example-model",
+        },
+        workspace_id="default",
+    )
+    session = database.put(
+        "sessions",
+        {"id": "session-with-provider", "workspace_id": "default", "name": "分析会话", "provider_id": provider_id},
+        workspace_id="default",
+    )
+
+    response = client.delete(f"/api/providers/{provider_id}")
+
+    assert response.status_code == 200
+    assert response.get_json()["cleared_sessions"] == 1
+    assert database.get("providers", provider_id, workspace_id="default") is None
+    assert database.get("providers", provider_id, workspace_id="default", include_archived=True)["archived_at"]
+    assert database.get("sessions", session["id"], workspace_id="default").get("provider_id") is None
+
+
 def test_provider_resolution_ignores_broken_system_proxy_by_default(app, monkeypatch):
     from backend.services.models import resolve_provider
     from backend.services.security import SecretVault

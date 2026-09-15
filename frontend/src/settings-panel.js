@@ -76,6 +76,20 @@ export const SettingsPanel = {
         this.providerTests[item.id] = { status: 'error', text: error?.message || '模型连接失败' };
       }
     },
+    async removeProvider(item) {
+      if (item.id === 'environment-default') {
+        this.ctx.fail(new Error('环境变量模型是系统保底配置，不能删除'));
+        return;
+      }
+      if (!window.confirm(`删除模型服务「${item.name}」？删除后，已绑定该模型的分析会话会自动改回默认模型。`)) return;
+      await this.ctx.run('正在删除模型服务', async () => {
+        await api(`/api/providers/${item.id}`, { method: 'DELETE' });
+        delete this.providerTests[item.id];
+        await this.load();
+        await this.ctx.bootstrap();
+        this.ctx.toast('已删除模型服务，并清理相关会话引用', '删除完成');
+      });
+    },
     async saveTool() {
       let headers = {}, env = {}, args = [];
       try {
@@ -125,7 +139,7 @@ export const SettingsPanel = {
           </section>
           <section v-if="tab==='models'">
             <div class="section-heading"><h2>模型服务</h2><p>配置 Agent 使用的 OpenAI-Compatible 模型。</p></div>
-            <div class="setting-list"><article v-for="item in providers" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.model || '继承环境变量' }} · {{ item.base_url || '环境默认地址' }}</small><small v-if="providerTests[item.id]" class="provider-test" :class="'provider-test--'+providerTests[item.id].status">{{ providerTests[item.id].text }}</small></div><StatusPill :status="item.has_api_key?'ready':'configured'" :label="item.has_api_key?'密钥就绪':'待配置密钥'"/><button class="button button--small" :disabled="providerTests[item.id]?.status==='running'" @click="testProvider(item)">{{ providerTests[item.id]?.status==='running'?'测试中…':'测试' }}</button></article></div>
+            <div class="setting-list"><article v-for="item in providers" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.model || '继承环境变量' }} · {{ item.base_url || '环境默认地址' }}</small><small v-if="providerTests[item.id]" class="provider-test" :class="'provider-test--'+providerTests[item.id].status">{{ providerTests[item.id].text }}</small></div><StatusPill :status="item.has_api_key?'ready':'configured'" :label="item.has_api_key?'密钥就绪':'待配置密钥'"/><button class="button button--small" :disabled="providerTests[item.id]?.status==='running'" @click="testProvider(item)">{{ providerTests[item.id]?.status==='running'?'测试中…':'测试' }}</button><button v-if="item.id!=='environment-default'" class="icon-button danger" title="删除模型服务" @click="removeProvider(item)"><Icon name="close"/></button></article></div>
             <div class="settings-card"><h3>添加模型</h3><div class="form-grid"><label><span>名称</span><input v-model="providerForm.name"></label><label><span>模型 ID</span><input v-model="providerForm.model"></label><label class="span-2"><span>Base URL</span><input v-model="providerForm.base_url"></label><label><span>API Key</span><input type="password" v-model="providerForm.api_key"></label><label><span>Temperature</span><input type="number" min="0" max="2" step="0.1" v-model.number="providerForm.temperature"></label></div><button class="button button--primary" @click="saveProvider">保存模型</button></div>
           </section>
           <section v-if="tab==='tools'">
