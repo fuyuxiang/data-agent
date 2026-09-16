@@ -3,9 +3,18 @@ import { expect, test } from '@playwright/test';
 
 test('creates an analysis contract and manages a real indexed attachment', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('查看当前经营状态')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '今天想了解什么？' })).toBeVisible();
+
+  // 测试 fixture 是临时空数据库，先在数据资产页上传一个 CSV，使当前分析自动绑定到数据源
+  await page.getByRole('button', { name: '数据资产', exact: true }).click();
+  await page.locator('input[type=file][accept*=".csv"]').setInputFiles({
+    name: 'sales.csv', mimeType: 'text/csv',
+    buffer: Buffer.from('region,month,sales\nNorth,2026-01-01,120\nSouth,2026-01-01,90\n'),
+  });
+  await expect(page.getByText('sales', { exact: true }).first()).toBeVisible();
+
   await page.getByRole('button', { name: '智能分析' }).click();
-  await expect(page.getByRole('heading', { name: '新建分析' })).toBeVisible();
+  await expect(page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行')).toBeVisible();
 
   const composer = page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行');
   await page.getByLabel('分析模式').selectOption('deep');
@@ -87,8 +96,7 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
 
 test('builds and validates an approved semantic metric from the UI', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '管理控制台' }).click();
-  await page.getByRole('button', { name: '数据源管理' }).click();
+  await page.getByRole('button', { name: '数据资产', exact: true }).click();
   await page.locator('input[type=file][accept*=".csv"]').setInputFiles({
     name: 'sales.csv', mimeType: 'text/csv',
     buffer: Buffer.from('region,month,sales\nNorth,2026-01-01,120\nSouth,2026-01-01,90\n'),

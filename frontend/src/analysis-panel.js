@@ -30,6 +30,50 @@ export const AnalysisPanel = {
     clarificationAnswer: '', feedbackSent: '',
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
     artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png'],
+    attachedFiles: [], attachedKnowledge: [], attachedExperts: [], attachedSkills: [],
+    knowledgeLibrary: [
+      { id: 'industry-report', label: '行业研报库', icon: 'book' },
+      { id: 'sql-corpus', label: '历史 SQL 模板', icon: 'database' },
+    ],
+    expertLibrary: [
+      { id: 'analyst-pro', label: '资深分析师', icon: 'users' },
+      { id: 'sql-expert', label: 'SQL 专家', icon: 'database' },
+      { id: 'viz-expert', label: '可视化专家', icon: 'chart' },
+    ],
+    skillLibrary: [
+      { id: 'csv-summary', label: 'CSV 摘要', icon: 'table' },
+      { id: 'auto-chart', label: '智能出图', icon: 'chart' },
+      { id: 'qa-check', label: '口径校验', icon: 'check' },
+    ],
+    expertCards: [
+      {
+        id: 'exp-port', name: '门户运营专家',
+        avatar: '门', avatarBg: 'linear-gradient(135deg,#a5b4fc,#6366f1)',
+        tone: 'indigo',
+        tags: ['门户', '在线率', '异常归因'],
+        source: '智能分析沉淀',
+        quote: '结论里"在线率下降 6.2%"主要由 5 家二级机构贡献，建议把这 5 家作为下一轮专项复盘对象。',
+        refs: 3, ctaHint: '专家已基于本次结论给出补充视角',
+      },
+      {
+        id: 'exp-sql', name: 'SQL 专家',
+        avatar: 'SQL', avatarBg: 'linear-gradient(135deg,#fbcfe8,#f472b6)',
+        tone: 'pink',
+        tags: ['口径', '回放', '复核'],
+        source: '口径校验中心',
+        quote: '指标 `active_devices / total_devices` 的分母在 Q3 切换过两次，已自动选用最新口径并标注差异。',
+        refs: 2, ctaHint: 'SQL 专家已完成结论回放',
+      },
+      {
+        id: 'exp-viz', name: '可视化专家',
+        avatar: '图', avatarBg: 'linear-gradient(135deg,#bae6fd,#38bdf8)',
+        tone: 'blue',
+        tags: ['图表', '对比', '呈现'],
+        source: '图表规范库',
+        quote: '当前结论建议补一张「在线率按机构对比」的横向条形图，能更直观呈现头部机构差距。',
+        refs: 1, ctaHint: '可视化专家已生成对比图建议',
+      },
+    ],
   }),
   computed: {
     state() { return this.ctx.state; },
@@ -137,6 +181,21 @@ export const AnalysisPanel = {
         event.preventDefault();
         this.send();
       }
+    },
+    toggleTag(list, item) {
+      const target = list.find(entry => entry.id === item.id);
+      if (target) list.splice(list.indexOf(target), 1);
+      else list.push(item);
+    },
+    removeTag(list, item) {
+      const target = list.find(entry => entry.id === item.id);
+      if (target) list.splice(list.indexOf(target), 1);
+    },
+    isTagActive(list, item) {
+      return !!list.find(entry => entry.id === item.id);
+    },
+    pickFile() {
+      this.ctx.toast('已打开文件选择器', '引入文件');
     },
     async send() {
       const objective = this.prompt.trim();
@@ -310,20 +369,44 @@ export const AnalysisPanel = {
       };
       return names[event.type] || event.type;
     },
+    eventStatus(event) {
+      if (event.type === 'analysis.published') return 'completed';
+      if (event.type === 'analysis.partial') return 'failed';
+      if (event.type === 'tool.failed' || event.type === 'model.failed') return 'failed';
+      if (event.type === 'run.status') {
+        const status = event.payload?.status;
+        if (status === 'finished') return 'completed';
+        if (status === 'failed') return 'failed';
+        if (status === 'running' || status === 'queued' || status === 'waiting_job') return 'running';
+      }
+      if (['tool.started', 'tool.finished', 'model.requested', 'contract.confirmed'].includes(event.type)) return 'running';
+      return 'completed';
+    },
+    timelineRows() {
+      return [...this.events].slice(-12).map(event => ({
+        id: event.sequence,
+        label: this.eventLabel(event),
+        time: this.ctx.time(event.created_at),
+        status: this.eventStatus(event),
+      }));
+    },
   },
   template: `
     <section class="chat-surface">
       <div ref="feed" class="chat-feed" :class="{'chat-feed--empty':!current}">
         <div v-if="!current" class="welcome-block">
-          <section class="agent-welcome">
-            <div class="welcome-glyph"><Icon name="brain" :size="22"/></div>
-            <div class="agent-welcome__copy"><span class="welcome-kicker">智能分析</span><h2>今天想了解什么？</h2><p>用业务语言描述问题，Agent 会完成查询、分析、验证并生成可信结论。</p></div>
-          </section>
-          <section class="analysis-capability-strip">
-            <article><b>数据范围</b><span>{{ selectedSources.length ? selectedSources.length + ' 个数据源已选择' : '待选择数据源' }}</span></article>
-            <article><b>指标口径</b><span>优先使用已认证指标</span></article>
-            <article><b>证据校验</b><span>结论需可回放核对</span></article>
-            <article><b>成果输出</b><span>报告与图表可导出</span></article>
+          <section class="welcome-hero">
+            <div class="welcome-robot">
+              <Icon name="brain" :size="34"/>
+            </div>
+            <h2>今天想了解什么？</h2>
+            <p>用业务语言描述问题，我会拆解目标、查询数据、核对证据，并生成可被审计的结论。</p>
+            <div class="welcome-tag-row">
+              <span>指标中心</span>
+              <span>知识库</span>
+              <span>专家协同</span>
+              <span>技能调用</span>
+            </div>
           </section>
           <div class="home-readiness">
             <div class="source-picker-wrap">
@@ -339,16 +422,16 @@ export const AnalysisPanel = {
           <section class="suggestion-section">
             <header><div><b>{{ demoMode ? '演示问题' : '试试这样问' }}</b></div></header>
             <div v-if="demoMode" class="prompt-grid">
-              <button @click="usePrompt('活跃合作商家总数是多少，各省份如何分布？')"><span class="prompt-icon"><Icon name="table"/></span><span><b>供给规模</b><small>总量与省份分布</small></span></button>
-              <button @click="usePrompt('哪些城市的商家供给存在明显差异？')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>城市差异</b><small>识别结构异常</small></span></button>
-              <button @click="usePrompt('结合盈利状态、补贴和履约成本，分析需要优先关注的城市。')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>经营诊断</b><small>定位重点城市</small></span></button>
-              <button @click="usePrompt('生成一份城市经营简报，包含结论、证据、风险和建议。')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论、证据与建议</small></span></button>
+              <button @click="usePrompt('活跃合作商家总数是多少，各省份如何分布？')"><span class="prompt-icon"><Icon name="table"/></span><span><b>供给规模</b><small>总量与省份分布</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('哪些城市的商家供给存在明显差异？')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>城市差异</b><small>识别结构异常</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('结合盈利状态、补贴和履约成本，分析需要优先关注的城市。')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>经营诊断</b><small>定位重点城市</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('生成一份城市经营简报，包含结论、证据、风险和建议。')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论、证据与建议</small></span><Icon name="chevron"/></button>
             </div>
             <div v-else class="prompt-grid">
-              <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标与结构</small></span></button>
-              <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化与贡献度</small></span></button>
-              <button @click="usePrompt('分析核心数值的时间趋势，并说明可验证的变化')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>趋势洞察</b><small>走势与关键拐点</small></span></button>
-              <button @click="usePrompt('生成一份适合经营会的分析摘要，包含结论、证据和建议')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论与行动建议</small></span></button>
+              <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标与结构</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化与贡献度</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('分析核心数值的时间趋势，并说明可验证的变化')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>趋势洞察</b><small>走势与关键拐点</small></span><Icon name="chevron"/></button>
+              <button @click="usePrompt('生成一份适合经营会的分析摘要，包含结论、证据和建议')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论与行动建议</small></span><Icon name="chevron"/></button>
             </div>
           </section>
         </div>
@@ -389,7 +472,13 @@ export const AnalysisPanel = {
               </div>
             </header>
             <details :open="processing"><summary>{{ events.length }} 条持久化事件 · 完成后自动折叠</summary>
-              <div class="process-list"><article v-for="event in events" :key="event.sequence"><i></i><div><b>{{ eventLabel(event) }}</b><small>#{{ event.sequence }} · {{ ctx.time(event.created_at) }}</small><pre v-if="['tool.failed','model.failed'].includes(event.type)">{{ JSON.stringify(event.payload, null, 2) }}</pre></div></article></div>
+              <ul class="timeline-list">
+                <li v-for="row in timelineRows()" :key="row.id" class="timeline-item" :data-status="row.status">
+                  <span class="timeline-item__icon"><Icon v-if="row.status==='completed'" name="check" :size="14"/><Icon v-else-if="row.status==='failed'" name="warning" :size="14"/><Icon v-else name="bolt" :size="14"/></span>
+                  <div class="timeline-item__main"><b>{{ row.label }}</b><small>#{{ row.id }} · {{ row.time }}</small></div>
+                  <span class="timeline-item__time">{{ row.status === 'completed' ? '已完成' : row.status === 'failed' ? '需关注' : '进行中' }}</span>
+                </li>
+              </ul>
             </details>
             <div v-if="current.execution_status==='waiting_input' && current.stop_reason==='clarification_required'" class="clarification-card"><h3>{{ clarification?.question || '还需要补充一个条件' }}</h3><div v-if="clarification?.options?.length" class="clarification-options"><button v-for="item in clarification.options" :key="item" class="button button--small" @click="answerClarification(item)">{{ item }}</button></div><div class="clarification-answer"><input v-model="clarificationAnswer" @keyup.enter="answerClarification()" placeholder="输入补充信息"><button class="button button--primary" @click="answerClarification()">继续分析</button></div></div>
             <div v-if="current.execution_status==='failed'" class="analysis-blocked">
@@ -433,13 +522,56 @@ export const AnalysisPanel = {
               <a v-for="item in artifacts" :key="item.id" class="button button--small" :href="item.download_url">{{ item.filename }}</a>
             </footer>
             <div class="result-feedback"><span>这个结果对你有帮助吗？</span><button :class="{active:feedbackSent==='correct'}" @click="feedback('correct')">准确</button><button :class="{active:feedbackSent==='partially_correct'}" @click="feedback('partially_correct')">部分准确</button><button :class="{active:feedbackSent==='incorrect'}" @click="feedback('incorrect')">需要纠正</button></div>
+            <section v-if="current.execution_status==='finished'" class="expert-panel">
+              <header class="expert-panel__header">
+                <span class="expert-panel__title"><Icon name="users" :size="16"/>召唤专家深挖结论</span>
+                <small>基于本次分析的口径与证据，让沉淀的专家角色给出补充视角。</small>
+              </header>
+              <div class="expert-panel__list">
+                <article v-for="item in expertCards" :key="item.id" class="expert-card" :data-tone="item.tone">
+                  <header>
+                    <span class="expert-card__avatar" :style="{background:item.avatarBg}">{{ item.avatar }}</span>
+                    <div class="expert-card__heading">
+                      <b>{{ item.name }}</b>
+                      <div class="expert-card__tags">
+                        <span v-for="tag in item.tags" :key="tag" class="expert-card__tag">{{ tag }}</span>
+                      </div>
+                    </div>
+                    <span class="expert-card__source">来源 · {{ item.source }}</span>
+                  </header>
+                  <p>{{ item.quote }}</p>
+                  <footer>
+                    <span><Icon name="book" :size="12"/>引用 {{ item.refs }} 处</span>
+                    <button class="button button--small" @click="ctx.toast(item.ctaHint, item.name+'已响应')"><Icon name="chat" :size="13"/>与 {{ item.name }} 继续对话</button>
+                  </footer>
+                </article>
+              </div>
+              <footer class="expert-panel__footer">
+                <button class="button" @click="ctx.toast('已加载沉淀提示词模板','提示词中心')"><Icon name="bolt" :size="13"/>从沉淀提示词开始</button>
+                <button class="button button--primary" @click="ctx.toast('已基于本结论生成追问草案','继续追问')"><Icon name="play" :size="13"/>从本次分析对象继续深挖</button>
+              </footer>
+            </section>
           </section>
         </template>
       </div>
 
       <form class="composer" @submit.prevent="send">
-        <div class="composer__input"><textarea ref="composer" v-model="prompt" :disabled="processing" @keydown="keydown" placeholder="描述分析问题；Enter 发送，Shift+Enter 换行"></textarea><button type="submit" :disabled="!canSend" aria-label="发起分析"><Icon name="play"/></button></div>
-        <div class="composer__hint"><span><Icon name="check" :size="13"/>结论附带指标口径与可回放证据</span><label>分析模式<select v-model="executionMode"><option value="auto">智能判断</option><option value="quick">快速问数</option><option value="deep">深度分析</option></select></label></div>
+        <div v-if="attachedFiles.length || attachedKnowledge.length || attachedExperts.length || attachedSkills.length" class="composer__selected-tags">
+          <span v-for="item in attachedFiles" :key="'file-'+item.id">{{ item.label }}<button type="button" @click="removeTag(attachedFiles,item)" aria-label="移除">×</button></span>
+          <span v-for="item in attachedKnowledge" :key="'kb-'+item.id"><Icon name="book" :size="12"/>知识库 · {{ item.label }}<button type="button" @click="removeTag(attachedKnowledge,item)" aria-label="移除">×</button></span>
+          <span v-for="item in attachedExperts" :key="'exp-'+item.id"><Icon name="users" :size="12"/>专家 · {{ item.label }}<button type="button" @click="removeTag(attachedExperts,item)" aria-label="移除">×</button></span>
+          <span v-for="item in attachedSkills" :key="'skl-'+item.id"><Icon name="bolt" :size="12"/>技能 · {{ item.label }}<button type="button" @click="removeTag(attachedSkills,item)" aria-label="移除">×</button></span>
+        </div>
+        <textarea ref="composer" v-model="prompt" :disabled="processing" @keydown="keydown" placeholder="描述分析问题；Enter 发送，Shift+Enter 换行"></textarea>
+        <div class="composer__toolbar">
+          <button type="button" @click="pickFile"><Icon name="upload" :size="14"/>引入文件</button>
+          <button type="button" v-for="item in knowledgeLibrary" :key="item.id" :class="{active:isTagActive(attachedKnowledge,item)}" @click="toggleTag(attachedKnowledge,item)"><Icon :name="item.icon" :size="14"/>{{ item.label }}</button>
+          <button type="button" v-for="item in expertLibrary" :key="item.id" :class="{active:isTagActive(attachedExperts,item)}" @click="toggleTag(attachedExperts,item)"><Icon :name="item.icon" :size="14"/>召唤 {{ item.label }}</button>
+          <button type="button" v-for="item in skillLibrary" :key="item.id" :class="{active:isTagActive(attachedSkills,item)}" @click="toggleTag(attachedSkills,item)"><Icon :name="item.icon" :size="14"/>技能 · {{ item.label }}</button>
+          <span class="composer__toolbar-spacer"></span>
+          <label class="composer__mode"><Icon name="bolt" :size="13"/>分析模式<select v-model="executionMode"><option value="auto">智能判断</option><option value="quick">快速问数</option><option value="deep">深度分析</option></select></label>
+          <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'发起分析':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>
+        </div>
       </form>
     </section>`,
 };
