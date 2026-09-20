@@ -2667,3 +2667,40 @@ body { font-size:14px;letter-spacing:0; }
   .welcome-hero h2 { font-size: 1.5rem; }
   .prompt-grid { grid-template-columns: 1fr; }
 }
+
+/* Sidebar analysis records: render all sessions and let the list itself scroll. */
+.app-sidebar {
+  min-height: 0;
+}
+.sidebar-sessions {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 92px;
+  max-height: none;
+  overflow: hidden;
+}
+.sidebar-sessions header {
+  flex: 0 0 auto;
+}
+.sidebar-session-list {
+  display: grid;
+  gap: 2px;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 2px 2px 0;
+  scrollbar-gutter: stable;
+}
+.sidebar-session-list::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar-session-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb,var(--muted) 32%,transparent);
+}
+.sidebar-session-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-footer {
+  flex: 0 0 auto;
+}
