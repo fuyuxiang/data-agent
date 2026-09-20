@@ -1,6 +1,6 @@
 <div align="center">
 
-# 经纬 Data Agent
+# 数擎 Data Agent
 
 **面向业务人员的可治理、可追溯、可持续运营的企业级数据智能产品**
 
@@ -16,7 +16,7 @@
 
 ---
 
-经纬 Data Agent 是一套 Vue 3 + Python 的企业数据分析 Agent。产品只围绕“接入数据 → 治理指标与知识 → 发起分析 → 生成报告”这条主链路展开；数据库、文件、API 和数仓是受治理的数据源，MCP 是 Agent 的受控工具连接。
+数擎 Data Agent 是一套 Vue 3 + Python 的企业数据分析 Agent。产品只围绕“接入数据 → 治理指标与知识 → 发起分析 → 生成报告”这条主链路展开；数据库、文件、API 和数仓是受治理的数据源，MCP 是 Agent 的受控工具连接。
 
 产品以业务分析人员为主要用户：业务用户进入后直接提问，系统自动完成意图澄清、查询、分析、验证和报告生成；管理员只在需要时进入数据管理、指标中心、业务知识和系统设置。当前产品边界与删减原则见 [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)。
 
@@ -116,7 +116,7 @@ python -m pip install -r requirements-dl.txt
 
 ```mermaid
 flowchart TB
-    UI["经纬 Data Agent<br/>智能分析 · 数据管理 · 指标中心 · 业务知识 · 系统设置"]
+    UI["数擎 Data Agent<br/>智能分析 · 数据管理 · 指标中心 · 业务知识 · 系统设置"]
     UI -->|HTTP + SSE| API["Flask 产品 API"]
     API --> SEMANTIC["指标中心<br/>口径 · 版本 · 审批"]
     API --> KNOWLEDGE["业务知识<br/>术语 · 规则 · 背景"]

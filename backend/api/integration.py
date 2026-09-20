@@ -284,7 +284,7 @@ def _send_connector(connector: dict, message: str, extra: dict | None = None) ->
     connector_type = connector.get("type")
     if connector_type == "email":
         mail = EmailMessage()
-        mail["Subject"] = str((extra or {}).get("subject") or "经纬分析结果")[:160]
+        mail["Subject"] = str((extra or {}).get("subject") or "数擎分析结果")[:160]
         mail["From"] = secret.get("sender") or secret.get("username")
         mail["To"] = secret["recipient"]
         mail.set_content(message)
@@ -334,7 +334,7 @@ def test_connector(connector_id: str):
     connector = require_workspace_record("connectors", connector_id)
     require_workspace_access(connector["workspace_id"], write=True)
     assert_feature_enabled(db(), connector["workspace_id"], "result_delivery")
-    return ok(result=_send_connector(connector, "经纬分析工作台连接测试成功"))
+    return ok(result=_send_connector(connector, "数擎分析工作台连接测试成功"))
 
 
 @bp.post("/api/connectors/<connector_id>/send")
