@@ -198,10 +198,10 @@ const Root = {
     return { state, routes, routeGroups, activeRoute, userInitial, canAdmin, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, openSessionDialog, closeSessionDialog, confirmSessionDialog, toggleTheme, command, submitAuth, sendAuthCode, logout };
   },
   template: `
-    <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark">数擎</span><p>正在验证会话…</p></div>
+    <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark boot-mark--logo"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><p>正在验证会话…</p></div>
     <main v-else-if="state.authRequired" class="auth-screen">
       <form class="auth-panel" @submit.prevent="submitAuth">
-        <header><span class="brand__mark"><i></i><i></i><i></i></span><div><h1>数擎</h1><p>企业智能分析平台</p></div></header>
+        <header><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><h1>数擎</h1><p>企业智能分析平台</p></div></header>
         <div class="segmented" v-if="state.registrationOpen&&!state.auth.invitation_token"><button type="button" :class="{active:state.authMode==='login'}" @click="state.authMode='login';state.authError=''">登录</button><button type="button" :class="{active:state.authMode==='register'}" @click="state.authMode='register';state.authError=''">创建所有者</button></div>
         <label v-if="state.authMode==='register'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" required maxlength="80"></label>
         <label v-if="state.authMode==='register' && state.bootstrapRequired && !state.auth.invitation_token"><span>初始化令牌</span><input v-model="state.auth.bootstrap_token" type="password" autocomplete="off" required><small>由部署管理员从 MERIDIAN_BOOTSTRAP_TOKEN 安全交付。</small></label>
@@ -216,7 +216,7 @@ const Root = {
     </main>
     <div v-else class="app-shell" :class="{ 'sidebar-visible': state.sidebarOpen }">
       <aside class="app-sidebar">
-        <header class="brand"><span class="brand__mark" aria-hidden="true"><i></i><i></i><i></i></span><div><b>数擎</b><small>Data Agent</small></div><button class="sidebar-close" @click="state.sidebarOpen=false" aria-label="关闭导航"><Icon name="close"/></button></header>
+        <header class="brand"><span class="brand__mark brand__mark--image" aria-hidden="true"><img src="/src/assets/logo-shuqing.png" alt="" /></span><div><b>数擎</b><small>Data Agent</small></div><button class="sidebar-close" @click="state.sidebarOpen=false" aria-label="关闭导航"><Icon name="close"/></button></header>
         <nav class="main-nav">
           <section v-for="group in routeGroups" :key="group.id" class="nav-group">
             <header>{{ group.label }}</header>

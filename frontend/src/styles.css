@@ -2704,3 +2704,39 @@ body { font-size:14px;letter-spacing:0; }
 .sidebar-footer {
   flex: 0 0 auto;
 }
+
+/* Brand logo asset: replace the former CSS-drawn mark with the transparent trademark image. */
+.brand__mark--image {
+  display: grid;
+  place-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.brand__mark--image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.auth-panel .brand__mark--image {
+  width: 48px;
+  height: 48px;
+}
+.boot-mark--logo {
+  padding: 10px;
+  border-color: rgba(255,255,255,.72);
+  background: rgba(255,255,255,.94);
+  box-shadow: 0 16px 38px rgba(15,23,42,.22);
+  letter-spacing: 0;
+}
+.boot-mark--logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
