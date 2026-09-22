@@ -197,26 +197,37 @@ const Root = {
     <main v-else-if="state.authRequired" class="auth-screen portal-screen">
       <section class="portal-shell">
         <div class="portal-hero">
-          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>教育数据智能分析平台</small></div></header>
-          <p class="portal-eyebrow">企业级数据智能体门户</p>
-          <h1>让成绩、课程与就业数据<br>形成可信分析闭环</h1>
-          <p class="portal-summary">统一数据资产、指标口径、业务知识与智能分析流程，所有结论都可回到数据证据与执行记录。</p>
+          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>职业教育数据智能分析平台</small></div></header>
+          <p class="portal-eyebrow">国家职业技能大赛 · 新一代信息技术赛道展示</p>
+          <h1>让教育数据从采集到决策<br>全程可信、可追溯、可交付</h1>
+          <p class="portal-summary">面向成绩分析、课程评价与就业质量分析，统一数据资产、指标口径、业务知识和智能分析流程，让每一个结论都有证据链支撑。</p>
+          <div class="portal-workflow">
+            <span><i>01</i><b>多源数据接入</b></span>
+            <span><i>02</i><b>指标口径治理</b></span>
+            <span><i>03</i><b>Agent 可信分析</b></span>
+            <span><i>04</i><b>报告成果交付</b></span>
+          </div>
           <div class="portal-metrics">
-            <span><b>数据接入</b><small>Excel / CSV / MySQL</small></span>
-            <span><b>可信分析</b><small>问题拆解与证据校验</small></span>
-            <span><b>报告交付</b><small>面向大赛与业务汇报</small></span>
+            <span><b>成绩分析</b><small>分布、排名、班级对比与薄弱项识别</small></span>
+            <span><b>课程评价</b><small>课程质量、教学反馈与改进建议</small></span>
+            <span><b>就业质量</b><small>岗位去向、专业匹配与就业趋势研判</small></span>
+          </div>
+          <div class="portal-proof">
+            <em>SQL 只读查询</em><em>证据单元格校验</em><em>指标版本留痕</em><em>报告一键生成</em>
           </div>
         </div>
         <form class="auth-panel portal-login" @submit.prevent="submitAuth">
+          <div class="login-product-mark"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><b>数擎</b></div>
           <div class="login-heading">
-            <span>Sign in</span>
-            <h2>登录数擎平台</h2>
-            <p>请输入管理员分配的用户名和密码。</p>
+            <span>Secure Access</span>
+            <h2>进入路演演示环境</h2>
+            <p>请输入授权账号，开始展示教育数据智能体的完整分析闭环。</p>
           </div>
           <label><span>用户名</span><input v-model.trim="state.auth.username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
           <label><span>密码</span><input v-model="state.auth.password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
           <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
           <button class="button button--primary portal-submit" type="submit">进入数擎平台</button>
+          <div class="portal-login-assurance"><span>受控数据访问</span><span>可验证分析结论</span><span>面向现场汇报</span></div>
           <p class="portal-login-note">登录后可使用智能分析、数据资产、指标中心、知识库和系统管理功能。</p>
         </form>
       </section>
