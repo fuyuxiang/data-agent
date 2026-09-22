@@ -104,6 +104,10 @@ def create_app(test_config: dict | None = None) -> Flask:
     from .services.saas import ensure_saas_baseline
 
     ensure_saas_baseline(database)
+    if not app.config.get("TESTING"):
+        from .api.identity import ensure_portal_admin
+
+        ensure_portal_admin(database, production=settings.environment == "production")
     from .core.metrics import RequestMetrics
 
     app.extensions["meridian_metrics"] = RequestMetrics()

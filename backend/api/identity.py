@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -13,6 +14,7 @@ from email.message import EmailMessage
 from flask import Blueprint, current_app, jsonify, request, session
 
 from .common import api_errors, body, db, ok
+from ..core.database import Database, utcnow
 from ..services.security import SecretVault
 from ..services.usage import quota_status
 
@@ -35,6 +37,128 @@ def _public(user: dict) -> dict:
         key: value for key, value in user.items()
         if key not in {"password_hash", "password_salt", "password_iterations"}
     }
+
+
+def _normal_username(value: str) -> str:
+    username = re.sub(r"[^A-Za-z0-9_.-]", "", str(value or "").strip())
+    return username[:48].lower()
+
+
+def _find_user_by_identifier(identifier: str) -> dict | None:
+    normalized = str(identifier or "").strip().lower()
+    if not normalized:
+        return None
+    for user in db().list("users", limit=5000):
+        if str(user.get("email") or "").strip().lower() == normalized:
+            return user
+        if str(user.get("username") or "").strip().lower() == normalized:
+            return user
+    return None
+
+
+def _adopt_local_default_records(database: Database, user_id: str) -> int:
+    """Move records created before the portal existed to the first admin user."""
+
+    migrated = 0
+    actor_fields = {
+        "owner_id", "user_id", "actor_id", "created_by", "updated_by", "published_by",
+        "rotated_by", "invited_by",
+    }
+    list_fields = {"authorized_user_ids", "member_ids"}
+    now = utcnow()
+    with database.transaction() as connection:
+        rows = connection.execute(
+            "SELECT collection,id,workspace_id,payload FROM records WHERE archived_at IS NULL",
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            changed = False
+            for field in actor_fields:
+                if str(payload.get(field) or "") == "local-default":
+                    payload[field] = user_id
+                    changed = True
+            for field in list_fields:
+                values = payload.get(field)
+                if isinstance(values, list) and "local-default" in {str(value) for value in values}:
+                    normalized = [user_id if str(value) == "local-default" else str(value) for value in values]
+                    payload[field] = list(dict.fromkeys(normalized))
+                    changed = True
+            if not changed:
+                continue
+            payload["updated_at"] = now
+            connection.execute(
+                "UPDATE records SET payload=?, updated_at=? WHERE collection=? AND id=? AND workspace_id=?",
+                (
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    row["collection"],
+                    row["id"],
+                    row["workspace_id"],
+                ),
+            )
+            migrated += 1
+    return migrated
+
+
+def ensure_portal_admin(database: Database, *, production: bool = False) -> dict:
+    """Ensure a username/password portal owner exists for desktop and demo deployments."""
+
+    existing = database.list("users", include_archived=True, limit=1)
+    if existing:
+        return {"created": False, "user_id": existing[0]["id"]}
+    if os.getenv("MERIDIAN_PORTAL_AUTO_ADMIN", "1") == "0":
+        return {"created": False, "disabled": True}
+    configured_password = os.getenv("MERIDIAN_PORTAL_ADMIN_PASSWORD", "").strip()
+    if production and not configured_password:
+        raise RuntimeError("生产环境必须配置 MERIDIAN_PORTAL_ADMIN_PASSWORD 后才能初始化门户管理员")
+    username = _normal_username(os.getenv("MERIDIAN_PORTAL_ADMIN_USERNAME", "admin")) or "admin"
+    password = configured_password or "DataAgent@2026!"
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise RuntimeError(f"MERIDIAN_PORTAL_ADMIN_PASSWORD 至少需要 {MIN_PASSWORD_LENGTH} 位")
+    email = str(
+        os.getenv("MERIDIAN_PORTAL_ADMIN_EMAIL", f"{username}@local.shuqing")
+    ).strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        email = f"{username}@local.shuqing"
+    salt, digest = _password_hash(password)
+    user = database.create_user(
+        {
+            "id": database.new_id("usr"),
+            "username": username,
+            "email": email,
+            "name": os.getenv("MERIDIAN_PORTAL_ADMIN_NAME", "系统管理员")[:80],
+            "password_salt": salt,
+            "password_hash": digest,
+            "password_iterations": PASSWORD_ITERATIONS,
+            "enabled": True,
+            "session_version": 0,
+        },
+    )
+    for workspace in database.list("workspaces", include_archived=True, limit=5000):
+        if workspace.get("archived_at"):
+            continue
+        database.put(
+            "workspace_members",
+            {
+                "id": f"{workspace['id']}:{user['id']}",
+                "workspace_id": workspace["id"],
+                "user_id": user["id"],
+                "role": "owner",
+                "enabled": True,
+            },
+            workspace_id=workspace["id"],
+        )
+        if not workspace.get("owner_id"):
+            database.patch("workspaces", workspace["id"], {"owner_id": user["id"]})
+    migrated = _adopt_local_default_records(database, user["id"])
+    database.audit(
+        "auth.portal_admin_initialized",
+        actor=user["id"],
+        object_type="user",
+        object_id=user["id"],
+        detail={"username": username, "migrated_records": migrated},
+    )
+    return {"created": True, "user_id": user["id"], "username": username, "migrated_records": migrated}
 
 
 def _start_session(user: dict, active_workspace_id: str) -> str:
@@ -210,6 +334,7 @@ def register():
     user = db().create_user(
         {
             "id": db().new_id("usr"), "email": email,
+            "username": _normal_username(str(payload.get("username") or email.split("@")[0])),
             "name": str(payload.get("name") or email.split("@")[0])[:80],
             "password_salt": salt, "password_hash": digest,
             "password_iterations": PASSWORD_ITERATIONS,
@@ -269,13 +394,13 @@ def register():
 @api_errors
 def login():
     payload = body()
-    email = str(payload.get("email") or "").strip().lower()
-    attempt_id, attempt = _check_login_rate(email)
-    user = next((item for item in db().list("users") if item.get("email") == email), None)
+    identifier = str(payload.get("username") or payload.get("email") or "").strip().lower()
+    attempt_id, attempt = _check_login_rate(identifier)
+    user = _find_user_by_identifier(identifier)
     if not user or not user.get("enabled", True):
         attempt["failures"] = int(attempt.get("failures") or 0) + 1
         db().put("auth_attempts", attempt, workspace_id="default")
-        raise ValueError("邮箱或密码错误")
+        raise ValueError("用户名或密码错误")
     iterations = int(user.get("password_iterations") or 310_000)
     _, digest = _password_hash(
         str(payload.get("password") or ""), bytes.fromhex(user["password_salt"]), iterations,
@@ -283,7 +408,7 @@ def login():
     if not hmac.compare_digest(digest, user["password_hash"]):
         attempt["failures"] = int(attempt.get("failures") or 0) + 1
         db().put("auth_attempts", attempt, workspace_id="default")
-        raise ValueError("邮箱或密码错误")
+        raise ValueError("用户名或密码错误")
     if iterations < PASSWORD_ITERATIONS:
         salt, digest = _password_hash(str(payload.get("password") or ""))
         user = db().patch("users", user["id"], {

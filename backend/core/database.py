@@ -59,6 +59,11 @@ class Database:
             ON records(collection, workspace_id, updated_at DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email
             ON records(json_extract(payload, '$.email')) WHERE collection='users';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
+            ON records(lower(json_extract(payload, '$.username')))
+            WHERE collection='users'
+              AND json_type(payload, '$.username') IS NOT NULL
+              AND COALESCE(json_extract(payload, '$.username'), '') != '';
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -421,6 +426,17 @@ class Database:
             ).fetchone()
             if duplicate:
                 raise ValueError("该邮箱已经注册")
+            username = str(value.get("username") or "").strip().lower()
+            if username:
+                duplicate_username = connection.execute(
+                    """SELECT 1 FROM records
+                       WHERE collection='users'
+                         AND lower(json_extract(payload, '$.username'))=?
+                       LIMIT 1""",
+                    (username,),
+                ).fetchone()
+                if duplicate_username:
+                    raise ValueError("该用户名已经存在")
             has_users = connection.execute(
                 "SELECT 1 FROM records WHERE collection='users' LIMIT 1",
             ).fetchone()

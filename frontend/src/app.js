@@ -18,7 +18,7 @@ const Root = {
   setup() {
     const state = reactive({
       ready: false, authChecking: true, authRequired: false, registrationOpen: false,
-      authMode: 'login', authError: '', bootstrapRequired: false, auth: { email:'', password:'', name:'', invitation_token:new URLSearchParams(location.search).get('invite') || '', bootstrap_token:'' }, user: null,
+      authMode: 'login', authError: '', bootstrapRequired: false, auth: { username:'', password:'' }, user: null,
       route: location.hash.slice(1) || 'chat', sidebarOpen: false,
       workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [], workspaceRole: '',
       sessions: [], activeSessionId: '', sources: [], providers: [],
@@ -51,11 +51,11 @@ const Root = {
       state.busy = true; state.busyLabel = '正在准备工作空间';
       try {
         const identity = await api('/api/auth/me');
-        state.user = identity.user; state.registrationOpen = !!identity.registration_open || !!state.auth.invitation_token; state.bootstrapRequired = !!identity.bootstrap_required;
+        state.user = identity.user; state.registrationOpen = !!identity.registration_open; state.bootstrapRequired = !!identity.bootstrap_required;
         if (identity.csrf_token) sessionStorage.setItem('meridian-csrf', identity.csrf_token);
-        if (!identity.authenticated && !identity.local_mode) {
+        if (!identity.authenticated) {
           state.authRequired = true;
-          state.authMode = state.auth.invitation_token ? 'register' : (state.registrationOpen ? 'register' : 'login');
+          state.authMode = 'login';
           state.ready = true;
           return;
         }
@@ -81,14 +81,9 @@ const Root = {
     const submitAuth = async () => {
       state.authError = '';
       try {
-        const path = state.authMode === 'register' ? '/api/auth/register' : state.authMode === 'reset' ? '/api/auth/reset-password' : '/api/auth/login';
-        await api(path, { method:'POST', body:state.auth });
-        if (state.authMode === 'reset') {
-          state.authMode = 'login'; state.auth.password = ''; state.auth.code = '';
-          return;
-        }
+        await api('/api/auth/login', { method:'POST', body:state.auth });
         state.authRequired = false; state.authChecking = true;
-        state.auth.password = ''; state.auth.bootstrap_token = '';
+        state.auth.password = '';
         await bootstrap();
       } catch (error) { state.authError = error?.message || '认证失败'; }
     };
@@ -194,25 +189,37 @@ const Root = {
       {id:'configuration',label:'数据治理',items:routes.value.filter(item=>item.id!=='chat'&&!item.utility)},
     ]);
     const activeRoute=computed(()=>productRoutes.find(item=>item.id===state.route)||productRoutes[0]);
-    const userInitial=computed(()=>(state.user?.name||state.user?.email||'本')[0].toUpperCase());
+    const userInitial=computed(()=>(state.user?.name||state.user?.username||state.user?.email||'本')[0].toUpperCase());
     return { state, routes, routeGroups, activeRoute, userInitial, canAdmin, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, openSessionDialog, closeSessionDialog, confirmSessionDialog, toggleTheme, command, submitAuth, sendAuthCode, logout };
   },
   template: `
     <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark boot-mark--logo"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><p>正在验证会话…</p></div>
-    <main v-else-if="state.authRequired" class="auth-screen">
-      <form class="auth-panel" @submit.prevent="submitAuth">
-        <header><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><h1>数擎</h1><p>企业智能分析平台</p></div></header>
-        <div class="segmented" v-if="state.registrationOpen&&!state.auth.invitation_token"><button type="button" :class="{active:state.authMode==='login'}" @click="state.authMode='login';state.authError=''">登录</button><button type="button" :class="{active:state.authMode==='register'}" @click="state.authMode='register';state.authError=''">创建所有者</button></div>
-        <label v-if="state.authMode==='register'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" required maxlength="80"></label>
-        <label v-if="state.authMode==='register' && state.bootstrapRequired && !state.auth.invitation_token"><span>初始化令牌</span><input v-model="state.auth.bootstrap_token" type="password" autocomplete="off" required><small>由部署管理员从 MERIDIAN_BOOTSTRAP_TOKEN 安全交付。</small></label>
-        <label><span>邮箱</span><input v-model.trim="state.auth.email" type="email" autocomplete="email" required></label>
-        <label v-if="state.authMode!=='login'"><span>邮箱验证码</span><span class="auth-code"><input v-model.trim="state.auth.code" inputmode="numeric" maxlength="6"><button class="button button--small" type="button" @click="sendAuthCode">发送验证码</button></span></label>
-        <label><span>密码</span><input v-model="state.auth.password" type="password" :autocomplete="state.authMode==='login'?'current-password':'new-password'" required minlength="12"></label>
-        <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
-        <button class="button button--primary" type="submit">{{ state.authMode==='register' ? (state.auth.invitation_token?'加入企业':'创建并进入') : state.authMode==='reset' ? '重置密码' : '登录' }}</button>
-        <button v-if="state.authMode==='login'" class="text-button" type="button" @click="state.authMode='reset';state.authError=''">忘记密码</button>
-        <button v-else-if="state.authMode==='reset'" class="text-button" type="button" @click="state.authMode='login';state.authError=''">返回登录</button>
-      </form>
+    <main v-else-if="state.authRequired" class="auth-screen portal-screen">
+      <section class="portal-shell">
+        <div class="portal-hero">
+          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>教育数据智能分析平台</small></div></header>
+          <p class="portal-eyebrow">企业级数据智能体门户</p>
+          <h1>让成绩、课程与就业数据<br>形成可信分析闭环</h1>
+          <p class="portal-summary">统一数据资产、指标口径、业务知识与智能分析流程，所有结论都可回到数据证据与执行记录。</p>
+          <div class="portal-metrics">
+            <span><b>数据接入</b><small>Excel / CSV / MySQL</small></span>
+            <span><b>可信分析</b><small>问题拆解与证据校验</small></span>
+            <span><b>报告交付</b><small>面向大赛与业务汇报</small></span>
+          </div>
+        </div>
+        <form class="auth-panel portal-login" @submit.prevent="submitAuth">
+          <div class="login-heading">
+            <span>Sign in</span>
+            <h2>登录数擎平台</h2>
+            <p>请输入管理员分配的用户名和密码。</p>
+          </div>
+          <label><span>用户名</span><input v-model.trim="state.auth.username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
+          <label><span>密码</span><input v-model="state.auth.password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+          <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
+          <button class="button button--primary portal-submit" type="submit">进入数擎平台</button>
+          <p class="portal-login-note">登录后可使用智能分析、数据资产、指标中心、知识库和系统管理功能。</p>
+        </form>
+      </section>
     </main>
     <div v-else class="app-shell" :class="{ 'sidebar-visible': state.sidebarOpen }">
       <aside class="app-sidebar">
@@ -227,7 +234,7 @@ const Root = {
         <footer class="sidebar-footer">
           <button v-if="canAdmin" class="sidebar-utility" :class="{active:state.route==='settings'}" @click="go('settings')"><Icon name="settings" :size="16"/><span>系统管理</span></button>
           <button class="command-entry" @click="state.commandOpen=true"><Icon name="search" :size="15"/><span>全局搜索</span><kbd>⌘ K</kbd></button>
-          <div v-if="state.user" class="sidebar-profile"><span class="user-avatar">{{ userInitial }}</span><div><b>{{ state.user.name || '企业用户' }}</b><small>{{ state.workspaceRole || '成员' }}</small></div><button @click="logout" title="退出登录"><Icon name="chevron" :size="15"/></button></div>
+          <div v-if="state.user" class="sidebar-profile"><span class="user-avatar">{{ userInitial }}</span><div><b>{{ state.user.name || state.user.username || '企业用户' }}</b><small>{{ state.workspaceRole || '成员' }}</small></div><button @click="logout" title="退出登录"><Icon name="chevron" :size="15"/></button></div>
         </footer>
       </aside>
       <main class="app-main">
