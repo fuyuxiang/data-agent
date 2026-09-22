@@ -907,6 +907,7 @@ body { font-size:14px;letter-spacing:0; }
 .enterprise-hero::after {
   content:"";
   position:absolute;
+  pointer-events:none;
   right:22px;
   bottom:-34px;
   width:160px;

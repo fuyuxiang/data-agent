@@ -7,7 +7,7 @@ export const SourcesPanel = {
   components: { DataTable, EmptyState, Icon, Modal, StatusPill },
   props: { ctx: Object },
   data: () => ({
-    connectOpen: false, connectMode: 'database',
+    connectOpen: false, connectMode: 'database', connectNonce: 0,
     dbForm: { name: '', driver: 'sqlite', database: '', host: '127.0.0.1', port: '', username: '', password: '', ssl_mode: 'preferred' },
     httpForm: { name: '', url: '', json_path: '' },
     sheetForm: { name: 'Google Sheet', url: '', gid: '0' },
@@ -32,6 +32,15 @@ export const SourcesPanel = {
       this.dbForm.port = ports[this.dbForm.driver] || '';
       if (this.dbForm.driver !== 'sqlite' && !this.dbForm.host) this.dbForm.host = '127.0.0.1';
       this.dbForm.ssl_mode = this.dbForm.driver === 'mysql' ? 'preferred' : this.dbForm.driver === 'postgresql' ? 'prefer' : '';
+    },
+    openConnect(mode = 'database') {
+      this.connectMode = mode;
+      this.connectNonce += 1;
+      this.syncDatabaseDefaults();
+      this.connectOpen = true;
+    },
+    closeConnect() {
+      this.connectOpen = false;
     },
     async loadSets() { this.sourceSets = (await api(withWorkspace('/api/source-sets', this.state.workspaceId))).items; },
     async loadMembers() { this.members = (await api(`/api/workspaces/${this.state.workspaceId}/members`)).items; },
@@ -149,7 +158,7 @@ export const SourcesPanel = {
   },
   template: `
     <section class="workspace-page">
-      <header class="surface-header page-heading enterprise-hero"><div><span class="eyebrow">DATA ASSETS</span><h1>数据资产</h1><p>统一接入数据库、文件与业务接口，明确可分析表范围、访问权限和数据预览证据。</p></div><div class="header-cluster"><button v-if="!hasDemoSource" class="button button--quiet" @click="loadDemo"><Icon name="play"/>载入演示数据</button><button class="button button--primary" @click="connectOpen=true"><Icon name="plus"/>新建连接</button><label class="button"><Icon name="upload"/>上传文件<input hidden multiple type="file" accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload"></label></div></header>
+      <header class="surface-header page-heading enterprise-hero"><div><span class="eyebrow">DATA ASSETS</span><h1>数据资产</h1><p>统一接入数据库、文件与业务接口，明确可分析表范围、访问权限和数据预览证据。</p></div><div class="header-cluster"><button v-if="!hasDemoSource" class="button button--quiet" @click="loadDemo"><Icon name="play"/>载入演示数据</button><button class="button button--primary" @click="openConnect()"><Icon name="plus"/>新建连接</button><label class="button"><Icon name="upload"/>上传文件<input hidden multiple type="file" accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload"></label></div></header>
       <section class="enterprise-kpis">
         <article><small>数据源</small><b>{{ state.sources.length }}</b><span>已接入资产</span></article>
         <article><small>当前分析范围</small><b>{{ ctx.activeSession()?.source_ids?.length || 0 }}</b><span>已授权给本会话</span></article>
@@ -175,13 +184,13 @@ export const SourcesPanel = {
         </main>
         <main v-else class="detail-pane detail-pane--empty"><EmptyState icon="database" title="选择一个数据源" text="查看结构、执行只读查询、维护治理策略。"/></main>
       </div>
-      <Modal :open="connectOpen" title="连接外部数据" @close="connectOpen=false">
+      <Modal :key="'connect-modal-'+connectNonce" :open="connectOpen" title="连接外部数据" @close="closeConnect">
         <nav class="segmented"><button :class="{active:connectMode==='database'}" @click="connectMode='database'">SQL</button><button :class="{active:connectMode==='http'}" @click="connectMode='http'">HTTP</button><button :class="{active:connectMode==='sheets'}" @click="connectMode='sheets'">Sheets</button><button :class="{active:connectMode==='lark'}" @click="connectMode='lark'">飞书表格</button></nav>
         <div v-if="connectMode==='database'" class="form-grid"><label><span>连接名称</span><input v-model="dbForm.name" placeholder="生产经营库"></label><label><span>数据库类型</span><select v-model="dbForm.driver" @change="syncDatabaseDefaults"><option value="sqlite">SQLite</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option></select></label><label class="span-2"><span>{{ dbForm.driver==='sqlite' ? 'SQLite 文件路径' : '数据库名称' }}</span><input v-model="dbForm.database" :placeholder="dbForm.driver==='sqlite' ? '例如 C:\\data\\sales.sqlite' : '例如 sales' "></label><template v-if="dbForm.driver!=='sqlite'"><label><span>主机</span><input v-model="dbForm.host" placeholder="127.0.0.1"></label><label><span>端口</span><input v-model="dbForm.port" inputmode="numeric"></label><label><span>用户名</span><input v-model="dbForm.username" autocomplete="username"></label><label><span>密码</span><input v-model="dbForm.password" type="password" autocomplete="current-password"></label><label v-if="dbForm.driver==='mysql'"><span>SSL 模式</span><select v-model="dbForm.ssl_mode"><option value="preferred">优先使用（推荐）</option><option value="disabled">关闭（仅本地开发）</option><option value="required">必须使用</option><option value="verify-ca">验证 CA</option><option value="verify-identity">验证 CA 与主机名</option></select></label><p v-if="dbForm.driver==='mysql'" class="form-hint span-2">连接当前服务器上的 MySQL 时，主机填写 127.0.0.1、端口 3306；不建议填写服务器公网 IP，也不需要开放公网 3306。账号至少需要目标库的 SELECT 和 SHOW VIEW 权限。</p></template></div>
         <div v-else-if="connectMode==='http'" class="form-grid"><label><span>连接名称</span><input v-model="httpForm.name" placeholder="订单服务"></label><label class="span-2"><span>JSON 地址</span><input v-model="httpForm.url" placeholder="https://api.example.com/orders"></label><label class="span-2"><span>数据路径（可选）</span><input v-model="httpForm.json_path" placeholder="data.items"></label></div>
         <div v-else-if="connectMode==='sheets'" class="form-grid"><label><span>连接名称</span><input v-model="sheetForm.name"></label><label class="span-2"><span>公开 Google Sheets 链接或 ID</span><input v-model="sheetForm.url" placeholder="https://docs.google.com/spreadsheets/d/…"></label><label><span>工作表 GID</span><input v-model="sheetForm.gid"></label></div>
         <div v-else class="form-grid"><label><span>连接名称</span><input v-model="larkForm.name"></label><label><span>App ID</span><input v-model="larkForm.app_id"></label><label><span>App Secret</span><input type="password" v-model="larkForm.app_secret"></label><label><span>App Token</span><input v-model="larkForm.app_token"></label><label><span>Table ID</span><input v-model="larkForm.table_id"></label></div>
-        <template #footer><button class="button" @click="connectOpen=false">取消</button><button class="button button--primary" @click="connect">验证并连接</button></template>
+        <template #footer><button class="button" @click="closeConnect">取消</button><button class="button button--primary" @click="connect">验证并连接</button></template>
       </Modal>
     </section>`,
 };
