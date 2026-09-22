@@ -211,6 +211,26 @@ def test_knowledge_skill_memory_and_session(client):
     assert loaded.status_code == 200
 
 
+def test_knowledge_document_upload_accepts_chinese_txt_filename(client):
+    document = client.post(
+        "/api/knowledge/documents",
+        data={
+            "file": (
+                io.BytesIO("及格率指成绩达到 60 分及以上的学生占比。".encode("utf-8")),
+                "及格率解析.txt",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+    assert document.status_code == 201
+    item = document.get_json()["item"]
+    assert item["name"] == "及格率解析"
+    assert item["format"] == "txt"
+
+    results = client.post("/api/knowledge/search", json={"query": "及格率"}).get_json()["items"]
+    assert results and results[0]["document_name"] == "及格率解析"
+
+
 def test_hybrid_knowledge_file_skills_and_governed_memory(client):
     metric = client.post(
         "/api/knowledge/entries",

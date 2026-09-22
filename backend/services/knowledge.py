@@ -10,22 +10,45 @@ import pandas as pd
 from docx import Document
 from flask import current_app
 from werkzeug.datastructures import FileStorage
-from werkzeug.utils import secure_filename
 
 from ..core.database import Database
 
 
-TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".docx", ".xlsx", ".xls", ".pdf"}
+TEXT_EXTENSIONS = {
+    ".txt", ".text", ".md", ".markdown", ".csv", ".json", ".html", ".htm",
+    ".docx", ".xlsx", ".xls", ".pdf",
+}
+TEXT_EXTENSION_ALIASES = {".text": ".txt", ".markdown": ".md", ".htm": ".html"}
 
 
 def _db() -> Database:
     return current_app.extensions["meridian_db"]
 
 
+def _uploaded_basename(filename: str) -> str:
+    # Browsers normally send only the basename, but older clients may include
+    # Windows-style fake paths.  Normalize separators before taking the name.
+    return Path(str(filename or "").strip().replace("\\", "/")).name
+
+
+def _knowledge_suffix(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    return TEXT_EXTENSION_ALIASES.get(suffix, suffix)
+
+
+def _read_text(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _extract(path: Path) -> str:
-    suffix = path.suffix.lower()
+    suffix = _knowledge_suffix(path.name)
     if suffix in {".txt", ".md", ".html", ".json"}:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _read_text(path)
         return "\n".join(f"[line {index}] {line}" for index, line in enumerate(text.splitlines(), 1))
     if suffix == ".csv":
         try:
@@ -137,8 +160,8 @@ def _build_chunk_index(chunks: list[str], workspace_id: str = "default") -> list
 
 
 def add_document(file: FileStorage, workspace_id: str, tags: list[str] | None = None) -> dict:
-    filename = secure_filename(file.filename or "")
-    suffix = Path(filename).suffix.lower()
+    filename = _uploaded_basename(file.filename or "")
+    suffix = _knowledge_suffix(filename)
     if not filename or suffix not in TEXT_EXTENSIONS:
         raise ValueError("支持 TXT、Markdown、HTML、CSV、JSON、PDF、Word 和 Excel 文档")
     document_id = _db().new_id("doc")
@@ -158,7 +181,7 @@ def add_document(file: FileStorage, workspace_id: str, tags: list[str] | None = 
     record = _db().put(
         "knowledge_documents",
         {
-            "id": document_id, "workspace_id": workspace_id, "name": Path(filename).stem,
+            "id": document_id, "workspace_id": workspace_id, "name": Path(filename).stem or "知识文档",
             "filename": filename, "format": suffix.lstrip("."), "path": str(target), "text": text,
             "chunks": chunks, "chunk_index": _build_chunk_index(chunks, workspace_id), "tags": tags or [],
             "enabled": True, "characters": len(text), "chunk_count": len(chunks), "index_version": 2,
