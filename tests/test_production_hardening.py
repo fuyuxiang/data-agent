@@ -672,6 +672,10 @@ def test_mysql_driver_errors_are_actionable_without_connection_details():
         pass
 
     assert "认证失败" in _database_connection_error(DriverError(1045, "Access denied"), "mysql")
+    assert "root 账号认证失败" in _database_connection_error(
+        DriverError(1698, "Access denied for user 'root'@'localhost'"),
+        "mysql",
+    )
     assert "数据库不存在" in _database_connection_error(DriverError(1049, "Unknown database"), "mysql")
     assert "主机、端口" in _database_connection_error(DriverError(2003, "Can't connect"), "mysql")
 

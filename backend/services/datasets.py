@@ -422,7 +422,14 @@ def _database_connection_error(exc: Exception, backend: str) -> str:
         None,
     )
     if backend == "mysql":
-        if code == 1045:
+        message = " ".join(str(item) for item in arguments).lower()
+        if code in {1045, 1698}:
+            if "'root'" in message or '"root"' in message or "root@" in message:
+                return (
+                    "MySQL root 账号认证失败：当前服务器 root 通常使用系统 socket 认证，"
+                    "Web 应用不能通过 TCP 使用 root 空密码连接。请改用 dataagent 等业务账号，"
+                    "或为 root 单独配置 MySQL 密码、主机授权和最小化权限"
+                )
             return "MySQL 认证失败，请检查用户名、密码以及该账号允许登录的主机"
         if code == 1049:
             return "MySQL 数据库不存在，请检查数据库名称"
