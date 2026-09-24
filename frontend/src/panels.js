@@ -75,17 +75,29 @@ export const SourcesPanel = {
         this.ctx.toast('已加入演示数据、正式指标、业务知识和推荐问题，可直接进入智能分析', result.created.length ? '演示环境已就绪' : '演示环境已存在');
       }, false);
     },
+    normalizedDatabaseForm() {
+      const form = { ...this.dbForm };
+      form.host = String(form.host || '').trim();
+      form.username = String(form.username || '').trim();
+      form.database = String(form.database || '').trim();
+      if (form.driver === 'mysql' && form.host.toLowerCase() === 'localhost') form.host = '127.0.0.1';
+      const pastedPassword = String(form.password || '').trim();
+      const match = pastedPassword.match(/^(?:password|passwd|pwd|密码)\s*[:=]\s*(.+)$/i);
+      form.password = match ? match[1].trim() : pastedPassword;
+      return form;
+    },
     async connect() {
+      const databaseForm = this.connectMode === 'database' ? this.normalizedDatabaseForm() : null;
       if (this.connectMode === 'database') {
-        if (!this.dbForm.database.trim()) return this.ctx.fail(new Error(this.dbForm.driver === 'sqlite' ? '请输入 SQLite 文件路径' : '请输入数据库名称'));
-        if (this.dbForm.driver !== 'sqlite' && !this.dbForm.host.trim()) return this.ctx.fail(new Error('请输入数据库主机'));
-        if (this.dbForm.driver === 'mysql' && this.dbForm.username.trim().toLowerCase() === 'root' && !this.dbForm.password) {
+        if (!databaseForm.database) return this.ctx.fail(new Error(databaseForm.driver === 'sqlite' ? '请输入 SQLite 文件路径' : '请输入数据库名称'));
+        if (databaseForm.driver !== 'sqlite' && !databaseForm.host) return this.ctx.fail(new Error('请输入数据库主机'));
+        if (databaseForm.driver === 'mysql' && databaseForm.username.toLowerCase() === 'root' && !databaseForm.password) {
           return this.ctx.fail(new Error('当前服务器 MySQL 的 root 通常使用系统 socket 认证，应用无法通过 TCP 使用 root 空密码连接。请改用 dataagent 账号，或为 root 单独配置 MySQL 密码与授权。'));
         }
       }
       await this.ctx.run('正在验证数据连接', async () => {
         const paths = { database:'/api/sources/database', http:'/api/sources/http', sheets:'/api/sources/google-sheets', lark:'/api/sources/lark-table' };
-        const forms = { database:this.dbForm, http:this.httpForm, sheets:this.sheetForm, lark:this.larkForm };
+        const forms = { database:databaseForm, http:this.httpForm, sheets:this.sheetForm, lark:this.larkForm };
         const path = paths[this.connectMode];
         const form = forms[this.connectMode];
         const result = await api(path, { method: 'POST', body: { ...form, workspace_id: this.state.workspaceId } });
@@ -189,7 +201,7 @@ export const SourcesPanel = {
       </div>
       <Modal :key="'connect-modal-'+connectNonce" :open="connectOpen" title="连接外部数据" @close="closeConnect">
         <nav class="segmented"><button :class="{active:connectMode==='database'}" @click="connectMode='database'">SQL</button><button :class="{active:connectMode==='http'}" @click="connectMode='http'">HTTP</button><button :class="{active:connectMode==='sheets'}" @click="connectMode='sheets'">Sheets</button><button :class="{active:connectMode==='lark'}" @click="connectMode='lark'">飞书表格</button></nav>
-        <div v-if="connectMode==='database'" class="form-grid"><label><span>连接名称</span><input v-model="dbForm.name" placeholder="生产经营库"></label><label><span>数据库类型</span><select v-model="dbForm.driver" @change="syncDatabaseDefaults"><option value="sqlite">SQLite</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option></select></label><label class="span-2"><span>{{ dbForm.driver==='sqlite' ? 'SQLite 文件路径' : '数据库名称' }}</span><input v-model="dbForm.database" :placeholder="dbForm.driver==='sqlite' ? '例如 C:\\data\\sales.sqlite' : '例如 sales' "></label><template v-if="dbForm.driver!=='sqlite'"><label><span>主机</span><input v-model="dbForm.host" placeholder="127.0.0.1"></label><label><span>端口</span><input v-model="dbForm.port" inputmode="numeric"></label><label><span>用户名</span><input v-model="dbForm.username" autocomplete="username" :placeholder="dbForm.driver==='mysql' ? '推荐 dataagent，不建议 root' : ''"></label><label><span>密码</span><input v-model="dbForm.password" type="password" autocomplete="current-password"></label><label v-if="dbForm.driver==='mysql'"><span>SSL 模式</span><select v-model="dbForm.ssl_mode"><option value="preferred">优先使用（推荐）</option><option value="disabled">关闭（仅本地开发）</option><option value="required">必须使用</option><option value="verify-ca">验证 CA</option><option value="verify-identity">验证 CA 与主机名</option></select></label><p v-if="dbForm.driver==='mysql'" class="form-hint span-2">连接当前服务器上的 MySQL 时，主机填写 127.0.0.1、端口 3306，推荐使用 dataagent 这类业务账号；不要使用 root 空密码，root 在 Ubuntu MySQL 中通常只允许命令行 socket 登录。账号至少需要目标库的 SELECT 和 SHOW VIEW 权限。</p></template></div>
+        <div v-if="connectMode==='database'" class="form-grid"><label><span>连接名称</span><input v-model="dbForm.name" placeholder="生产经营库"></label><label><span>数据库类型</span><select v-model="dbForm.driver" @change="syncDatabaseDefaults"><option value="sqlite">SQLite</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option></select></label><label class="span-2"><span>{{ dbForm.driver==='sqlite' ? 'SQLite 文件路径' : '数据库名称' }}</span><input v-model="dbForm.database" :placeholder="dbForm.driver==='sqlite' ? '例如 C:\\data\\sales.sqlite' : '例如 sales' "></label><template v-if="dbForm.driver!=='sqlite'"><label><span>主机</span><input v-model="dbForm.host" placeholder="127.0.0.1"></label><label><span>端口</span><input v-model="dbForm.port" inputmode="numeric"></label><label><span>用户名</span><input v-model="dbForm.username" autocomplete="username" :placeholder="dbForm.driver==='mysql' ? '推荐 dataagent，不建议 root' : ''"></label><label><span>密码</span><input v-model="dbForm.password" type="password" autocomplete="current-password"></label><label v-if="dbForm.driver==='mysql'"><span>SSL 模式</span><select v-model="dbForm.ssl_mode"><option value="preferred">优先使用（推荐）</option><option value="disabled">关闭（仅本地开发）</option><option value="required">必须使用</option><option value="verify-ca">验证 CA</option><option value="verify-identity">验证 CA 与主机名</option></select></label><p v-if="dbForm.driver==='mysql'" class="form-hint span-2">连接当前服务器上的 MySQL 时，主机填写 127.0.0.1、端口 3306，推荐使用 dataagent 这类业务账号；从凭据文件复制密码时只需复制 password= 后面的内容，系统也会自动识别整行 password=xxx。账号至少需要目标库的 SELECT 和 SHOW VIEW 权限。</p></template></div>
         <div v-else-if="connectMode==='http'" class="form-grid"><label><span>连接名称</span><input v-model="httpForm.name" placeholder="订单服务"></label><label class="span-2"><span>JSON 地址</span><input v-model="httpForm.url" placeholder="https://api.example.com/orders"></label><label class="span-2"><span>数据路径（可选）</span><input v-model="httpForm.json_path" placeholder="data.items"></label></div>
         <div v-else-if="connectMode==='sheets'" class="form-grid"><label><span>连接名称</span><input v-model="sheetForm.name"></label><label class="span-2"><span>公开 Google Sheets 链接或 ID</span><input v-model="sheetForm.url" placeholder="https://docs.google.com/spreadsheets/d/…"></label><label><span>工作表 GID</span><input v-model="sheetForm.gid"></label></div>
         <div v-else class="form-grid"><label><span>连接名称</span><input v-model="larkForm.name"></label><label><span>App ID</span><input v-model="larkForm.app_id"></label><label><span>App Secret</span><input type="password" v-model="larkForm.app_secret"></label><label><span>App Token</span><input v-model="larkForm.app_token"></label><label><span>Table ID</span><input v-model="larkForm.table_id"></label></div>

@@ -396,15 +396,29 @@ def _build_database_url(config: dict, workspace_id: str) -> str:
     if driver == "sqlite":
         raw = URL.create("sqlite", database=str(config.get("database") or ""))
     elif driver in dialects:
+        password = _normalize_secret_value(config.get("password"))
         raw = URL.create(
             dialects[driver], username=str(config.get("username") or "") or None,
-            password=str(config.get("password") or "") or None, host=str(config.get("host") or ""),
+            password=password or None, host=str(config.get("host") or ""),
             port=int(config["port"]) if config.get("port") else None,
             database=str(config.get("database") or "") or None,
         )
     else:
         raise ValueError("数据库类型必须是 SQLite、PostgreSQL、MySQL 或 SQL Server")
     return _harden_database_url(raw, config, workspace_id)
+
+
+def _normalize_secret_value(value: Any) -> str:
+    """Accept passwords pasted from common key/value credential files.
+
+    Operators often copy a whole line such as ``password=xxxx`` from a server
+    credentials file.  Treat that as the intended password while still allowing
+    ordinary passwords to pass through unchanged.
+    """
+
+    secret = str(value or "").strip()
+    match = re.match(r"^(?:password|passwd|pwd|密码)\s*[:=]\s*(.+)$", secret, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else secret
 
 
 def _database_connection_error(exc: Exception, backend: str) -> str:

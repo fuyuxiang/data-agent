@@ -665,6 +665,19 @@ def test_mysql_uses_loopback_for_current_deployment_host(app, monkeypatch):
         assert mysql.host == "127.0.0.1"
 
 
+def test_database_password_accepts_pasted_key_value_secret(app, monkeypatch):
+    from backend.services import datasets
+
+    monkeypatch.setattr(datasets, "validate_outbound_host", lambda *_args, **_kwargs: ["127.0.0.1"])
+    with app.app_context():
+        mysql = make_url(datasets._build_database_url({
+            "driver": "mysql", "host": "localhost", "database": "student_db",
+            "username": "dataagent", "password": "password=actual-secret",
+        }, "default"))
+        assert mysql.host == "127.0.0.1"
+        assert mysql.password == "actual-secret"
+
+
 def test_mysql_driver_errors_are_actionable_without_connection_details():
     from backend.services.datasets import _database_connection_error
 
