@@ -115,6 +115,19 @@ def apply_source_set(set_id: str):
     return ok(session=session, item=item)
 
 
+def _remove_source_from_scopes(source_id: str, workspace_id: str) -> dict[str, int]:
+    counters = {"sessions": 0, "source_sets": 0, "business_spaces": 0}
+    for collection in counters:
+        for item in db().list(collection, workspace_id=workspace_id, limit=5000):
+            source_ids = [str(value) for value in item.get("source_ids") or []]
+            if source_id not in source_ids:
+                continue
+            next_ids = [value for value in source_ids if value != source_id]
+            db().patch(collection, item["id"], {"source_ids": next_ids}, workspace_id=workspace_id)
+            counters[collection] += 1
+    return counters
+
+
 @bp.delete("/api/source-sets/<set_id>")
 @api_errors
 def archive_source_set(set_id: str):
@@ -244,10 +257,11 @@ def update_source(source_id: str):
 @bp.delete("/api/sources/<source_id>")
 @api_errors
 def archive_source(source_id: str):
-    require_source_access(source_id, action="delete")
+    source = require_source_access(source_id, action="delete")
     if not db().archive("sources", source_id):
         raise FileNotFoundError("数据源不存在")
-    return ok(archived=True)
+    cleaned = _remove_source_from_scopes(source_id, source["workspace_id"])
+    return ok(archived=True, cleaned=cleaned)
 
 
 @bp.post("/api/sources/<source_id>/refresh")

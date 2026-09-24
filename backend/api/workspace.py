@@ -35,6 +35,29 @@ from .common import (
 bp = Blueprint("workspace", __name__)
 
 
+def _validated_session_source_ids(values, wid: str) -> list[str]:
+    """Return de-duplicated source ids that still exist and are accessible.
+
+    Browser state can legitimately contain stale ids after a source has been
+    archived in another tab or by an older build. Missing ids carry no access
+    control meaning, so prune them. Existing but unauthorized ids still go
+    through the normal permission check and are rejected.
+    """
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        source_id = str(value)
+        if not source_id or source_id in seen:
+            continue
+        if not db().get("sources", source_id, workspace_id=wid):
+            continue
+        require_source_access(source_id, wid)
+        result.append(source_id)
+        seen.add(source_id)
+    return result
+
+
 @bp.get("/api/bootstrap")
 def bootstrap():
     wid = workspace_id()
@@ -524,7 +547,7 @@ def create_session():
     wid = workspace_id()
     payload = body()
     business_space_id = str(payload.get("business_space_id") or "") or None
-    source_ids = [str(value) for value in payload.get("source_ids", [])]
+    source_ids = _validated_session_source_ids(payload.get("source_ids", []), wid)
     if business_space_id:
         space = require_workspace_record("business_spaces", business_space_id, wid)
         membership = workspace_membership(wid) or {}
@@ -534,8 +557,6 @@ def create_session():
         ):
             raise FileNotFoundError("业务数据空间不存在")
         source_ids = [str(value) for value in space.get("source_ids") or []]
-    for source_id in source_ids:
-        require_source_access(source_id, wid)
     provider_id = payload.get("provider_id")
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
@@ -582,9 +603,9 @@ def update_session(session_id: str):
     if {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
         require_workspace_access(current["workspace_id"], owner=True)
     if "source_ids" in allowed:
-        allowed["source_ids"] = [str(value) for value in allowed["source_ids"]]
-        for source_id in allowed["source_ids"]:
-            require_source_access(source_id, current["workspace_id"])
+        allowed["source_ids"] = _validated_session_source_ids(
+            allowed["source_ids"], current["workspace_id"],
+        )
     if "business_space_id" in allowed:
         space_id = str(allowed.get("business_space_id") or "") or None
         if space_id:

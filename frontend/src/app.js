@@ -40,6 +40,12 @@ const Root = {
       finally { state.busy = false; state.busyLabel = ''; }
     };
     const activeSession = () => state.sessions.find(item => item.id === state.activeSessionId) || null;
+    const pruneSessionSourceIds = (sessions = state.sessions, sources = state.sources) => {
+      const visibleSourceIds = new Set((sources || []).map(item => String(item.id)));
+      (sessions || []).forEach(session => {
+        session.source_ids = [...new Set((session.source_ids || []).map(String).filter(id => visibleSourceIds.has(id)))];
+      });
+    };
     const selectedSources = () => { const ids = new Set(activeSession()?.source_ids || []); return state.sources.filter(item => ids.has(item.id)); };
     const time = (value) => {
       if (!value) return '';
@@ -66,6 +72,7 @@ const Root = {
         state.workspaces = data.workspaces; state.workspaceId = data.active_workspace?.id || 'default';
         state.workspaceRole = data.active_membership?.role || (!state.user ? 'owner' : '');
         state.sessions = data.sessions; state.sources = data.sources; state.providers = data.providers;
+        pruneSessionSourceIds();
         state.activeSessionId = data.active_session?.id || data.sessions[0]?.id || '';
         state.commands = commands.items;
         const canAdmin = ['owner','editor'].includes(state.workspaceRole);
@@ -138,7 +145,8 @@ const Root = {
     };
     const newSession = async (name = '新分析') => {
       const previous = activeSession();
-      const inheritedSourceIds = [...(previous?.source_ids || [])];
+      const visibleSourceIds = new Set(state.sources.map(item => String(item.id)));
+      const inheritedSourceIds = [...(previous?.source_ids || [])].map(String).filter(id => visibleSourceIds.has(id));
       const result = await api('/api/sessions', { method:'POST', body:{
         name, workspace_id:state.workspaceId, source_ids:inheritedSourceIds,
       } });
@@ -172,7 +180,7 @@ const Root = {
       state.commandQuery=name;state.commandOpen=true;
     };
     const toggleTheme = () => { state.theme=state.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=state.theme;localStorage.setItem('meridian-theme',state.theme); };
-    const ctx = { state, toast, fail, run, activeSession, selectedSources, time, number, go, command, bootstrap, newSession, startAnalysis, openAnalysis };
+    const ctx = { state, toast, fail, run, activeSession, selectedSources, pruneSessionSourceIds, time, number, go, command, bootstrap, newSession, startAnalysis, openAnalysis };
 
     const keydown = (event) => {
       if ((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k') { event.preventDefault();state.commandOpen=true; }

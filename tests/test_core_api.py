@@ -36,6 +36,39 @@ def test_analysis_session_can_be_renamed_and_archived(client):
     assert client.get(f"/api/sessions/{session_id}").status_code == 404
 
 
+def test_session_source_scope_prunes_missing_sources(client, source):
+    created = client.post(
+        "/api/sessions",
+        json={"name": "范围清理", "source_ids": ["src_missing_history", source["id"]]},
+    )
+    assert created.status_code == 201
+    session = created.get_json()["item"]
+    assert session["source_ids"] == [source["id"]]
+
+    patched = client.patch(
+        f"/api/sessions/{session['id']}",
+        json={"source_ids": ["src_deleted_in_other_tab", source["id"]]},
+    )
+    assert patched.status_code == 200
+    assert patched.get_json()["item"]["source_ids"] == [source["id"]]
+
+
+def test_archiving_source_removes_it_from_session_scope(client, source):
+    created = client.post(
+        "/api/sessions",
+        json={"name": "待清理范围", "source_ids": [source["id"]]},
+    )
+    assert created.status_code == 201
+    session_id = created.get_json()["item"]["id"]
+
+    archived = client.delete(f"/api/sources/{source['id']}")
+    assert archived.status_code == 200
+    assert archived.get_json()["cleaned"]["sessions"] >= 1
+
+    session = client.get(f"/api/sessions/{session_id}").get_json()["item"]
+    assert session["source_ids"] == []
+
+
 def test_source_query_profile_clean_and_guard(client, source):
     source_id = source["id"]
     assert client.get(f"/api/sources/{source_id}/schema").status_code == 200

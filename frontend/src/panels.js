@@ -49,7 +49,11 @@ export const SourcesPanel = {
     async attachToCurrentSession(sources) {
       const session = this.ctx.activeSession();
       if (!session || !sources?.length) return;
-      const sourceIds = [...new Set([...(session.source_ids || []), ...sources.map(item => item.id)])];
+      const knownSourceIds = new Set([...this.state.sources, ...sources].map(item => String(item.id)));
+      const sourceIds = [...new Set([
+        ...(session.source_ids || []).map(String).filter(id => knownSourceIds.has(id)),
+        ...sources.map(item => String(item.id)),
+      ])];
       const response = await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: { source_ids: sourceIds } });
       Object.assign(session, response.item);
     },
@@ -142,7 +146,9 @@ export const SourcesPanel = {
     },
     async toggleUse(source) {
       const session = this.ctx.activeSession(); if (!session) return;
-      const ids = new Set(session.source_ids || []); ids.has(source.id) ? ids.delete(source.id) : ids.add(source.id);
+      const knownSourceIds = new Set(this.state.sources.map(item => String(item.id)));
+      const ids = new Set((session.source_ids || []).map(String).filter(id => knownSourceIds.has(id)));
+      ids.has(source.id) ? ids.delete(source.id) : ids.add(source.id);
       try {
         const response = await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: { source_ids: [...ids] } });
         Object.assign(session, response.item);
@@ -169,6 +175,7 @@ export const SourcesPanel = {
     async remove(source) {
       if (!confirm(`归档数据源“${source.name}”？原始记录可从回收站恢复。`)) return;
       await api(`/api/sources/${source.id}`, { method: 'DELETE' }); this.state.sources = this.state.sources.filter(item => item.id !== source.id); if (this.activeId === source.id) this.activeId = '';
+      this.ctx.pruneSessionSourceIds?.();
     },
   },
   template: `

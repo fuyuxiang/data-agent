@@ -223,7 +223,8 @@ export const AnalysisPanel = {
     },
     async toggleSource(source) {
       if (!this.session) return;
-      const ids = new Set(this.session.source_ids || []);
+      const knownSourceIds = new Set(this.state.sources.map(item => String(item.id)));
+      const ids = new Set((this.session.source_ids || []).map(String).filter(id => knownSourceIds.has(id)));
       ids.has(source.id) ? ids.delete(source.id) : ids.add(source.id);
       try {
         const response = await api(`/api/sessions/${this.session.id}`, {
