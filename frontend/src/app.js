@@ -205,14 +205,14 @@ const Root = {
     <main v-else-if="state.authRequired" class="auth-screen portal-screen">
       <section class="portal-shell">
         <div class="portal-hero">
-          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>职业教育数据智能分析平台</small></div></header>
-          <p class="portal-eyebrow">国家职业技能大赛 · 新一代信息技术赛道展示</p>
-          <h1>让教育数据从采集到决策<br>全程可信、可追溯、可交付</h1>
-          <p class="portal-summary">面向成绩分析、课程评价与就业质量分析，统一数据资产、指标口径、业务知识和智能分析流程，让每一个结论都有证据链支撑。</p>
+          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>教育数据智能分析平台</small></div></header>
+          <p class="portal-eyebrow">EDU DATA INTELLIGENCE PLATFORM</p>
+          <h1>统一数据、知识与指标<br>构建可信分析闭环</h1>
+          <p class="portal-summary">面向成绩分析、课程评价与就业质量分析，统一数据资产、指标口径、业务知识和智能分析流程，让结论可核验、过程可追踪、成果可交付。</p>
           <div class="portal-workflow">
             <span><i>01</i><b>多源数据接入</b></span>
             <span><i>02</i><b>指标口径治理</b></span>
-            <span><i>03</i><b>Agent 可信分析</b></span>
+            <span><i>03</i><b>智能分析执行</b></span>
             <span><i>04</i><b>报告成果交付</b></span>
           </div>
           <div class="portal-metrics">
@@ -227,15 +227,15 @@ const Root = {
         <form class="auth-panel portal-login" @submit.prevent="submitAuth">
           <div class="login-product-mark"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><b>数擎</b></div>
           <div class="login-heading">
-            <span>Secure Access</span>
-            <h2>进入路演演示环境</h2>
-            <p>请输入授权账号，开始展示教育数据智能体的完整分析闭环。</p>
+            <span>Secure Workspace</span>
+            <h2>登录数擎平台</h2>
+            <p>请输入授权账号，进入受控、安全、可审计的数据智能分析工作空间。</p>
           </div>
           <label><span>用户名</span><input v-model.trim="state.auth.username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
           <label><span>密码</span><input v-model="state.auth.password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
           <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
           <button class="button button--primary portal-submit" type="submit">进入数擎平台</button>
-          <div class="portal-login-assurance"><span>受控数据访问</span><span>可验证分析结论</span><span>面向现场汇报</span></div>
+          <div class="portal-login-assurance"><span>受控数据访问</span><span>可验证分析结论</span><span>全流程审计留痕</span></div>
           <p class="portal-login-note">登录后可使用智能分析、数据资产、指标中心、知识库和系统管理功能。</p>
         </form>
       </section>
