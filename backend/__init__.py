@@ -226,6 +226,19 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"ok": False, "error": "无权访问该工作空间"}), 403
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and membership.get("role") == "viewer":
             return jsonify({"ok": False, "error": "当前成员只有只读权限"}), 403
+        governance_write_prefixes = (
+            "/api/sources", "/api/source-sets", "/api/semantic/models",
+            "/api/semantic/metrics", "/api/knowledge/", "/api/demo/seed",
+            "/api/memories", "/api/workspaces/",
+        )
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and membership.get("role") == "analyst"
+            and request.path.startswith(governance_write_prefixes)
+            and request.path != "/api/knowledge/search"
+            and not (request.path.startswith("/api/workspaces/") and request.path.endswith("/activate"))
+        ):
+            return jsonify({"ok": False, "error": "数据与知识治理操作仅限工作空间管理员"}), 403
         owner_only_prefixes = (
             "/api/providers", "/api/models", "/api/mcp", "/api/connectors",
             "/api/compute", "/api/system/", "/api/hooks",

@@ -82,6 +82,11 @@ def _evidence_cells(
         path = Path(str(result.get("path") or ""))
         frame = pd.read_csv(path) if path.is_file() else pd.DataFrame(result.get("data") or [])
         for row_index, row in frame.iterrows():
+            row_labels = [
+                str(value).strip() for value in row.values
+                if isinstance(value, str) and 0 < len(value.strip()) <= 120
+                and not value.strip().replace(".", "", 1).isdigit()
+            ]
             for column, value in row.items():
                 if len(cells) >= max_cells:
                     return cells
@@ -95,6 +100,7 @@ def _evidence_cells(
                     "ref": f"{result['id']}[row={int(row_index)},column={column}]",
                     "result_id": result["id"], "row": int(row_index),
                     "column": str(column), "value": numeric,
+                    "row_labels": row_labels,
                     "semantic_query": result.get("semantic_query"),
                 })
     return cells
@@ -150,11 +156,27 @@ def _build_claims(
     claims = []
     for text in _claim_sentences(answer):
         numbers = _claim_numbers(text)
+        normalized_text = text.casefold()
+        mentioned_labels = {
+            label.casefold() for cell in cells for label in cell["row_labels"]
+            if label.casefold() in normalized_text
+        }
+        mentioned_columns = {
+            cell["column"] for cell in cells
+            if cell["column"].casefold() in normalized_text
+        }
         matched = []
         matched_definitions = []
         unmatched = []
         for number in numbers:
-            found = next((cell for cell in cells if _numbers_match(number, cell["value"])), None)
+            found = next((
+                cell for cell in cells
+                if _numbers_match(number, cell["value"])
+                and (not mentioned_labels or mentioned_labels.intersection(
+                    label.casefold() for label in cell["row_labels"]
+                ))
+                and (not mentioned_columns or cell["column"] in mentioned_columns)
+            ), None)
             if found:
                 matched.append({"number": number["text"], **found})
             elif any(_definition_number_matches(number, item) for item in definition_numbers):
@@ -170,7 +192,7 @@ def _build_claims(
             "definition_refs": semantic_refs, "definition_numbers": matched_definitions,
             "numbers": numbers,
             "unmatched_numbers": unmatched,
-            "numeric_replay": "PASS" if not unmatched else "FAIL",
+            "numeric_replay": "FAIL" if unmatched else "PASS" if numbers else "NOT_EVALUATED",
         })
     return claims
 
@@ -208,16 +230,16 @@ class ResultService:
                 "PASS" if ctx["complete"] else "UNKNOWN", "结果范围完整" if ctx["complete"] else "结果完整性未知或部分",
             )),
             Rule("claim_provenance", "1", "expression", "blocking", 3, lambda ctx: outcome(
-                "PASS" if ctx["refs"] else "FAIL", "结论绑定了证据引用" if ctx["refs"] else "结论没有证据引用",
+                "PASS" if ctx["refs"] else "FAIL", "回答关联了数据结果；逐句解释仍需人工判断" if ctx["refs"] else "回答没有数据结果引用",
             )),
             Rule("independent_validation", "1", "execution", "blocking", 3, lambda ctx: outcome(
                 "PASS" if ctx["validated"] else "FAIL",
                 "已执行独立结果验证" if ctx["validated"] else "未执行或未通过独立结果验证",
             )),
             Rule("numeric_claim_replay", "1", "expression", "blocking", 3, lambda ctx: outcome(
-                "PASS" if all(item["numeric_replay"] == "PASS" for item in ctx["claims"]) else "FAIL",
-                "回答中的数字均可从证据单元格复算"
-                if all(item["numeric_replay"] == "PASS" for item in ctx["claims"])
+                "PASS" if all(item["numeric_replay"] != "FAIL" for item in ctx["claims"]) else "FAIL",
+                "显式数字可在证据单元格中找到；业务解释仍需人工判断"
+                if all(item["numeric_replay"] != "FAIL" for item in ctx["claims"])
                 else "回答包含无法从证据单元格核对的数字",
                 unmatched=[
                     {"claim": item["text"], "numbers": item["unmatched_numbers"]}

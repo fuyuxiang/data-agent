@@ -106,13 +106,13 @@ def ensure_portal_admin(database: Database, *, production: bool = False) -> dict
     existing = database.list("users", include_archived=True, limit=1)
     if existing:
         return {"created": False, "user_id": existing[0]["id"]}
-    if os.getenv("MERIDIAN_PORTAL_AUTO_ADMIN", "1") == "0":
+    if os.getenv("MERIDIAN_PORTAL_AUTO_ADMIN", "0") != "1":
         return {"created": False, "disabled": True}
     configured_password = os.getenv("MERIDIAN_PORTAL_ADMIN_PASSWORD", "").strip()
-    if production and not configured_password:
-        raise RuntimeError("生产环境必须配置 MERIDIAN_PORTAL_ADMIN_PASSWORD 后才能初始化门户管理员")
+    if not configured_password:
+        raise RuntimeError("启用 MERIDIAN_PORTAL_AUTO_ADMIN 时必须配置独立的管理员密码")
     username = _normal_username(os.getenv("MERIDIAN_PORTAL_ADMIN_USERNAME", "admin")) or "admin"
-    password = configured_password or "DataAgent@2026!"
+    password = configured_password
     if len(password) < MIN_PASSWORD_LENGTH:
         raise RuntimeError(f"MERIDIAN_PORTAL_ADMIN_PASSWORD 至少需要 {MIN_PASSWORD_LENGTH} 位")
     email = str(
@@ -176,6 +176,13 @@ def _registration_open() -> bool:
         not db().list("users", include_archived=True, limit=1)
         or current_app.config.get("TESTING")
         or os.getenv("MERIDIAN_ALLOW_SELF_REGISTRATION", "0") == "1"
+    )
+
+
+def _email_code_required() -> bool:
+    return bool(
+        os.getenv("RAILWAY_PROJECT_ID") or os.getenv("VERCEL") == "1"
+        or os.getenv("MERIDIAN_REQUIRE_EMAIL_CODE") == "1"
     )
 
 
@@ -319,11 +326,7 @@ def register():
             raise FileNotFoundError("邀请的工作空间不存在")
     if not _registration_open() and not invitation:
         raise PermissionError("当前实例未开放自助注册，请联系系统所有者添加成员")
-    require_code = bool(
-        os.getenv("RAILWAY_PROJECT_ID") or os.getenv("VERCEL") == "1"
-        or os.getenv("MERIDIAN_REQUIRE_EMAIL_CODE") == "1"
-    )
-    if require_code:
+    if _email_code_required():
         code = str(payload.get("code") or "").strip()
         _verify_email_code(email, code)
     if "@" not in email or len(password) < MIN_PASSWORD_LENGTH:
@@ -470,6 +473,7 @@ def me():
         return ok(
             user=None, local_mode=local_mode, authenticated=False,
             registration_open=_registration_open(), csrf_token="",
+            email_code_required=_email_code_required(),
             bootstrap_required=bool(
                 first_user and current_app.config["SETTINGS"].environment == "production"
             ),
@@ -478,5 +482,6 @@ def me():
     return ok(
         user=_public(user), local_mode=False, authenticated=True,
         registration_open=_registration_open(), csrf_token=str(session.get("csrf_token") or ""),
+        email_code_required=_email_code_required(),
         quota=quota_status(db(), wid),
     )

@@ -75,7 +75,7 @@ python -m pip install --require-hashes -r requirements.lock
 python app.py
 ```
 
-启动后默认监听 `0.0.0.0:5001`，本机访问 <http://127.0.0.1:5001>；局域网其他电脑可使用 `http://本机IP:5001` 访问。开发环境中，全新实例默认进入无账号的本地模式；生产环境会要求先创建第一位系统所有者，密码至少 12 位。
+启动后默认仅监听 `127.0.0.1:5001`，本机访问 <http://127.0.0.1:5001>。如需供局域网访问，应自行设置 `MERIDIAN_HOST=0.0.0.0`，并配置网络访问控制。开发环境中，全新实例默认进入无账号的本地模式；生产环境会要求先创建第一位系统所有者，密码至少 12 位。
 
 Windows 也可以直接使用项目根目录的脚本启动，不依赖 `.exe` 打包产物：
 
@@ -83,7 +83,7 @@ Windows 也可以直接使用项目根目录的脚本启动，不依赖 `.exe` �
 .\start-dataagent.bat
 ```
 
-脚本会自动创建 `.venv`、安装 Python 依赖、检查或构建前端资源，并默认监听 `0.0.0.0:5001`；如果端口已被占用，会自动选择一个可用端口。需要指定端口时可执行：
+脚本会自动创建 `.venv`、安装 Python 依赖、检查或构建前端资源，并默认监听 `127.0.0.1:5001`；如果端口已被占用，会自动选择一个可用端口。需要指定端口时可执行：
 
 ```powershell
 .\start-dataagent.bat -Port 5010
@@ -135,7 +135,7 @@ flowchart TB
 - **API 与运行时：** Flask + Waitress；正式分析由独立 Run/Contract/Plan/Action/Event API 驱动，SSE 可重连补事件。
 - **数据与计算：** pandas、DuckDB、SQLAlchemy、SciPy、scikit-learn、statsmodels、pmdarima；PyTorch 为可选能力。
 - **元数据库：** 单机 SQLite WAL，保存用户、工作空间、会话、配置、任务、血缘和审计记录。
-- **交付：** openpyxl、python-docx、python-pptx 与自包含 HTML 看板。
+- **交付：** openpyxl、python-docx、python-pptx，以及经核验结果的图表图片。
 
 ### 核心目录
 
@@ -170,7 +170,7 @@ flowchart TB
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MERIDIAN_ENV` | `development` | `development` / `production` / `test` |
-| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `0.0.0.0` / `5001` | HTTP 监听地址与端口 |
+| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `127.0.0.1` / `5001` | HTTP 监听地址与端口；容器内由 Compose 显式监听所有接口 |
 | `MERIDIAN_STORAGE_DIR` | `./storage` | SQLite、上传文件、知识、交付物和回收站根目录 |
 | `MERIDIAN_SECRET_KEY` | 开发环境自动生成 | 会话签名密钥；生产环境至少 32 字符 |
 | `MERIDIAN_ENCRYPTION_KEY` | 开发环境复用会话密钥 | 外部凭据静态加密密钥；生产必须独立持久化 |
@@ -341,7 +341,7 @@ python scripts/verify_advanced_agent.py --profile release
 - **数据不覆盖：** 清洗结果作为新派生数据集保存；常规删除进入可恢复的归档/回收站，永久删除需显式确认。
 - **秘密保护：** 模型、数据源、MCP 和通知凭据使用应用主密钥加密落库，API 只返回脱敏状态。
 - **出站防护：** 外部 HTTP 请求校验 scheme、域名白名单和解析后 IP，默认禁止本机、内网、链路本地与保留地址，并限制重定向和响应体大小。
-- **身份与隔离：** 生产环境强制登录，首位所有者需初始化令牌；工作空间角色、数据源成员白名单和私有会话所有权同时生效，且结果、看板、任务、快照与导出会重新检查当前数据授权；写请求受 Origin 和 CSRF 校验保护。
+- **身份与隔离：** 生产环境强制登录，首位所有者需初始化令牌；工作空间角色、数据源成员白名单和私有会话所有权同时生效，且结果、任务、快照与导出会重新检查当前数据授权；写请求受 Origin 和 CSRF 校验保护。
 - **受控执行：** stdio MCP 默认关闭；Agent 不具备宿主写改删、Shell/Git、自改 Hook 或任意远程代码能力；Docker sandbox 缺失时 fail closed。
 - **可追溯：** 查询、分析、工具调用、工作流、快照恢复和交付动作保留审计证据。
 

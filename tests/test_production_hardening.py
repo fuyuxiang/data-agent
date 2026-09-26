@@ -417,6 +417,12 @@ def test_production_first_owner_requires_bootstrap_token(monkeypatch, tmp_path):
         "STORAGE_DIR": tmp_path / "storage",
     })
     client = application.test_client()
+    monkeypatch.setenv("MERIDIAN_REQUIRE_EMAIL_CODE", "1")
+    identity = client.get("/api/auth/me").get_json()
+    assert identity["bootstrap_required"] is True
+    assert identity["local_mode"] is False
+    assert identity["email_code_required"] is True
+    monkeypatch.delenv("MERIDIAN_REQUIRE_EMAIL_CODE")
     payload = {
         "email": "production-owner@example.com", "password": "correct-horse",
         "name": "Production Owner",
@@ -427,6 +433,20 @@ def test_production_first_owner_requires_bootstrap_token(monkeypatch, tmp_path):
         "/api/auth/register", json={**payload, "bootstrap_token": token},
     )
     assert created.status_code == 201
+
+
+def test_portal_admin_requires_explicit_opt_in_and_password(app, monkeypatch):
+    from backend.api.identity import ensure_portal_admin
+
+    database = app.extensions["meridian_db"]
+    monkeypatch.delenv("MERIDIAN_PORTAL_AUTO_ADMIN", raising=False)
+    assert ensure_portal_admin(database)["disabled"] is True
+    assert database.list("users") == []
+
+    monkeypatch.setenv("MERIDIAN_PORTAL_AUTO_ADMIN", "1")
+    monkeypatch.delenv("MERIDIAN_PORTAL_ADMIN_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="管理员密码"):
+        ensure_portal_admin(database)
 
 
 def test_invalid_compressed_upload_is_a_client_error(client):

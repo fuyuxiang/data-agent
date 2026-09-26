@@ -2008,6 +2008,12 @@ body { font-size:14px;letter-spacing:0; }
   -webkit-line-clamp:3;
   -webkit-box-orient:vertical;
 }
+.structured-entry-card__actions {
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+}
 .structured-entry-card .switch {
   margin-top:3px;
   justify-self:end;
@@ -2032,6 +2038,9 @@ body { font-size:14px;letter-spacing:0; }
 @media (max-width:640px) {
   .structured-entry-card {
     grid-template-columns:minmax(0,1fr);
+  }
+  .structured-entry-card__actions {
+    justify-content:flex-start;
   }
   .structured-entry-card .switch {
     justify-self:start;
@@ -3103,6 +3112,7 @@ body { font-size:14px;letter-spacing:0; }
   font-size: .78rem;
   font-weight: 750;
 }
+.auth-notice { margin:0; padding:10px 12px; border:1px solid rgba(16,185,129,.26); border-radius:12px; background:rgba(209,250,229,.7); color:#047857; font-size:.78rem; }
 
 @media (max-width: 1080px) {
   .portal-shell {
@@ -3411,3 +3421,15 @@ body { font-size:14px;letter-spacing:0; }
 :root[data-theme="dark"] .version-badge {
   background:var(--primary-soft);
 }
+.analysis-run-history { display:flex; align-items:center; gap:8px; overflow-x:auto; margin:0 0 20px; padding:10px 0; border-bottom:1px solid var(--line); }
+.analysis-run-history > b { flex:none; color:var(--muted); font-size:.75rem; }
+.analysis-run-history button { flex:none; max-width:220px; overflow:hidden; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink-2); text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+.analysis-run-history button.active { border-color:var(--primary); color:var(--primary); background:var(--surface-2); }
+.analysis-run-history button small { display:block; margin-top:3px; color:var(--muted); font-size:.66rem; }
+.composer-source-picker { position:static; width:100%; max-height:240px; overflow:auto; box-shadow:none; border:0; border-bottom:1px solid var(--line); border-radius:0; }
+.semantic-field-list { display:grid; gap:6px; max-height:280px; overflow:auto; margin-top:8px; }
+.semantic-field-row { display:grid; grid-template-columns:minmax(110px,1fr) 80px 100px 110px; align-items:center; gap:8px; padding:7px 9px; border:1px solid var(--line); border-radius:7px; }
+.semantic-field-row b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.semantic-field-row small { color:var(--muted); }
+.semantic-field-row select { min-width:0; }
+@media (max-width:700px) { .semantic-field-row { grid-template-columns:minmax(100px,1fr) 1fr; } }

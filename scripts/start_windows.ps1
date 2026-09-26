@@ -1,5 +1,5 @@
 param(
-  [string]$HostName = "0.0.0.0",
+  [string]$HostName = "127.0.0.1",
   [int]$Port = 5001,
   [switch]$NoBrowser,
   [switch]$SkipInstall,

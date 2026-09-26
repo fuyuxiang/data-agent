@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -98,29 +99,48 @@ class StdioTransport(Transport):
         # secrets into an optional third-party MCP subprocess.
         self.environment = {**inherited, **{str(key): str(value) for key, value in environment.items()}}
         self.process: asyncio.subprocess.Process | None = None
+        self.windows_process: subprocess.Popen[bytes] | None = None
         self.request_id = 0
         self.lock = asyncio.Lock()
 
     async def connect(self) -> dict:
-        self.process = await asyncio.create_subprocess_exec(
-            self.command, *self.arguments,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self.environment,
-        )
+        if os.name == "nt":
+            # asyncio's Windows pipe transport requires named-pipe permissions
+            # that restricted desktop hosts may not grant. Anonymous pipes work.
+            self.windows_process = subprocess.Popen(
+                [self.command, *self.arguments], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.environment,
+            )
+        else:
+            self.process = await asyncio.create_subprocess_exec(
+                self.command, *self.arguments,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env=self.environment,
+            )
         result = await self.request("initialize", _initialize_params())
         await self._notification("notifications/initialized", {})
         return result if isinstance(result, dict) else {}
 
     async def _notification(self, method: str, params: dict) -> None:
+        message = json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False) + "\n"
+        if self.windows_process:
+            await asyncio.to_thread(self._write_windows, message)
+            return
         if not self.process or not self.process.stdin:
             raise ConnectionError("MCP stdio 进程未运行")
-        message = json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False) + "\n"
         self.process.stdin.write(message.encode())
         await self.process.stdin.drain()
 
+    def _write_windows(self, message: str) -> None:
+        process = self.windows_process
+        if not process or not process.stdin or process.poll() is not None:
+            raise ConnectionError("MCP stdio 进程未运行")
+        process.stdin.write(message.encode())
+        process.stdin.flush()
+
     async def request(self, method: str, params: dict) -> Any:
         async with self.lock:
-            if not self.process or not self.process.stdin or not self.process.stdout:
+            if not self.windows_process and (not self.process or not self.process.stdin or not self.process.stdout):
                 raise ConnectionError("MCP stdio 进程未运行")
             self.request_id += 1
             request_id = self.request_id
@@ -128,13 +148,28 @@ class StdioTransport(Transport):
                 {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
                 ensure_ascii=False,
             ) + "\n"
-            self.process.stdin.write(message.encode())
-            await self.process.stdin.drain()
+            if self.windows_process:
+                await asyncio.to_thread(self._write_windows, message)
+            else:
+                self.process.stdin.write(message.encode())
+                await self.process.stdin.drain()
             while True:
-                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=30)
+                if self.windows_process:
+                    line = await asyncio.wait_for(
+                        asyncio.to_thread(self.windows_process.stdout.readline), timeout=30,
+                    )
+                else:
+                    line = await asyncio.wait_for(self.process.stdout.readline(), timeout=30)
                 if not line:
                     stderr = ""
-                    if self.process.stderr:
+                    if self.windows_process and self.windows_process.stderr:
+                        try:
+                            stderr = (await asyncio.wait_for(
+                                asyncio.to_thread(self.windows_process.stderr.read), timeout=0.2,
+                            )).decode("utf-8", errors="replace")[-1000:]
+                        except (asyncio.TimeoutError, RuntimeError):
+                            pass
+                    elif self.process and self.process.stderr:
                         try:
                             stderr = (await asyncio.wait_for(self.process.stderr.read(), timeout=0.2)).decode(
                                 "utf-8", errors="replace",
@@ -154,6 +189,18 @@ class StdioTransport(Transport):
                 return response.get("result")
 
     async def close(self) -> None:
+        if self.windows_process:
+            process = self.windows_process
+            try:
+                if process.stdin:
+                    process.stdin.close()
+                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=3)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                process.kill()
+                await asyncio.to_thread(process.wait)
+            finally:
+                self.windows_process = None
+            return
         if not self.process:
             return
         try:

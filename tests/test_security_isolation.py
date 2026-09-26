@@ -68,6 +68,15 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
             "measures": [{"name": "value", "column": "value", "aggregation": "sum"}],
         },
     ).status_code == 403
+    assert member.post(
+        "/api/sources/upload",
+        data={"file": (io.BytesIO(b"name,value\nC,3\n"), "analyst.csv")},
+        content_type="multipart/form-data",
+    ).status_code == 403
+    assert member.post(
+        "/api/knowledge/entries",
+        json={"name": "Analyst rule", "type": "business_rule", "content": "unauthorized"},
+    ).status_code == 403
 
     promoted = owner.patch(
         f"/api/workspaces/{workspace['id']}/members/{user_id}", json={"role": "editor"},
@@ -107,10 +116,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert member.patch(
         f"/api/semantic/models/{model['id']}", json={"description": "unauthorized change"},
     ).status_code == 403
-    dashboard = member.post(
-        "/api/dashboards",
-        json={"name": "成员看板", "widgets": [{"id": "w1", "result_id": result_id}]},
-    ).get_json()["item"]
     artifact = member.post(
         "/api/exports/data", json={"result_id": result_id, "format": "csv"},
     ).get_json()["artifact"]
@@ -137,10 +142,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
         "/api/analysis/run", json={"source_id": source["id"], "method": "profile"},
     ).status_code == 403
     assert member.get(f"/api/query-results/{query.get_json()['result']['id']}").status_code == 403
-    assert member.get(f"/api/dashboards/{dashboard['id']}").status_code == 403
-    assert dashboard["id"] not in {
-        item["id"] for item in member.get("/api/dashboards").get_json()["items"]
-    }
     assert member.get(f"/api/artifacts/{artifact['id']}/download").status_code == 403
 
     derived = owner.post(

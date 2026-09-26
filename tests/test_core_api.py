@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 
 import pandas as pd
+from docx import Document
+from pptx import Presentation
 
 
 def test_bootstrap_and_capability_catalog(client):
@@ -219,7 +221,16 @@ def test_analysis_chart_and_delivery(client, source):
     for format_name in ("docx", "pptx"):
         report = client.post("/api/exports/report", json={"result_id": query["id"], "format": format_name, "insights": ["North 销售领先"]})
         assert report.status_code == 201
-        assert client.get(report.get_json()["artifact"]["download_url"]).status_code == 200
+        artifact = report.get_json()["artifact"]
+        assert artifact["verification_status"] == "unverified"
+        assert artifact["title"].startswith("未验证草稿")
+        download = client.get(artifact["download_url"])
+        assert download.status_code == 200
+        if format_name == "docx":
+            assert "未验证草稿" in Document(io.BytesIO(download.data)).paragraphs[0].text
+        else:
+            first_slide = Presentation(io.BytesIO(download.data)).slides[0]
+            assert any("未验证草稿" in shape.text for shape in first_slide.shapes if shape.has_text_frame)
 
 
 def test_knowledge_skill_memory_and_session(client):

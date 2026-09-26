@@ -25,6 +25,7 @@ from .common import (
     require_record,
     require_session_access,
     require_source_access,
+    require_system_owner,
     require_workspace_access,
     require_workspace_record,
     workspace_id,
@@ -93,7 +94,7 @@ def bootstrap():
             "knowledge": "knowledge_base" in features,
             "semantic_layer": "semantic_layer" in features,
             "mcp": "mcp_integrations" in features,
-            "exports": ["csv", "xlsx", "docx", "pptx", "html"] if "result_delivery" in features else [],
+            "exports": ["csv", "xlsx", "docx", "pptx", "png"] if "result_delivery" in features else [],
         },
     )
 
@@ -139,6 +140,7 @@ def list_workspaces():
 @bp.post("/api/workspaces")
 @api_errors
 def create_workspace():
+    require_system_owner()
     payload = body()
     name = str(payload.get("name") or "").strip()
     if not name:

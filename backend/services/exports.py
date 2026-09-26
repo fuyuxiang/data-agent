@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import html
-import json
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -194,6 +191,19 @@ def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: di
     )
 
 
+def _mark_draft_ppt(path: Path) -> None:
+    """Make the verification status visible inside legacy, user-authored decks."""
+    deck = Presentation(path)
+    for slide in deck.slides:
+        box = slide.shapes.add_textbox(PptInches(0.3), PptInches(0.08), PptInches(4.5), PptInches(0.35))
+        paragraph = box.text_frame.paragraphs[0]
+        paragraph.text = "未验证草稿 · 请核对数据与结论"
+        paragraph.font.size = Pt(12)
+        paragraph.font.bold = True
+        paragraph.font.color.rgb = RGBColor(166, 29, 46)
+    deck.save(path)
+
+
 def export_data(payload: dict, workspace_id: str, actor_id: str = "local-default") -> dict:
     frames = payload.get("frames") if isinstance(payload.get("frames"), dict) else None
     if frames:
@@ -259,8 +269,8 @@ def export_data(payload: dict, workspace_id: str, actor_id: str = "local-default
 def export_report(payload: dict, workspace_id: str, actor_id: str = "local-default") -> dict:
     frame, sql, source_ids = _frame_from_payload(payload, workspace_id, actor_id)
     kind = str(payload.get("format", "docx")).lower()
-    title = str(payload.get("title") or "数据分析报告")[:100]
-    summary = str(payload.get("summary") or "本报告由数擎分析工作台根据已执行的只读查询生成。")
+    title = "未验证草稿 · " + str(payload.get("title") or "数据分析报告")[:90]
+    summary = str(payload.get("summary") or "本报告尚未经过正式分析结果的证据与口径校验。")
     insights = payload.get("insights") if isinstance(payload.get("insights"), list) else []
     sections = payload.get("sections") if isinstance(payload.get("sections"), list) else []
     artifact_id = _db().new_id("report")
@@ -268,6 +278,7 @@ def export_report(payload: dict, workspace_id: str, actor_id: str = "local-defau
         path = current_app.config["SETTINGS"].export_dir / f"{artifact_id}.docx"
         document = Document()
         document.add_heading(title, 0)
+        document.add_paragraph("未验证草稿：内容由请求方提供，尚未通过正式分析结果发布门禁。")
         document.add_paragraph(f"生成时间：{utcnow()}")
         document.add_heading("执行摘要", level=1)
         document.add_paragraph(summary)
@@ -314,6 +325,7 @@ def export_report(payload: dict, workspace_id: str, actor_id: str = "local-defau
         path = current_app.config["SETTINGS"].export_dir / f"{artifact_id}.pptx"
         if payload.get("slides"):
             slide_count = _render_ppt_outline(payload, path)
+            _mark_draft_ppt(path)
             return _artifact(path, kind, workspace_id, title, {
                 "rows": len(frame), "sql": sql, "slides": slide_count,
                 "color_scheme": payload.get("color_scheme") or "mckinsey",
@@ -350,63 +362,9 @@ def export_report(payload: dict, workspace_id: str, actor_id: str = "local-defau
             for paragraph in cell.text_frame.paragraphs:
                 paragraph.font.size = Pt(10)
         deck.save(path)
+        _mark_draft_ppt(path)
     else:
         raise ValueError("报告格式必须是 docx 或 pptx")
     return _artifact(path, kind, workspace_id, title, {
         "rows": len(frame), "sql": sql, "sections": len(sections), "source_ids": source_ids,
     })
-
-
-def export_dashboard_html(dashboard: dict, workspace_id: str) -> dict:
-    artifact_id = _db().new_id("board")
-    path = current_app.config["SETTINGS"].export_dir / f"{artifact_id}.html"
-    widgets = dashboard.get("widgets", []) if isinstance(dashboard.get("widgets"), list) else []
-    cards = [
-        (
-            f'<article class="widget"><h2>{html.escape(str(widget.get("title") or "图表"))}</h2>'
-            f'<div class="chart" id="widget-{index}" role="img" '
-            f'aria-label="{html.escape(str(widget.get("title") or "数据图表"), quote=True)}"></div></article>'
-        )
-        for index, widget in enumerate(widgets)
-    ]
-    vendor_dir = Path(__file__).resolve().parents[2] / "frontend" / "vendor"
-    vendor_path = vendor_dir / "echarts.min.js"
-    map_path = vendor_dir / "echarts-china.min.js"
-    if not vendor_path.is_file() or not map_path.is_file():
-        raise FileNotFoundError("ECharts 离线资源不存在")
-    echarts_source = vendor_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
-    map_source = map_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
-
-    def json_safe(value):
-        if isinstance(value, dict):
-            return {str(key): json_safe(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [json_safe(item) for item in value]
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-        return value
-
-    widget_json = json.dumps(json_safe(widgets), ensure_ascii=False, default=str).replace("<", "\\u003c")
-    content = f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(dashboard.get('name', '分析看板'))}</title>
-<style>body{{font:16px system-ui;margin:0;background:#eef2f7;color:#14213d}}header{{padding:32px 5vw;background:#14213d;color:#fff}}main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;padding:24px 5vw}}article{{background:#fff;border-radius:14px;padding:20px;box-shadow:0 8px 24px #14213d12}}h2{{font-size:16px;margin:0 0 8px}}.chart{{height:360px}}.kpi{{display:grid;place-content:center;text-align:center;font-size:42px;font-weight:700}}.kpi small{{font-size:14px;color:#667085}}.error{{display:grid;place-content:center;color:#b42318}}@media print{{body{{background:white}}article{{break-inside:avoid;box-shadow:none;border:1px solid #ddd}}}}</style>
-<header><h1>{html.escape(dashboard.get('name', '分析看板'))}</h1><p>{html.escape(dashboard.get('description', ''))}</p></header><main>{''.join(cards)}</main>
-<script>{echarts_source}</script><script>{map_source}</script><script id="dashboard-data" type="application/json">{widget_json}</script>
-<script>(function(){{
-const palette=['#167c80','#e59b4c','#4058b4','#9a5bc4','#42a46f','#df6b62'];
-const widgets=JSON.parse(document.getElementById('dashboard-data').textContent);
-const fallback=spec=>({{tooltip:{{trigger:'axis'}},legend:{{bottom:0}},grid:{{left:48,right:24,top:35,bottom:55,containLabel:true}},xAxis:{{type:'category',data:spec.encoding?.x||[]}},yAxis:{{type:'value'}},series:(spec.encoding?.series||[]).map(item=>({{name:item.name,type:['line','area','stacked_area'].includes(spec.type)?'line':'bar',data:item.values,areaStyle:['area','stacked_area'].includes(spec.type)?{{opacity:.2}}:undefined,stack:spec.type==='stacked_area'||spec.type==='stacked_bar'?'total':undefined}}))}});
-widgets.forEach((widget,index)=>{{
-  const root=document.getElementById(`widget-${{index}}`); if(!root)return;
-  if(widget.error||widget.refresh_status==='error'){{root.classList.add('error');root.textContent=widget.error||widget.refresh_error||'组件刷新失败';return;}}
-  if(widget.type==='kpi'||widget.chart_type==='KPI_Card'){{root.classList.add('kpi');root.innerHTML='';const value=document.createElement('div');value.textContent=widget.kpi_value??'—';const sub=document.createElement('small');sub.textContent=[widget.kpi_sub,widget.kpi_trend==null?'':`${{widget.kpi_trend>0?'↑':'↓'}} ${{Math.abs(widget.kpi_trend)}}%`].filter(Boolean).join(' · ');root.append(value,sub);return;}}
-  const spec=widget.chart||widget.spec||{{}};const option=spec.option||fallback(spec);option.color=option.color||palette;option.animation=false;echarts.init(root).setOption(option,true);
-}});
-addEventListener('resize',()=>document.querySelectorAll('.chart').forEach(root=>echarts.getInstanceByDom(root)?.resize()));
-}})();</script></html>"""
-    path.write_text(content, encoding="utf-8")
-    source_ids = [str(value) for value in dashboard.get("source_ids") or []]
-    return _artifact(
-        path, "html", workspace_id, dashboard.get("name", "分析看板"),
-        {"dashboard_id": dashboard.get("id"), "source_ids": source_ids},
-    )

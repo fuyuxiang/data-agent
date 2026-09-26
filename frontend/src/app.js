@@ -17,8 +17,9 @@ const Root = {
   components: { ChatPanel, Icon, KnowledgePanel, Modal, SemanticPanel, SettingsPanel, SourcesPanel, StatusPill, ToastStack },
   setup() {
     const state = reactive({
-      ready: false, authChecking: true, authRequired: false, registrationOpen: false,
-      authMode: 'login', authError: '', bootstrapRequired: false, auth: { username:'', password:'' }, user: null,
+      ready: false, authChecking: true, authRequired: false, registrationOpen: false, emailCodeRequired: false,
+      authMode: 'login', authError: '', authNotice: '', bootstrapRequired: false,
+      auth: { username:'', email:'', name:'', password:'', bootstrap_token:'', code:'' }, user: null,
       route: location.hash.slice(1) || 'chat', sidebarOpen: false,
       workspaceId: localStorage.getItem('meridian-workspace') || 'default', workspaces: [], workspaceRole: '',
       sessions: [], activeSessionId: '', sources: [], providers: [],
@@ -57,11 +58,11 @@ const Root = {
       state.busy = true; state.busyLabel = '正在准备工作空间';
       try {
         const identity = await api('/api/auth/me');
-        state.user = identity.user; state.registrationOpen = !!identity.registration_open; state.bootstrapRequired = !!identity.bootstrap_required;
+        state.user = identity.user; state.registrationOpen = !!identity.registration_open; state.bootstrapRequired = !!identity.bootstrap_required; state.emailCodeRequired = !!identity.email_code_required;
         if (identity.csrf_token) sessionStorage.setItem('meridian-csrf', identity.csrf_token);
-        if (!identity.authenticated) {
+        if (!identity.authenticated && !identity.local_mode) {
           state.authRequired = true;
-          state.authMode = 'login';
+          state.authMode = identity.bootstrap_required ? 'bootstrap' : new URLSearchParams(location.search).has('invite') ? 'register' : 'login';
           state.ready = true;
           return;
         }
@@ -86,17 +87,33 @@ const Root = {
       finally { state.busy = false; state.busyLabel = ''; state.authChecking = false; }
     };
     const submitAuth = async () => {
-      state.authError = '';
+      state.authError = ''; state.authNotice = '';
       try {
-        await api('/api/auth/login', { method:'POST', body:state.auth });
+        const registering = state.authMode !== 'login';
+        const response = await api(registering ? '/api/auth/register' : '/api/auth/login', {
+          method:'POST',
+          body: registering ? {
+            email: state.auth.email, name: state.auth.name, username: state.auth.username,
+            password: state.auth.password, bootstrap_token: state.auth.bootstrap_token,
+            invitation_token: new URLSearchParams(location.search).get('invite') || '', code: state.auth.code,
+          } : { username: state.auth.username, password: state.auth.password },
+        });
+        if (response.active_workspace_id) {
+          state.workspaceId = response.active_workspace_id;
+          localStorage.setItem('meridian-workspace', state.workspaceId);
+        }
+        if (registering && new URLSearchParams(location.search).has('invite')) history.replaceState(null, '', location.pathname + location.hash);
         state.authRequired = false; state.authChecking = true;
-        state.auth.password = '';
+        state.auth.password = ''; state.auth.bootstrap_token = ''; state.auth.code = '';
         await bootstrap();
       } catch (error) { state.authError = error?.message || '认证失败'; }
     };
     const sendAuthCode = async () => {
-      state.authError = '';
-      try { await api('/api/auth/send-code', { method:'POST', body:{ email:state.auth.email } }); }
+      state.authError = ''; state.authNotice = '';
+      try {
+        const response = await api('/api/auth/send-code', { method:'POST', body:{ email:state.auth.email } });
+        state.authNotice = response.message || '验证码已发送，请检查邮箱';
+      }
       catch (error) { state.authError = error?.message || '验证码发送失败'; }
     };
     const logout = async () => {
@@ -228,13 +245,21 @@ const Root = {
           <div class="login-product-mark"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><b>数擎</b></div>
           <div class="login-heading">
             <span>Secure Workspace</span>
-            <h2>登录数擎平台</h2>
-            <p>请输入授权账号，进入受控、安全、可审计的数据智能分析工作空间。</p>
+            <h2>{{ state.authMode==='bootstrap' ? '创建首位系统所有者' : state.authMode==='register' ? '创建账号' : '登录数擎平台' }}</h2>
+            <p>{{ state.authMode==='bootstrap' ? '输入部署时设置的一次性初始化令牌，创建至少 12 位密码。' : state.authMode==='register' ? '使用邀请邮箱或开放注册的邮箱创建账号。' : '请输入授权账号，进入数据智能分析工作空间。' }}</p>
           </div>
-          <label><span>用户名</span><input v-model.trim="state.auth.username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
-          <label><span>密码</span><input v-model="state.auth.password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+          <label v-if="state.authMode!=='login'"><span>企业邮箱</span><input v-model.trim="state.auth.email" type="email" autocomplete="email" placeholder="name@company.com" required autofocus></label>
+          <label><span>用户名</span><input v-model.trim="state.auth.username" autocomplete="username" placeholder="请输入用户名" :required="state.authMode==='login'"></label>
+          <label v-if="state.authMode!=='login'"><span>姓名</span><input v-model.trim="state.auth.name" autocomplete="name" placeholder="请输入姓名"></label>
+          <label><span>密码</span><input v-model="state.auth.password" type="password" :autocomplete="state.authMode==='login'?'current-password':'new-password'" :minlength="state.authMode==='login'?undefined:12" placeholder="请输入密码" required></label>
+          <label v-if="state.authMode==='bootstrap'"><span>初始化令牌</span><input v-model.trim="state.auth.bootstrap_token" type="password" autocomplete="off" placeholder="部署时设置的 MERIDIAN_BOOTSTRAP_TOKEN" required></label>
+          <label v-if="state.authMode!=='login' && state.emailCodeRequired"><span>邮箱验证码</span><input v-model.trim="state.auth.code" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入邮件中的验证码" required></label>
           <p v-if="state.authError" class="auth-error">{{ state.authError }}</p>
-          <button class="button button--primary portal-submit" type="submit">进入数擎平台</button>
+          <p v-if="state.authNotice" class="auth-notice" role="status">{{ state.authNotice }}</p>
+          <button class="button button--primary portal-submit" type="submit">{{ state.authMode==='login'?'进入数擎平台':'创建账号并进入' }}</button>
+          <button v-if="state.authMode!=='login' && state.emailCodeRequired" class="button" type="button" @click="sendAuthCode">发送邮箱验证码</button>
+          <button v-if="state.authMode==='login' && state.registrationOpen" class="button" type="button" @click="state.authMode='register'">创建账号</button>
+          <button v-if="state.authMode!=='login' && !state.bootstrapRequired" class="button" type="button" @click="state.authMode='login'">已有账号？登录</button>
           <div class="portal-login-assurance"><span>受控数据访问</span><span>可验证分析结论</span><span>全流程审计留痕</span></div>
           <p class="portal-login-note">登录后可使用智能分析、数据资产、指标中心、知识库和系统管理功能。</p>
         </form>

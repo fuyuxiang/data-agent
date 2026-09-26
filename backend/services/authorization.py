@@ -274,41 +274,6 @@ def filter_authorized_jobs(
     return visible
 
 
-def dashboard_source_ids(database: Database, dashboard: dict) -> list[str]:
-    workspace_id = str(dashboard.get("workspace_id") or "default")
-    source_ids: list[str] = []
-    for widget in dashboard.get("widgets") or []:
-        raw = widget.get("source_ids")
-        if not isinstance(raw, list):
-            raw = [widget["source_id"]] if widget.get("source_id") else []
-        source_ids.extend(str(value) for value in raw if str(value))
-        result_ids = [str(widget.get("result_id") or "")]
-        chart_id = str(widget.get("chart_id") or "")
-        chart = database.get("charts", chart_id, workspace_id=workspace_id) if chart_id else None
-        if chart:
-            result_ids.append(str(chart.get("result_id") or ""))
-            if chart.get("source_id"):
-                source_ids.append(str(chart["source_id"]))
-        for result_id in result_ids:
-            result = database.get("query_results", result_id, workspace_id=workspace_id) if result_id else None
-            if result:
-                source_ids.extend(str(value) for value in result.get("source_ids") or [])
-    return list(dict.fromkeys(source_ids))
-
-
-def require_dashboard_access(
-    database: Database, dashboard: dict | None, *, workspace_id: str,
-    actor_id: str, action: str = "read",
-) -> dict:
-    if not dashboard or str(dashboard.get("workspace_id") or "default") != workspace_id:
-        raise FileNotFoundError("看板不存在")
-    require_sources_access(
-        database, dashboard_source_ids(database, dashboard), workspace_id=workspace_id,
-        actor_id=actor_id, action=action,
-    )
-    return dashboard
-
-
 def require_artifact_access(
     database: Database, artifact: dict | None, *, workspace_id: str,
     actor_id: str, action: str = "read",

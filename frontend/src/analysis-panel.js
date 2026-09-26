@@ -24,56 +24,12 @@ export const AnalysisPanel = {
   components: { ChartView, DataTable, Icon, StatusPill },
   props: { ctx: Object },
   data: () => ({
-    prompt: '', executionMode: 'auto', current: null, events: [], eventCursor: 0, result: null, evidence: null,
+    prompt: '', executionMode: 'auto', current: null, runs: [], events: [], eventCursor: 0, result: null, evidence: null,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
     artifacts: [], attachments: [], sourcePickerOpen: false,
     clarificationAnswer: '', feedbackSent: '',
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
     artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png'],
-    attachedFiles: [], attachedKnowledge: [], attachedExperts: [], attachedSkills: [],
-    knowledgeLibrary: [
-      { id: 'industry-report', label: '行业研报库', icon: 'book' },
-      { id: 'sql-corpus', label: '历史 SQL 模板', icon: 'database' },
-    ],
-    expertLibrary: [
-      { id: 'analyst-pro', label: '资深分析师', icon: 'users' },
-      { id: 'sql-expert', label: 'SQL 专家', icon: 'database' },
-      { id: 'viz-expert', label: '可视化专家', icon: 'chart' },
-    ],
-    skillLibrary: [
-      { id: 'csv-summary', label: 'CSV 摘要', icon: 'table' },
-      { id: 'auto-chart', label: '智能出图', icon: 'chart' },
-      { id: 'qa-check', label: '口径校验', icon: 'check' },
-    ],
-    expertCards: [
-      {
-        id: 'exp-port', name: '门户运营专家',
-        avatar: '门', avatarBg: 'linear-gradient(135deg,#a5b4fc,#6366f1)',
-        tone: 'indigo',
-        tags: ['门户', '在线率', '异常归因'],
-        source: '智能分析沉淀',
-        quote: '结论里"在线率下降 6.2%"主要由 5 家二级机构贡献，建议把这 5 家作为下一轮专项复盘对象。',
-        refs: 3, ctaHint: '专家已基于本次结论给出补充视角',
-      },
-      {
-        id: 'exp-sql', name: 'SQL 专家',
-        avatar: 'SQL', avatarBg: 'linear-gradient(135deg,#fbcfe8,#f472b6)',
-        tone: 'pink',
-        tags: ['口径', '回放', '复核'],
-        source: '口径校验中心',
-        quote: '指标 `active_devices / total_devices` 的分母在 Q3 切换过两次，已自动选用最新口径并标注差异。',
-        refs: 2, ctaHint: 'SQL 专家已完成结论回放',
-      },
-      {
-        id: 'exp-viz', name: '可视化专家',
-        avatar: '图', avatarBg: 'linear-gradient(135deg,#bae6fd,#38bdf8)',
-        tone: 'blue',
-        tags: ['图表', '对比', '呈现'],
-        source: '图表规范库',
-        quote: '当前结论建议补一张「在线率按机构对比」的横向条形图，能更直观呈现头部机构差距。',
-        refs: 1, ctaHint: '可视化专家已生成对比图建议',
-      },
-    ],
   }),
   computed: {
     state() { return this.ctx.state; },
@@ -125,18 +81,19 @@ export const AnalysisPanel = {
     },
     async load() {
       clearTimeout(this.pollingTimer);
-      this.current = null; this.events = []; this.result = null; this.artifacts = [];
+      this.current = null; this.runs = []; this.events = []; this.result = null; this.artifacts = [];
       if (!this.session) return;
       try {
         const path = '/api/analyses?session_id=' + encodeURIComponent(this.session.id) + '&limit=50';
         const response = await api(withWorkspace(path, this.state.workspaceId));
-        if (response.items?.length) await this.setRun(response.items[0]);
+        this.runs = response.items || [];
+        if (this.runs.length) await this.setRun(this.runs[0]);
       } catch (error) { this.ctx.fail(error); }
     },
     async setRun(run) {
       clearTimeout(this.pollingTimer);
       this.current = run; this.eventCursor = 0; this.events = []; this.result = null;
-      this.details = []; this.artifacts = []; this.evidence = null;
+      this.details = []; this.artifacts = []; this.evidence = null; this.activeTab = 'summary';
       this.syncContract();
       await this.refresh(true);
     },
@@ -148,23 +105,31 @@ export const AnalysisPanel = {
     },
     async refresh(silent = false) {
       if (!this.current) return;
+      const selectedRunId = this.current.id;
       try {
-        const base = '/api/analyses/' + this.current.id;
+        const base = '/api/analyses/' + selectedRunId;
         const [run, eventPage, attachments] = await Promise.all([
           api(withWorkspace(base, this.state.workspaceId)),
           api(withWorkspace(base + '/events?after=' + this.eventCursor + '&limit=500', this.state.workspaceId)),
           api(withWorkspace(base + '/attachments', this.state.workspaceId)),
         ]);
+        if (this.current?.id !== selectedRunId) return;
         this.current = run.item; this.attachments = attachments.items || [];
+        const historyIndex = this.runs.findIndex(item => item.id === selectedRunId);
+        if (historyIndex >= 0) this.runs.splice(historyIndex, 1, run.item);
         for (const event of eventPage.items || []) {
           if (!this.events.some(item => item.sequence === event.sequence)) this.events.push(event);
         }
         this.eventCursor = eventPage.next_cursor || this.eventCursor;
         if (this.current.execution_status === 'finished') {
-          this.result = await api(withWorkspace(base + '/results', this.state.workspaceId));
+          const result = await api(withWorkspace(base + '/results', this.state.workspaceId));
+          if (this.current?.id !== selectedRunId) return;
+          this.result = result;
           this.artifacts = this.result.artifacts || [];
           if (this.result.status === 'published') {
-            this.evidence = await api(withWorkspace(base + '/evidence', this.state.workspaceId));
+            const evidence = await api(withWorkspace(base + '/evidence', this.state.workspaceId));
+            if (this.current?.id !== selectedRunId) return;
+            this.evidence = evidence;
           }
         }
         this.syncContract();
@@ -181,21 +146,6 @@ export const AnalysisPanel = {
         event.preventDefault();
         this.send();
       }
-    },
-    toggleTag(list, item) {
-      const target = list.find(entry => entry.id === item.id);
-      if (target) list.splice(list.indexOf(target), 1);
-      else list.push(item);
-    },
-    removeTag(list, item) {
-      const target = list.find(entry => entry.id === item.id);
-      if (target) list.splice(list.indexOf(target), 1);
-    },
-    isTagActive(list, item) {
-      return !!list.find(entry => entry.id === item.id);
-    },
-    pickFile() {
-      this.ctx.toast('已打开文件选择器', '引入文件');
     },
     async send() {
       const objective = this.prompt.trim();
@@ -218,6 +168,7 @@ export const AnalysisPanel = {
             confirm_required: this.executionMode === 'deep',
           },
         });
+        this.runs.unshift(response.item);
         await this.setRun(response.item);
       } catch (error) { this.ctx.fail(error); }
     },
@@ -358,6 +309,7 @@ export const AnalysisPanel = {
         const response = await api('/api/analyses/' + this.current.id + '/branch', {
           method: 'POST', body: { mode, prompt: promptValue },
         });
+        this.runs.unshift(response.item);
         await this.setRun(response.item);
       } catch (error) { this.ctx.fail(error); }
     },
@@ -402,23 +354,18 @@ export const AnalysisPanel = {
             </div>
             <h2>今天想了解什么？</h2>
             <p>用业务语言描述问题，我会拆解目标、查询数据、核对证据，并生成可被审计的结论。</p>
-            <div class="welcome-tag-row">
-              <span>指标中心</span>
-              <span>知识库</span>
-              <span>专家协同</span>
-              <span>技能调用</span>
-            </div>
+            <div class="welcome-tag-row"><span>选定数据</span><span>核对口径</span><span>查看证据</span><span>导出报告</span></div>
           </section>
           <div class="home-readiness">
             <div class="source-picker-wrap">
               <button class="empty-data-action" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database"/><span><b>{{ selectedSources.length ? '已选择 '+selectedSources.length+' 个数据源' : '选择分析数据' }}</b><small>{{ selectedSources.length ? selectedSources.map(item=>item.name).join('、') : '发起分析前需要先确定数据范围' }}</small></span><Icon name="chevron"/></button>
               <section v-if="sourcePickerOpen" class="source-picker">
-                <header><b>本次分析的数据范围</b><button @click="ctx.go('sources')">管理数据源</button></header>
+                <header><b>本次分析的数据范围</b><button v-if="['owner','editor'].includes(state.workspaceRole)" @click="ctx.go('sources')">管理数据源</button></header>
                 <button v-for="source in availableSources" :key="source.id" :class="{selected:session?.source_ids?.includes(source.id)}" @click="toggleSource(source)"><span class="source-picker-check"><Icon v-if="session?.source_ids?.includes(source.id)" name="check" :size="13"/></span><span><b>{{ source.name }}</b><small>{{ source.kind==='database' ? '数据库' : '文件' }} · {{ source.tables?.length || 0 }} 张表</small></span></button>
-                <p v-if="!availableSources.length">还没有可用数据源，请先上传文件或建立数据库连接。</p>
+                <p v-if="!availableSources.length">还没有可用数据源，请联系工作空间管理员接入数据。</p>
               </section>
             </div>
-            <span class="trust-note"><Icon name="check" :size="14"/>自动核对指标口径、权限与结论证据</span>
+            <span class="trust-note"><Icon name="check" :size="14"/>核对数据权限、指标引用与可回放数值</span>
           </div>
           <section class="suggestion-section">
             <header><div><b>{{ demoMode ? '演示问题' : '试试这样问' }}</b></div></header>
@@ -438,6 +385,10 @@ export const AnalysisPanel = {
         </div>
 
         <template v-else>
+          <nav v-if="runs.length>1" class="analysis-run-history" aria-label="本会话分析历史">
+            <b>本会话分析</b>
+            <button v-for="run in runs" :key="run.id" type="button" :class="{active:current.id===run.id}" @click="setRun(run)">{{ run.contract?.payload?.objective || '未命名分析' }}<small>{{ ctx.time(run.created_at) }}</small></button>
+          </nav>
           <article class="message message--user">
             <div class="message__meta"><span>你</span><time>{{ ctx.time(current.created_at) }}</time></div>
             <div class="message__body">{{ contract?.payload?.objective }}</div>
@@ -499,23 +450,16 @@ export const AnalysisPanel = {
             <nav class="result-tabs">
               <button :class="{active:activeTab==='summary'}" @click="activeTab='summary'">分析结论</button>
               <button :class="{active:activeTab==='dashboard'}" @click="activeTab='dashboard';loadDetails(true)">指标与图表</button>
-              <button :class="{active:activeTab==='report'}" @click="activeTab='report'">详细报告</button>
             </nav>
             <div v-if="activeTab==='summary'" class="result-pane">
               <div v-if="manifest.kpis?.length" class="kpi-grid summary-kpi-grid"><article v-for="item in manifest.kpis" :key="item.id"><small>{{ item.label }}</small><b>{{ formatResultValue(item.value) }}</b><span v-if="item.unavailable_reason">{{ item.unavailable_reason }}</span></article></div>
               <div class="markdown analysis-summary-markdown" v-html="md(manifest.summary)"></div>
-              <details><summary>局限与验证范围</summary><ul><li v-for="item in manifest.limitations" :key="item">{{ item }}</li></ul></details>
-              <details v-if="evidence" class="evidence-drawer"><summary>查看结论依据（{{ evidence.claims?.length || 0 }} 条）</summary><div class="claim-list"><article v-for="claim in evidence.claims" :key="claim.id"><header><StatusPill :status="claim.payload?.status==='validated'?'completed':'draft'" :label="claim.payload?.numeric_replay==='PASS'?'已复算':'待核对'"/><span v-for="ref in claim.payload?.definition_refs || []" :key="ref">{{ ref }}</span></header><p>{{ claim.payload?.text }}</p><small>{{ claim.payload?.evidence_cells?.length || 0 }} 个数据单元格可回放</small></article></div></details>
+              <details><summary>分析范围与验证局限</summary><div class="analysis-scope-details"><p><b>目标：</b>{{ manifest.contract?.objective || '未指定' }}</p><p><b>覆盖范围：</b>{{ manifest.contract?.coverage || '未指定' }}</p><p><b>维度：</b>{{ manifest.contract?.dimensions?.join('、') || '未指定' }}</p></div><ul><li v-for="item in manifest.limitations" :key="item">{{ item }}</li></ul></details>
+              <details v-if="evidence" class="evidence-drawer"><summary>查看结论依据（{{ evidence.claims?.length || 0 }} 条）</summary><p>数值核对只检查数据证据；业务解释和建议仍需结合口径与场景判断。</p><div class="claim-list"><article v-for="claim in evidence.claims" :key="claim.id"><header><StatusPill :status="claim.payload?.status==='validated'?'completed':'draft'" :label="claim.payload?.numeric_replay==='PASS'?'数值有证据':claim.payload?.numeric_replay==='NOT_EVALUATED'?'解释待人工判断':'待核对'"/><span v-for="ref in claim.payload?.definition_refs || []" :key="ref">{{ ref }}</span></header><p>{{ claim.payload?.text }}</p><small>{{ claim.payload?.evidence_cells?.length || 0 }} 个数据单元格可回放</small></article></div></details>
             </div>
             <div v-else-if="activeTab==='dashboard'" class="result-pane">
               <div class="four-chart-grid"><article v-for="chart in manifest.charts" :key="chart.id"><h3>{{ chart.title }}</h3><ChartView v-if="chart.available" :spec="chart"/><p v-else>{{ chart.unavailable_reason }}</p></article></div>
               <section class="detail-table"><header><h3>授权明细分页</h3><span>不会向浏览器加载全仓明细</span></header><DataTable :rows="details" :columns="detailColumns"/><button v-if="detailCursor!==null" class="button button--small" @click="loadDetails()">加载下一页</button></section>
-            </div>
-            <div v-else class="result-pane report-view">
-              <h2>问题与口径</h2><pre>{{ JSON.stringify(manifest.report.problem_and_definitions, null, 2) }}</pre>
-              <h2>数据结果</h2><div class="markdown" v-html="md(manifest.report.data_results)"></div>
-              <h2>归因分析</h2><p v-for="item in manifest.report.attribution" :key="item.text"><b>{{ item.type }}</b> · {{ item.text }}</p>
-              <h2>建议与局限</h2><ul><li v-for="item in manifest.report.limitations" :key="item">{{ item }}</li></ul>
             </div>
             <footer class="result-actions">
               <button class="button button--primary" @click="branch('followup')"><Icon name="chat"/>继续追问</button>
@@ -523,52 +467,19 @@ export const AnalysisPanel = {
               <a v-for="item in artifacts" :key="item.id" class="button button--small" :href="item.download_url">{{ item.filename }}</a>
             </footer>
             <div class="result-feedback"><span>这个结果对你有帮助吗？</span><button :class="{active:feedbackSent==='correct'}" @click="feedback('correct')">准确</button><button :class="{active:feedbackSent==='partially_correct'}" @click="feedback('partially_correct')">部分准确</button><button :class="{active:feedbackSent==='incorrect'}" @click="feedback('incorrect')">需要纠正</button></div>
-            <section v-if="current.execution_status==='finished'" class="expert-panel">
-              <header class="expert-panel__header">
-                <span class="expert-panel__title"><Icon name="users" :size="16"/>召唤专家深挖结论</span>
-                <small>基于本次分析的口径与证据，让沉淀的专家角色给出补充视角。</small>
-              </header>
-              <div class="expert-panel__list">
-                <article v-for="item in expertCards" :key="item.id" class="expert-card" :data-tone="item.tone">
-                  <header>
-                    <span class="expert-card__avatar" :style="{background:item.avatarBg}">{{ item.avatar }}</span>
-                    <div class="expert-card__heading">
-                      <b>{{ item.name }}</b>
-                      <div class="expert-card__tags">
-                        <span v-for="tag in item.tags" :key="tag" class="expert-card__tag">{{ tag }}</span>
-                      </div>
-                    </div>
-                    <span class="expert-card__source">来源 · {{ item.source }}</span>
-                  </header>
-                  <p>{{ item.quote }}</p>
-                  <footer>
-                    <span><Icon name="book" :size="12"/>引用 {{ item.refs }} 处</span>
-                    <button class="button button--small" @click="ctx.toast(item.ctaHint, item.name+'已响应')"><Icon name="chat" :size="13"/>与 {{ item.name }} 继续对话</button>
-                  </footer>
-                </article>
-              </div>
-              <footer class="expert-panel__footer">
-                <button class="button" @click="ctx.toast('已加载沉淀提示词模板','提示词中心')"><Icon name="bolt" :size="13"/>从沉淀提示词开始</button>
-                <button class="button button--primary" @click="ctx.toast('已基于本结论生成追问草案','继续追问')"><Icon name="play" :size="13"/>从本次分析对象继续深挖</button>
-              </footer>
-            </section>
           </section>
         </template>
       </div>
 
       <form class="composer" @submit.prevent="send">
-        <div v-if="attachedFiles.length || attachedKnowledge.length || attachedExperts.length || attachedSkills.length" class="composer__selected-tags">
-          <span v-for="item in attachedFiles" :key="'file-'+item.id">{{ item.label }}<button type="button" @click="removeTag(attachedFiles,item)" aria-label="移除">×</button></span>
-          <span v-for="item in attachedKnowledge" :key="'kb-'+item.id"><Icon name="book" :size="12"/>知识库 · {{ item.label }}<button type="button" @click="removeTag(attachedKnowledge,item)" aria-label="移除">×</button></span>
-          <span v-for="item in attachedExperts" :key="'exp-'+item.id"><Icon name="users" :size="12"/>专家 · {{ item.label }}<button type="button" @click="removeTag(attachedExperts,item)" aria-label="移除">×</button></span>
-          <span v-for="item in attachedSkills" :key="'skl-'+item.id"><Icon name="bolt" :size="12"/>技能 · {{ item.label }}<button type="button" @click="removeTag(attachedSkills,item)" aria-label="移除">×</button></span>
-        </div>
+        <section v-if="sourcePickerOpen && current" class="source-picker composer-source-picker">
+          <header><b>下次提问的数据范围</b><button v-if="['owner','editor'].includes(state.workspaceRole)" type="button" @click="ctx.go('sources')">管理数据源</button></header>
+          <button v-for="source in availableSources" :key="source.id" type="button" :class="{selected:session?.source_ids?.includes(source.id)}" @click="toggleSource(source)"><span class="source-picker-check"><Icon v-if="session?.source_ids?.includes(source.id)" name="check" :size="13"/></span><span><b>{{ source.name }}</b><small>{{ source.kind==='database' ? '数据库' : '文件' }} · {{ source.tables?.length || 0 }} 张表</small></span></button>
+          <p v-if="!availableSources.length">当前没有可用数据源，请联系工作空间管理员。</p>
+        </section>
         <textarea ref="composer" v-model="prompt" :disabled="processing" @keydown="keydown" placeholder="描述分析问题；Enter 发送，Shift+Enter 换行"></textarea>
         <div class="composer__toolbar">
-          <button type="button" @click="pickFile"><Icon name="upload" :size="14"/>引入文件</button>
-          <button type="button" v-for="item in knowledgeLibrary" :key="item.id" :class="{active:isTagActive(attachedKnowledge,item)}" @click="toggleTag(attachedKnowledge,item)"><Icon :name="item.icon" :size="14"/>{{ item.label }}</button>
-          <button type="button" v-for="item in expertLibrary" :key="item.id" :class="{active:isTagActive(attachedExperts,item)}" @click="toggleTag(attachedExperts,item)"><Icon :name="item.icon" :size="14"/>召唤 {{ item.label }}</button>
-          <button type="button" v-for="item in skillLibrary" :key="item.id" :class="{active:isTagActive(attachedSkills,item)}" @click="toggleTag(attachedSkills,item)"><Icon :name="item.icon" :size="14"/>技能 · {{ item.label }}</button>
+          <button type="button" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database" :size="14"/>{{ current ? '下次提问 · ' : '' }}{{ selectedSources.length }} 个数据源</button>
           <span class="composer__toolbar-spacer"></span>
           <label class="composer__mode"><Icon name="bolt" :size="13"/>分析模式<select v-model="executionMode"><option value="auto">智能判断</option><option value="quick">快速问数</option><option value="deep">深度分析</option></select></label>
           <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'发起分析':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>

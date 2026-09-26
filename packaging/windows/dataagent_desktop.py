@@ -69,7 +69,7 @@ def _open_browser_later(url: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start DataAgent desktop server")
-    parser.add_argument("--host", default=os.getenv("MERIDIAN_HOST", "0.0.0.0"))
+    parser.add_argument("--host", default=os.getenv("MERIDIAN_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("MERIDIAN_PORT", str(DEFAULT_PORT))))
     parser.add_argument("--storage-dir", type=Path, default=None)
     parser.add_argument("--no-browser", action="store_true", help="Do not open the default browser automatically")

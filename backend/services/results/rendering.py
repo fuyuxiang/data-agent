@@ -140,6 +140,7 @@ def build_manifest_payload(
 ) -> dict[str, Any]:
     result, frame = _query_result(database, workspace_id, evidence_refs)
     limitations = [item["reason"] for item in validation["issues"]]
+    limitations.append("自动核验覆盖数据结果和显式数值；业务解释、因果判断与建议需人工复核")
     if result is None:
         limitations.append("未找到可本地渲染的已验证有界结果；需先在仓内生成小型精确聚合")
     return {

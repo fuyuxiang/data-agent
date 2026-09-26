@@ -345,6 +345,27 @@ def test_publication_gate_replays_numeric_claims_against_result_cells(app, sourc
         assert claims[-1]["payload"]["evidence_cells"][0]["column"] == "total_sales"
 
 
+def test_numeric_claim_must_match_the_named_result_row(app, source):
+    from backend.services.datasets import execute_query
+
+    store, run = _confirmed_run(app, source_ids=(source["id"],))
+    with app.app_context():
+        result = execute_query(
+            [source["id"]],
+            "SELECT region, SUM(sales) AS total_sales FROM data GROUP BY region ORDER BY region",
+            "default", actor_id="local-default",
+        )
+        evidence = [
+            {"tool": "query_data", "status": "SUCCEEDED", "refs": [result["id"]], "completeness": "complete"},
+            {"tool": "validate_result", "status": "SUCCEEDED", "refs": [result["id"]], "validation_status": "PASS", "completeness": "complete"},
+        ]
+        wrong_row = ResultService(store.db).finalize(run["id"], "North 的销售额为 305。", evidence)
+        assert wrong_row["published"] is False
+
+        right_row = ResultService(store.db).finalize(run["id"], "North 的销售额为 440。", evidence)
+        assert right_row["published"] is True
+
+
 def test_publication_gate_accepts_recovered_auxiliary_failure_and_contract_numbers(app, source):
     from backend.services.datasets import execute_query
 

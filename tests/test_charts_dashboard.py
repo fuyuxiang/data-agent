@@ -136,27 +136,7 @@ def test_dot_density_map_uses_city_coordinates_and_category_series():
     assert spec["warnings"] == []
 
 
-def test_dashboard_export_contains_offline_echarts_not_raw_json(client, source):
-    query = client.post(
-        "/api/query",
-        json={
-            "source_ids": [source["id"]],
-            "sql": "SELECT region, SUM(sales) AS sales FROM data GROUP BY region",
-        },
-    ).get_json()["result"]
-    chart = client.post(
-        "/api/charts/spec", json={"result_id": query["id"], "type": "bar", "title": "销售"},
-    ).get_json()["item"]
-    dashboard = client.post(
-        "/api/dashboards",
-        json={
-            "name": "离线看板",
-            "widgets": [{"id": "sales", "title": "销售", "result_id": query["id"], "chart": chart["spec"]}],
-        },
-    ).get_json()["item"]
-    artifact = client.post(f"/api/dashboards/{dashboard['id']}/export").get_json()["artifact"]
-    page = client.get(artifact["download_url"])
-    assert page.status_code == 200
-    assert b"echarts.init" in page.data
-    assert b'<script id="dashboard-data" type="application/json">' in page.data
-    assert b"<pre>" not in page.data
+def test_retired_dashboard_api_is_not_exposed(client):
+    assert client.get("/api/dashboards").status_code == 404
+    assert client.post("/api/dashboards", json={"name": "retired"}).status_code == 404
+    assert client.post("/api/dashboards/old/export").status_code == 404

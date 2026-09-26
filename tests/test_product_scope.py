@@ -17,6 +17,7 @@ def test_retired_product_surfaces_are_not_exposed(client):
         "/api/schedules",
         "/api/teams",
         "/api/feishu-bot",
+        "/api/dashboards",
     ):
         assert client.get(path).status_code == 404
 
