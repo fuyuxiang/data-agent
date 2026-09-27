@@ -1,9 +1,83 @@
 import { expect, test } from '@playwright/test';
 
+test('shows the login portal when authentication is required', async ({ page }) => {
+  await page.route('**/api/auth/me', route => route.fulfill({ json: {
+    authenticated: false, local_mode: false, registration_open: false,
+    bootstrap_required: false, email_code_required: false,
+  } }));
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: '登录数擎平台' })).toBeVisible();
+  await expect(page.getByText('证据单元格校验')).toBeVisible();
+  await expect(page.getByRole('button', { name: '进入数擎平台' })).toBeVisible();
+  await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+  const contrast = await page.evaluate(() => {
+    const heading = document.querySelector('.login-heading h2');
+    const panel = document.querySelector('.portal-login');
+    const luminance = color => {
+      const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(value => value / 255);
+      const linear = channels.map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    };
+    const foreground = luminance(getComputedStyle(heading).color);
+    const background = luminance(getComputedStyle(panel).backgroundColor);
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  });
+  expect(contrast).toBeGreaterThanOrEqual(4.5);
+  const heroContrast = await page.evaluate(() => {
+    const foreground = getComputedStyle(document.querySelector('.portal-summary')).color;
+    const background = getComputedStyle(document.querySelector('.portal-hero')).backgroundColor;
+    const luminance = color => {
+      const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number)
+        .map(value => value / 255)
+        .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    const values = [luminance(foreground), luminance(background)];
+    return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
+  });
+  expect(heroContrast).toBeGreaterThanOrEqual(4.5);
+});
+
+test('keeps the grouped navigation usable at a compact desktop width', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await page.goto('/');
+  const sidebar = page.locator('.app-sidebar');
+  await expect(sidebar).toHaveCSS('width', '56px');
+  await sidebar.hover();
+  await expect(sidebar).toHaveCSS('width', '238px');
+  await page.getByRole('button', { name: '数据资产', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '数据资产' })).toBeVisible();
+});
+
+test('keeps the mobile navigation and analysis readable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: '今天想了解什么？' })).toBeVisible();
+  await page.getByRole('button', { name: '打开导航' }).click();
+  await page.getByRole('button', { name: '数据资产', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '数据资产' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test('keeps all administration pages readable in dark mode', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('meridian-theme', 'dark'));
+  await page.goto('/');
+  for (const label of ['数据资产', '指标中心', '知识库', '系统管理']) {
+    await page.getByRole('button', { name: label, exact: true }).click();
+    await expect(page.getByRole('heading', { name: label }).first()).toBeVisible();
+    const channels = await page.evaluate(() => getComputedStyle(document.querySelector('.workspace-page'))
+      .backgroundColor.match(/[\d.]+/g).slice(0, 3).map(Number));
+    expect(Math.max(...channels)).toBeLessThan(70);
+  }
+});
+
 
 test('creates an analysis contract and manages a real indexed attachment', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '今天想了解什么？' })).toBeVisible();
+  await page.getByRole('button', { name: '切换深色模式' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: '切换浅色模式' }).click();
 
   // 测试 fixture 是临时空数据库，先在数据资产页上传一个 CSV，使当前分析自动绑定到数据源
   await page.getByRole('button', { name: '数据资产', exact: true }).click();
@@ -44,7 +118,7 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
     },
   };
   const manifest = {
-    summary: '北区销售额高于南区，结果已通过独立验证。',
+    summary: '北区销售额为 120 元，结果已通过独立验证。',
     kpis: [1, 2, 3, 4].map(id => ({ id: `k${id}`, label: `指标 ${id}`, value: id * 10 })),
     charts: [1, 2, 3, 4].map(id => ({ id: `c${id}`, title: `图表 ${id}`, available: false, unavailable_reason: '此浏览器样例不渲染数据' })),
     limitations: ['仅适用于已确认范围'],
@@ -71,7 +145,10 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
       } });
     }
     if (path === '/api/analyses/run-ui/evidence') {
-      return route.fulfill({ json: { claims: [{ id: 'claim-1', payload: { text: '北区销售额', evidence_refs: ['dataset-ref-1'], evidence_cells: [{ ref: 'dataset-ref-1' }], definition_refs: ['metric:sales@1'], status: 'validated', numeric_replay: 'PASS' } }] } });
+      return route.fulfill({ json: { claims: [{ id: 'claim-1', payload: { text: '北区销售额为 120 元，结果已通过独立验证。', evidence_refs: ['dataset-ref-1'], numbers: [{ text: '120', start: 7, end: 10 }], evidence_cells: [{ number: '120', ref: 'dataset-ref-1', result_id: 'qry-1', row: 0, column: 'sales', value: 120 }], definition_refs: ['metric:sales@1'], status: 'validated', numeric_replay: 'PASS' } }] } });
+    }
+    if (path === '/api/analyses/run-ui/evidence/claims/claim-1/cells/0') {
+      return route.fulfill({ json: { item: { claim: '北区销售额为 120 元，结果已通过独立验证。', number: '120', result_id: 'qry-1', row_index: 0, column: 'sales', value: '120', row: { region: '北区', sales: '120' }, metric: { metric_id: 'sales', metric_version: 1 } } } });
     }
     if (path === '/api/analyses/run-ui') return route.fulfill({ json: { item: run } });
     return route.continue();
@@ -84,13 +161,31 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
 
   await page.goto('/');
   await page.getByRole('button', { name: '智能分析' }).click();
-  await expect(page.getByText('北区销售额高于南区')).toBeVisible();
-  await page.getByText('查看结论依据').click();
+  await expect(page.locator('.analysis-summary-markdown').getByRole('button', { name: '回放数字 120 的数据证据' })).toBeVisible();
   await expect(page.getByText('metric:sales@1')).toBeVisible();
+  await page.locator('.analysis-summary-markdown').getByRole('button', { name: '回放数字 120 的数据证据' }).click();
+  await expect(page.getByRole('heading', { name: '数据证据回放' })).toBeVisible();
+  await expect(page.getByText('北区', { exact: true })).toBeVisible();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('link', { name: 'summary.docx' }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe('summary.docx');
+});
+
+test('creates a knowledge explanation with a validated in-app form', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '知识库', exact: true }).click();
+  await page.getByRole('button', { name: '解释·规则·背景' }).click();
+  await page.getByRole('button', { name: '新增' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新增指标解释' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('正式指标口径请在指标中心创建并审批')).toBeVisible();
+  await dialog.getByRole('button', { name: '保存条目' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('请填写指标名称');
+  await dialog.getByLabel('指标名称').fill('活跃用户数');
+  await dialog.getByLabel('指标定义').fill('在指定日期至少发生一次有效行为的去重用户数。');
+  await dialog.getByRole('button', { name: '保存条目' }).click();
+  await expect(page.getByText('活跃用户数', { exact: true })).toBeVisible();
 });
 
 
@@ -104,12 +199,12 @@ test('builds and validates an approved semantic metric from the UI', async ({ pa
   await expect(page.getByText('sales', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: '指标中心' }).click();
-  await page.getByRole('button', { name: '新建语义模型' }).click();
+  await page.locator('.surface-header').getByRole('button', { name: '新建语义模型' }).click();
   await page.getByLabel('模型名称').fill('销售事实模型');
   await page.getByRole('button', { name: '保存并校验' }).click();
   await expect(page.getByText('销售事实模型', { exact: false }).first()).toBeVisible();
 
-  await page.getByRole('button', { name: '新建指标' }).click();
+  await page.locator('.surface-header').getByRole('button', { name: '新建指标' }).click();
   await page.getByLabel('技术名称').fill('total_sales');
   await page.getByLabel('业务名称').fill('销售额');
   await page.getByLabel('聚合度量').selectOption('sales');

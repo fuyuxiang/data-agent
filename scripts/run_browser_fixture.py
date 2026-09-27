@@ -23,7 +23,7 @@ def main() -> None:
         "STORAGE_DIR": storage,
         "SECRET_KEY": "browser-test-secret",
     })
-    app.run(host="127.0.0.1", port=5013, debug=False, use_reloader=False)
+    app.run(host="127.0.0.1", port=int(os.environ.get("MERIDIAN_BROWSER_TEST_PORT", "5013")), debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

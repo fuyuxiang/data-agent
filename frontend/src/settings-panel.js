@@ -54,7 +54,7 @@ export const SettingsPanel = {
       this.ctx.toast('', '成员角色已更新');
     },
     async removeMember(item) {
-      if (!window.confirm(`移除成员 ${item.name || item.email}？`)) return;
+      if (!await this.ctx.confirmAction({title:'移除成员',message:`移除成员 ${item.name || item.email}？`,submitLabel:'移除'})) return;
       await api(`/api/workspaces/${this.ctx.state.workspaceId}/members/${item.user_id}`, { method: 'DELETE' });
       await this.load();
     },
@@ -81,7 +81,7 @@ export const SettingsPanel = {
         this.ctx.fail(new Error('环境变量模型是系统保底配置，不能删除'));
         return;
       }
-      if (!window.confirm(`删除模型服务「${item.name}」？删除后，已绑定该模型的分析会话会自动改回默认模型。`)) return;
+      if (!await this.ctx.confirmAction({title:'删除模型服务',message:`删除「${item.name}」？已绑定该模型的分析会话会自动改回默认模型。`,submitLabel:'删除'})) return;
       await this.ctx.run('正在删除模型服务', async () => {
         await api(`/api/providers/${item.id}`, { method: 'DELETE' });
         delete this.providerTests[item.id];
@@ -132,7 +132,7 @@ export const SettingsPanel = {
           <section v-if="tab==='members'">
             <div class="section-heading"><h2>成员与权限</h2><p>管理员维护数据与指标，分析成员使用已授权数据发起分析。</p></div>
             <div class="setting-list">
-              <article v-for="item in members" :key="item.user_id"><div><b>{{ item.name||item.email||item.user_id }}</b><small>{{ item.email||'本地运行身份' }}</small></div><select v-model="item.role" :disabled="ctx.state.workspaceRole!=='owner'" @change="setMemberRole(item)"><option value="owner">所有者</option><option value="editor">管理员</option><option value="analyst">分析成员</option><option value="viewer">只读成员</option></select><button v-if="ctx.state.workspaceRole==='owner'" class="icon-button danger" @click="removeMember(item)"><Icon name="close"/></button></article>
+              <article v-for="item in members" :key="item.user_id"><div><b>{{ item.name||item.email||item.user_id }}</b><small>{{ item.email||'本地运行身份' }}</small></div><select v-model="item.role" :disabled="ctx.state.workspaceRole!=='owner'" @change="setMemberRole(item)"><option value="owner">所有者</option><option value="editor">管理员</option><option value="analyst">分析成员</option><option value="viewer">只读成员</option></select><button v-if="ctx.state.workspaceRole==='owner'" class="icon-button danger" :aria-label="'移除成员 '+(item.name||item.email||item.user_id)" @click="removeMember(item)"><Icon name="close"/></button></article>
               <EmptyState v-if="!members.length" icon="users" title="本地单用户模式" text="启用企业登录后可在此管理成员。"/>
             </div>
             <div v-if="ctx.state.workspaceRole==='owner'" class="settings-card"><h3>添加成员</h3><div class="form-grid"><label><span>企业邮箱</span><input v-model.trim="memberForm.email" type="email" placeholder="name@company.com"></label><label><span>角色</span><select v-model="memberForm.role"><option value="analyst">分析成员</option><option value="viewer">只读成员</option><option value="editor">管理员</option><option value="owner">所有者</option></select></label></div><button class="button button--primary" :disabled="!memberForm.email" @click="addMember">添加或生成邀请</button><div v-if="inviteResult" class="readiness-banner"><div><Icon name="check"/><span><b>邀请链接已生成</b><small>{{ inviteResult.invitation_url }}</small></span></div></div></div>

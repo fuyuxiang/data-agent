@@ -25,6 +25,7 @@ export const AnalysisPanel = {
   props: { ctx: Object },
   data: () => ({
     prompt: '', executionMode: 'auto', current: null, runs: [], events: [], eventCursor: 0, result: null, evidence: null,
+    activeEvidence: null, evidenceLoading: false, evidenceError: '', showEventDetails: false,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
     artifacts: [], attachments: [], sourcePickerOpen: false,
     clarificationAnswer: '', feedbackSent: '',
@@ -93,7 +94,7 @@ export const AnalysisPanel = {
     async setRun(run) {
       clearTimeout(this.pollingTimer);
       this.current = run; this.eventCursor = 0; this.events = []; this.result = null;
-      this.details = []; this.artifacts = []; this.evidence = null; this.activeTab = 'summary';
+      this.details = []; this.artifacts = []; this.evidence = null; this.activeEvidence = null; this.evidenceError = ''; this.activeTab = 'summary';
       this.syncContract();
       await this.refresh(true);
     },
@@ -205,10 +206,107 @@ export const AnalysisPanel = {
       };
       return labels[reason] || reason || '未知原因';
     },
-    gateReasons() {
-      if (!this.current?.source_scope?.length) return ['本次分析未带入数据源，Agent 无法执行数据查询'];
+    gateIssues() {
+      if (!this.current?.source_scope?.length) return [{rule_id:'source_scope',reason:'本次分析未带入数据源，无法核对结果',action:'选择数据'}];
       const partial = [...this.events].reverse().find(item => item.type === 'analysis.partial');
-      return (partial?.payload?.validation?.blocking_issues || []).map(item => item.reason).filter(Boolean).slice(0, 3);
+      const issues = partial?.payload?.validation?.blocking_issues || [];
+      if (!issues.length) return [{rule_id:'retry',reason:'本次结果未通过质量校验，请重新分析并检查执行记录',action:'重新分析补证'}];
+      return issues.map(item => ({
+        rule_id: item.rule_id,
+        reason: item.reason || '校验未通过',
+        action: ['current_authorization'].includes(item.rule_id) ? '查看数据权限'
+          : ['numeric_claim_replay','independent_validation','tool_evidence','tool_failures','result_completeness','claim_provenance','contract_confirmed'].includes(item.rule_id) ? '重新分析补证'
+          : '查看执行记录',
+      }));
+    },
+    resolveGate(issue) {
+      if (issue.rule_id === 'source_scope') return this.retryWithSources();
+      if (issue.rule_id === 'current_authorization') return this.ctx.go('sources');
+      if (issue.action === '重新分析补证') return this.retryFailed();
+      this.showEventDetails = true;
+    },
+    claimSegments(claim) {
+      const payload = claim.payload || {};
+      const value = String(payload.text || '');
+      const cells = payload.evidence_cells || [];
+      let cursor = 0;
+      const used = new Set();
+      const segments = [];
+      for (const number of payload.numbers || []) {
+        const start = Number(number.start), end = Number(number.end);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < cursor || end > value.length) continue;
+        if (start > cursor) segments.push({ text: value.slice(cursor, start) });
+        const cellIndex = cells.findIndex((cell, index) => !used.has(index) && cell.number === number.text);
+        if (cellIndex >= 0) used.add(cellIndex);
+        segments.push({ text: value.slice(start, end), cellIndex });
+        cursor = end;
+      }
+      if (cursor < value.length) segments.push({ text: value.slice(cursor) });
+      return segments;
+    },
+    summaryWithEvidence() {
+      const answer = String(this.manifest?.summary || '');
+      if (!this.evidence?.claims?.length) return this.md(answer);
+      const escape = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+      const replacements = [];
+      let seek = 0;
+      for (const claim of this.evidence.claims) {
+        const payload = claim.payload || {};
+        const text = String(payload.text || '');
+        const offset = answer.indexOf(text, seek);
+        if (offset < 0) continue;
+        seek = offset + text.length;
+        const cells = payload.evidence_cells || [];
+        const used = new Set();
+        for (const number of payload.numbers || []) {
+          const start = Number(number.start), end = Number(number.end);
+          if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > text.length) continue;
+          const cellIndex = cells.findIndex((cell,index) => !used.has(index) && cell.number === number.text);
+          if (cellIndex < 0) continue;
+          used.add(cellIndex);
+          const raw = text.slice(start,end);
+          const button = `<button type="button" class="evidence-number" data-evidence-claim="${escape(claim.id)}" data-cell-index="${cellIndex}" aria-label="回放数字 ${escape(raw)} 的数据证据">${escape(raw)}<sup>${cellIndex+1}</sup></button>`;
+          replacements.push({start:offset+start,end:offset+end,button});
+        }
+      }
+      let marked = answer;
+      for (const item of replacements.sort((a,b) => b.start-a.start)) marked = marked.slice(0,item.start)+item.button+marked.slice(item.end);
+      return this.md(marked);
+    },
+    onSummaryClick(event) {
+      const button = event.target.closest('button[data-evidence-claim]');
+      if (!button) return;
+      const claim = this.evidence?.claims?.find(item => item.id === button.dataset.evidenceClaim);
+      if (claim) this.replayCell(claim, Number(button.dataset.cellIndex));
+    },
+    claimStatus(claim) {
+      const payload = claim.payload || {};
+      if (payload.numeric_replay === 'FAIL') return '待核对';
+      if ((payload.evidence_cells || []).length) return '数字已核对 · 解释需判断';
+      if ((payload.definition_numbers || []).length) return '口径常量已核对 · 解释需判断';
+      return '解释需人工判断';
+    },
+    async replayCell(claim, cellIndex) {
+      if (!this.current) return;
+      const runId = this.current.id;
+      this.evidenceLoading = true; this.evidenceError = ''; this.activeEvidence = null;
+      try {
+        const response = await api(withWorkspace(`/api/analyses/${runId}/evidence/claims/${claim.id}/cells/${cellIndex}`, this.state.workspaceId));
+        if (this.current?.id === runId) this.activeEvidence = response.item;
+      } catch (error) { this.evidenceError = error?.message || '证据单元格暂时无法回放'; }
+      finally { this.evidenceLoading = false; }
+    },
+    progressStages() {
+      const has = (type, tool) => this.events.some(event => event.type === type && (!tool || event.payload?.tool_id === tool));
+      const published = this.current?.quality_status === 'passed' && this.result?.status === 'published';
+      const stages = [
+        { label:'确认分析范围', done:!!this.contract?.confirmed_at },
+        { label:'查询授权数据', done:published || has('action.succeeded','query_data') },
+        { label:'核对结果与口径', done:published || has('action.succeeded','validate_result') },
+        { label:'生成可核验结论', done:published || has('analysis.published') },
+      ];
+      const next = stages.findIndex(stage => !stage.done);
+      return stages.map((stage,index) => ({...stage,status:stage.done?'completed':index===next&&this.processing?'running':index===next&&this.current?.execution_status==='finished'?'failed':'pending'}));
     },
     contractPayload() {
       return {
@@ -294,8 +392,9 @@ export const AnalysisPanel = {
     },
     async feedback(rating) {
       if (!this.current) return;
-      const category = rating === 'incorrect' ? (window.prompt('主要问题是什么？例如：口径错误、数据错误、理解错误', '口径错误') || '') : '';
-      if (rating === 'incorrect' && !category) return;
+      const entry = rating === 'incorrect' ? await this.ctx.askForm({title:'反馈分析问题',fields:[{key:'category',label:'主要问题',placeholder:'例如：口径错误、数据错误或理解错误',required:true}],submitLabel:'提交反馈'}) : null;
+      if (rating === 'incorrect' && !entry) return;
+      const category = entry?.category || '';
       try {
         await api('/api/feedback', { method: 'POST', body: { workspace_id: this.state.workspaceId, run_id: this.current.id, rating, category } });
         this.feedbackSent = rating; this.ctx.toast('反馈将进入管理员的质量运营闭环', '感谢反馈');
@@ -303,8 +402,9 @@ export const AnalysisPanel = {
     },
     async branch(mode) {
       const labels = { followup: '继续追问', refresh: '刷新数据', reproduce: '精确复现', reanalyze: '重新分析' };
-      const promptValue = window.prompt(labels[mode] + '：请描述目标', this.contract?.payload?.objective || '') || '';
-      if (!promptValue.trim()) return;
+      const entry = await this.ctx.askForm({title:labels[mode],fields:[{key:'objective',label:'分析目标',value:this.contract?.payload?.objective || '',required:true,multiline:true}],submitLabel:'开始分析'});
+      if (!entry) return;
+      const promptValue = entry.objective;
       try {
         const response = await api('/api/analyses/' + this.current.id + '/branch', {
           method: 'POST', body: { mode, prompt: promptValue },
@@ -315,28 +415,36 @@ export const AnalysisPanel = {
     },
     eventLabel(event) {
       const names = {
-        'run.created': '任务已创建', 'contract.confirmed': '需求口径已确认',
-        'model.requested': '模型正在决策', 'tool.started': '工具执行中',
-        'tool.finished': '工具已完成', 'analysis.published': '成果通过验证并发布',
-        'analysis.partial': '发布门禁阻止正式成果', 'run.status': '任务状态变化',
+        'analysis.created': '已接收分析问题', 'contract.confirmed': '分析范围已确认',
+        'model.decision': '正在确定分析步骤', 'plan.revised': '分析步骤已更新',
+        'action.submitted': '正在执行分析步骤',
+        'action.succeeded': '分析步骤已完成', 'action.failed': '分析步骤未完成',
+        'analysis.published': '结论通过校验', 'analysis.partial': '结论未通过发布校验',
+        'analysis.answer_repaired': '已移除缺少证据的数字',
+        'analysis.status': '分析状态已更新', 'attachments.added': '已添加参考附件',
+        'attachment.removed': '已移除参考附件',
       };
-      return names[event.type] || event.type;
+      if (event.type === 'action.succeeded') {
+        return {query_data:'数据查询已完成',validate_result:'数据结果已核对'}[event.payload?.tool_id] || names[event.type];
+      }
+      return names[event.type] || '分析记录已更新';
     },
     eventStatus(event) {
       if (event.type === 'analysis.published') return 'completed';
       if (event.type === 'analysis.partial') return 'failed';
-      if (event.type === 'tool.failed' || event.type === 'model.failed') return 'failed';
-      if (event.type === 'run.status') {
+      if (event.type === 'action.failed') return 'failed';
+      if (event.type === 'analysis.status') {
         const status = event.payload?.status;
         if (status === 'finished') return 'completed';
         if (status === 'failed') return 'failed';
         if (status === 'running' || status === 'queued' || status === 'waiting_job') return 'running';
       }
-      if (['tool.started', 'tool.finished', 'model.requested', 'contract.confirmed'].includes(event.type)) return 'running';
+      if (['action.submitted', 'model.decision'].includes(event.type)) return 'running';
       return 'completed';
     },
     timelineRows() {
-      return [...this.events].slice(-12).map(event => ({
+      const visible = new Set(['analysis.created','contract.confirmed','model.decision','action.submitted','action.succeeded','action.failed','analysis.published','analysis.partial','analysis.answer_repaired','analysis.status','attachments.added','attachment.removed']);
+      return this.events.filter(event => visible.has(event.type)).slice(-12).map(event => ({
         id: event.sequence,
         label: this.eventLabel(event),
         time: this.ctx.time(event.created_at),
@@ -349,12 +457,8 @@ export const AnalysisPanel = {
       <div ref="feed" class="chat-feed" :class="{'chat-feed--empty':!current}">
         <div v-if="!current" class="welcome-block">
           <section class="welcome-hero">
-            <div class="welcome-robot">
-              <Icon name="brain" :size="34"/>
-            </div>
             <h2>今天想了解什么？</h2>
             <p>用业务语言描述问题，我会拆解目标、查询数据、核对证据，并生成可被审计的结论。</p>
-            <div class="welcome-tag-row"><span>选定数据</span><span>核对口径</span><span>查看证据</span><span>导出报告</span></div>
           </section>
           <div class="home-readiness">
             <div class="source-picker-wrap">
@@ -423,11 +527,14 @@ export const AnalysisPanel = {
                 <button v-if="!['finished','failed','cancelled'].includes(current.execution_status)" class="button button--small" @click="control('cancel')">取消</button>
               </div>
             </header>
-            <details :open="processing"><summary>{{ events.length }} 条持久化事件 · 完成后自动折叠</summary>
+            <ol class="analysis-stage-list" aria-label="分析进度">
+              <li v-for="stage in progressStages()" :key="stage.label" :data-status="stage.status"><span class="analysis-stage-list__mark"><Icon v-if="stage.status==='completed'" name="check" :size="13"/><Icon v-else-if="stage.status==='failed'" name="warning" :size="13"/></span><b>{{ stage.label }}</b><small>{{ {completed:'已完成',running:'进行中',failed:'未完成',pending:'待执行'}[stage.status] }}</small></li>
+            </ol>
+            <details :open="showEventDetails" @toggle="showEventDetails=$event.target.open" class="event-details"><summary>查看详细执行记录（{{ events.length }} 条）</summary>
               <ul class="timeline-list">
                 <li v-for="row in timelineRows()" :key="row.id" class="timeline-item" :data-status="row.status">
                   <span class="timeline-item__icon"><Icon v-if="row.status==='completed'" name="check" :size="14"/><Icon v-else-if="row.status==='failed'" name="warning" :size="14"/><Icon v-else name="bolt" :size="14"/></span>
-                  <div class="timeline-item__main"><b>{{ row.label }}</b><small>#{{ row.id }} · {{ row.time }}</small></div>
+                  <div class="timeline-item__main"><b>{{ row.label }}</b><small>{{ row.time }}</small></div>
                   <span class="timeline-item__time">{{ row.status === 'completed' ? '已完成' : row.status === 'failed' ? '需关注' : '进行中' }}</span>
                 </li>
               </ul>
@@ -440,9 +547,8 @@ export const AnalysisPanel = {
             </div>
             <div v-if="current.quality_status && current.quality_status!=='passed' && current.execution_status==='finished'" class="analysis-blocked">
               <b>{{ !current.source_scope?.length ? '本次分析没有带入数据' : '分析结果未通过发布校验' }}</b>
-              <span v-for="reason in gateReasons()" :key="reason">{{ reason }}</span>
+              <div v-for="(issue,index) in gateIssues()" :key="index" class="gate-issue"><span>{{ issue.reason }}</span><button type="button" class="button button--small" @click="resolveGate(issue)">{{ issue.action }}</button></div>
               <small>系统已阻止未经证据验证的结果导出或发送。</small>
-              <button v-if="!current.source_scope?.length" class="button button--small" @click="retryWithSources">选择数据并重新分析</button>
             </div>
           </section>
 
@@ -453,9 +559,25 @@ export const AnalysisPanel = {
             </nav>
             <div v-if="activeTab==='summary'" class="result-pane">
               <div v-if="manifest.kpis?.length" class="kpi-grid summary-kpi-grid"><article v-for="item in manifest.kpis" :key="item.id"><small>{{ item.label }}</small><b>{{ formatResultValue(item.value) }}</b><span v-if="item.unavailable_reason">{{ item.unavailable_reason }}</span></article></div>
-              <div class="markdown analysis-summary-markdown" v-html="md(manifest.summary)"></div>
+              <div class="markdown analysis-summary-markdown" v-html="summaryWithEvidence()" @click="onSummaryClick"></div>
+              <section v-if="evidence?.claims?.length" class="evidence-section" aria-label="结论依据">
+                <header><div><span class="section-label">结论依据</span><h2>逐条核对分析结论</h2></div><small>点击青色数字查看原始结果行；业务解释仍需人工判断</small></header>
+                <div class="evidence-layout" :class="{ 'evidence-layout--open':activeEvidence || evidenceLoading || evidenceError }">
+                  <div class="claim-list">
+                    <article v-for="claim in evidence.claims" :key="claim.id" class="claim-card" :data-verification="claim.payload?.numeric_replay">
+                      <div class="claim-card__text"><template v-for="(segment,index) in claimSegments(claim)" :key="index"><button v-if="segment.cellIndex>=0" type="button" class="evidence-number" :aria-label="'回放数字 '+segment.text+' 的数据证据'" @click="replayCell(claim,segment.cellIndex)">{{ segment.text }}<sup>{{ segment.cellIndex+1 }}</sup></button><span v-else>{{ segment.text }}</span></template></div>
+                      <footer><StatusPill :status="claim.payload?.numeric_replay==='FAIL'?'failed':claim.payload?.evidence_cells?.length?'completed':'waiting_approval'" :label="claimStatus(claim)"/><span v-for="ref in claim.payload?.definition_refs || []" :key="ref" class="metric-ref">{{ ref }}</span><small v-if="claim.payload?.evidence_cells?.length">{{ claim.payload.evidence_cells.length }} 个数据单元格</small></footer>
+                    </article>
+                  </div>
+                  <aside v-if="activeEvidence || evidenceLoading || evidenceError" class="evidence-inspector" aria-live="polite">
+                    <header><h3>数据证据回放</h3><button type="button" class="icon-button" aria-label="关闭证据详情" @click="activeEvidence=null;evidenceError=''">×</button></header>
+                    <p v-if="evidenceLoading">正在读取已记录的数据行…</p>
+                    <p v-else-if="evidenceError" role="alert">{{ evidenceError }}</p>
+                    <template v-else-if="activeEvidence"><p class="evidence-inspector__claim">{{ activeEvidence.claim }}</p><p><b>核对值：</b>{{ activeEvidence.number }} · {{ activeEvidence.column }} = {{ activeEvidence.value }}</p><p v-if="activeEvidence.metric?.metric_id"><b>指标版本：</b>{{ activeEvidence.metric.metric_id }}@{{ activeEvidence.metric.metric_version }}</p><p><b>结果行：</b>{{ activeEvidence.row_index+1 }}</p><dl><template v-for="(value,key) in activeEvidence.row" :key="key"><dt>{{ key }}</dt><dd>{{ value }}</dd></template></dl></template>
+                  </aside>
+                </div>
+              </section>
               <details><summary>分析范围与验证局限</summary><div class="analysis-scope-details"><p><b>目标：</b>{{ manifest.contract?.objective || '未指定' }}</p><p><b>覆盖范围：</b>{{ manifest.contract?.coverage || '未指定' }}</p><p><b>维度：</b>{{ manifest.contract?.dimensions?.join('、') || '未指定' }}</p></div><ul><li v-for="item in manifest.limitations" :key="item">{{ item }}</li></ul></details>
-              <details v-if="evidence" class="evidence-drawer"><summary>查看结论依据（{{ evidence.claims?.length || 0 }} 条）</summary><p>数值核对只检查数据证据；业务解释和建议仍需结合口径与场景判断。</p><div class="claim-list"><article v-for="claim in evidence.claims" :key="claim.id"><header><StatusPill :status="claim.payload?.status==='validated'?'completed':'draft'" :label="claim.payload?.numeric_replay==='PASS'?'数值有证据':claim.payload?.numeric_replay==='NOT_EVALUATED'?'解释待人工判断':'待核对'"/><span v-for="ref in claim.payload?.definition_refs || []" :key="ref">{{ ref }}</span></header><p>{{ claim.payload?.text }}</p><small>{{ claim.payload?.evidence_cells?.length || 0 }} 个数据单元格可回放</small></article></div></details>
             </div>
             <div v-else-if="activeTab==='dashboard'" class="result-pane">
               <div class="four-chart-grid"><article v-for="chart in manifest.charts" :key="chart.id"><h3>{{ chart.title }}</h3><ChartView v-if="chart.available" :spec="chart"/><p v-else>{{ chart.unavailable_reason }}</p></article></div>

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import csv
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
@@ -129,7 +131,8 @@ def _claim_numbers(text: str) -> list[dict[str, Any]]:
         # Calendar years are context, not quantitative claims.
         if value.is_integer() and 1900 <= value <= 2100 and (suffix == "年" or "-" in text[max(0, match.start() - 1):match.end() + 1]):
             continue
-        output.append({"text": raw, "value": value, "percentage": raw.endswith("%")})
+        output.append({"text": raw, "value": value, "percentage": raw.endswith("%"),
+                       "start": match.start(), "end": match.end()})
     return output
 
 
@@ -411,3 +414,55 @@ class ResultService:
                 "SELECT * FROM claims WHERE run_id=? AND workspace_id=? ORDER BY created_at", (run_id, workspace_id),
             ).fetchall()
         return [dict(row) | {"payload": json.loads(row["payload"])} for row in rows]
+
+    def replay_cell(self, run_id: str, claim_id: str, cell_index: int, *, workspace_id: str) -> dict[str, Any]:
+        """Read one recorded result row behind a published numeric claim."""
+        publication = self.publication(run_id, workspace_id=workspace_id)
+        if not publication or cell_index < 0:
+            raise FileNotFoundError("证据单元格不存在")
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT manifest_id,payload FROM claims WHERE id=? AND run_id=? AND workspace_id=?",
+                (claim_id, run_id, workspace_id),
+            ).fetchone()
+        if not row or row["manifest_id"] != publication["manifest_id"]:
+            raise FileNotFoundError("证据单元格不存在")
+        claim = json.loads(row["payload"])
+        cells = claim.get("evidence_cells") or []
+        if cell_index >= len(cells):
+            raise FileNotFoundError("证据单元格不存在")
+        cell = cells[cell_index]
+        result_id = str(cell.get("result_id") or "")
+        if not any(
+            (result := _result_for_ref(self.db, workspace_id, str(ref))) and result["id"] == result_id
+            for ref in claim.get("evidence_refs") or []
+        ):
+            raise FileNotFoundError("证据来源不存在")
+        result = self.db.get("query_results", result_id, workspace_id=workspace_id)
+        if not result or result.get("completeness") != "complete":
+            raise FileNotFoundError("证据结果不可用")
+        index = int(cell["row"])
+        if index < 0 or index >= 200_000:
+            raise FileNotFoundError("证据行不存在")
+        path = Path(str(result.get("path") or ""))
+        if path.is_file():
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                recorded_row = next(islice(csv.DictReader(handle), index, index + 1), None)
+        else:
+            data = result.get("data") or []
+            recorded_row = data[index] if index < len(data) else None
+        column = str(cell.get("column") or "")
+        if not isinstance(recorded_row, dict) or column not in recorded_row:
+            raise FileNotFoundError("证据行不存在")
+        try:
+            current_value = float(recorded_row[column])
+        except (TypeError, ValueError) as error:
+            raise ValueError("证据结果已变化，无法回放") from error
+        if not math.isclose(current_value, float(cell["value"]), rel_tol=1e-6, abs_tol=1e-9):
+            raise ValueError("证据结果已变化，无法回放")
+        return {
+            "claim": claim.get("text"), "number": cell.get("number"),
+            "result_id": result_id, "row_index": index, "column": column,
+            "value": recorded_row[column], "row": recorded_row,
+            "metric": cell.get("semantic_query"),
+        }

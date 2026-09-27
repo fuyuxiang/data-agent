@@ -26,6 +26,7 @@ const Root = {
       pendingPrompt: '',
       busy: false, busyLabel: '', toasts: [],
       sessionDialog: { mode: '', id: '', name: '' },
+      interactionDialog: { open: false, kind: '', title: '', message: '', fields: [], values: {}, error: '', submitLabel: '' },
       commandOpen: false, commands: [], commandQuery: '', theme: document.documentElement.dataset.theme || 'light',
     });
 
@@ -133,6 +134,41 @@ const Root = {
       state.sessionDialog = { mode, id: session.id, name: session.name || '' };
     };
     const closeSessionDialog = () => { state.sessionDialog = { mode: '', id: '', name: '' }; };
+    let interactionResolve = null;
+    const closeInteraction = () => {
+      state.interactionDialog.open = false;
+      interactionResolve?.(null);
+      interactionResolve = null;
+    };
+    const openInteraction = (options) => new Promise(resolve => {
+      if (interactionResolve) closeInteraction();
+      interactionResolve = resolve;
+      state.interactionDialog = {
+        open: true, kind: options.kind || 'form', title: options.title,
+        message: options.message || '', fields: options.fields || [],
+        values: Object.fromEntries((options.fields || []).map(field => [field.key, field.value || ''])),
+        error: '', submitLabel: options.submitLabel || '保存',
+      };
+    });
+    const askForm = options => openInteraction({ ...options, kind: 'form' });
+    const confirmAction = options => openInteraction({ ...options, kind: 'confirm' }).then(Boolean);
+    const submitInteraction = () => {
+      const dialog = state.interactionDialog;
+      if (dialog.kind === 'form') {
+        for (const field of dialog.fields) {
+          const value = String(dialog.values[field.key] || '').trim();
+          if (field.required && !value) {
+            dialog.error = `请填写${field.label}`;
+            return;
+          }
+          dialog.values[field.key] = value;
+        }
+      }
+      const result = dialog.kind === 'confirm' ? true : { ...dialog.values };
+      dialog.open = false;
+      interactionResolve?.(result);
+      interactionResolve = null;
+    };
     const confirmSessionDialog = async () => {
       const dialog = state.sessionDialog;
       const session = state.sessions.find(item => item.id === dialog.id);
@@ -189,7 +225,7 @@ const Root = {
       if(name==='clear') { const session=activeSession();if(session)await api(`/api/sessions/${session.id}/clear`,{method:'POST'});toast('','会话上下文已清除');return; }
       if(name==='compact'){const session=activeSession();if(!session)return;await api(`/api/sessions/${session.id}/commands/compact/execute`,{method:'POST',body:{arguments:arg}});toast('','上下文已压缩');return;}
       if(name==='save') { const session=activeSession(); if(session){await api(`/api/sessions/${session.id}/save`,{method:'POST',body:{name:arg||session.name}});toast('当前消息与分析证据已保存','会话已保存');} return; }
-      if(name==='instruction'){const session=activeSession();if(!session)return;const value=arg||prompt('输入仅对当前会话生效的指令：',session.temporary_instruction||'')||'';if(value){session.temporary_instruction=value;session.temp_prompt_enabled=true;await api(`/api/sessions/${session.id}`,{method:'PATCH',body:{temporary_instruction:value,temp_prompt_enabled:true}});toast('','临时指令已更新');}return;}
+      if(name==='instruction'){const session=activeSession();if(!session)return;const entry=arg?{value:arg}:await askForm({title:'本会话临时指令',fields:[{key:'value',label:'指令内容',value:session.temporary_instruction||'',required:true,multiline:true}],submitLabel:'保存指令'});const value=entry?.value||'';if(value){session.temporary_instruction=value;session.temp_prompt_enabled=true;await api(`/api/sessions/${session.id}`,{method:'PATCH',body:{temporary_instruction:value,temp_prompt_enabled:true}});toast('','临时指令已更新');}return;}
       if(name==='mcp'||name==='workspace'){localStorage.setItem('meridian-settings-tab',name==='mcp'?'tools':'members');return go('settings');}
       if(name==='sessions'){if(arg==='new')return newSession();toast(`${state.sessions.length} 个当前工作空间会话`,'会话');return;}
       if(name==='status'){const session=activeSession();toast(`${selectedSources().length} 个数据源 · ${session?.provider_id||'默认模型'}`,'当前状态');return;}
@@ -197,7 +233,7 @@ const Root = {
       state.commandQuery=name;state.commandOpen=true;
     };
     const toggleTheme = () => { state.theme=state.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=state.theme;localStorage.setItem('meridian-theme',state.theme); };
-    const ctx = { state, toast, fail, run, activeSession, selectedSources, pruneSessionSourceIds, time, number, go, command, bootstrap, newSession, startAnalysis, openAnalysis };
+    const ctx = { state, toast, fail, run, activeSession, selectedSources, pruneSessionSourceIds, time, number, go, command, bootstrap, newSession, startAnalysis, openAnalysis, askForm, confirmAction };
 
     const keydown = (event) => {
       if ((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k') { event.preventDefault();state.commandOpen=true; }
@@ -215,7 +251,7 @@ const Root = {
     ]);
     const activeRoute=computed(()=>productRoutes.find(item=>item.id===state.route)||productRoutes[0]);
     const userInitial=computed(()=>(state.user?.name||state.user?.username||state.user?.email||'本')[0].toUpperCase());
-    return { state, routes, routeGroups, activeRoute, userInitial, canAdmin, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, openSessionDialog, closeSessionDialog, confirmSessionDialog, toggleTheme, command, submitAuth, sendAuthCode, logout };
+    return { state, routes, routeGroups, activeRoute, userInitial, canAdmin, ctx, activeSession, selectedSources, filteredCommands, go, switchWorkspace, switchSession, newSession, openSessionDialog, closeSessionDialog, confirmSessionDialog, closeInteraction, submitInteraction, toggleTheme, command, submitAuth, sendAuthCode, logout };
   },
   template: `
     <div v-if="state.authChecking" class="boot-screen"><span class="boot-mark boot-mark--logo"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><p>正在验证会话…</p></div>
@@ -271,7 +307,7 @@ const Root = {
         <nav class="main-nav">
           <section v-for="group in routeGroups" :key="group.id" class="nav-group">
             <header>{{ group.label }}</header>
-            <button v-for="item in group.items" :key="item.id" :class="{active:state.route===item.id}" @click="go(item.id)"><Icon :name="item.icon"/><span>{{ item.label }}</span></button>
+            <button v-for="item in group.items" :key="item.id" :aria-label="item.label" :class="{active:state.route===item.id}" @click="go(item.id)"><Icon :name="item.icon"/><span>{{ item.label }}</span></button>
           </section>
         </nav>
         <section class="sidebar-sessions"><header><span>分析记录</span><button @click="newSession()" title="新建分析"><Icon name="plus"/></button></header><div class="sidebar-session-list"><div v-for="session in state.sessions" :key="session.id" class="sidebar-session-row" :class="{active:session.id===state.activeSessionId}"><button class="sidebar-session-main" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button><span class="sidebar-session-actions"><button @click.stop="openSessionDialog('rename',session)" :aria-label="'重命名 '+session.name" title="重命名"><Icon name="edit" :size="14"/></button><button class="danger" @click.stop="openSessionDialog('delete',session)" :aria-label="'删除 '+session.name" title="删除"><Icon name="trash" :size="14"/></button></span></div></div></section>
@@ -287,7 +323,7 @@ const Root = {
           <button class="global-search" @click="state.commandOpen=true"><Icon name="search" :size="16"/><span>搜索分析、指标和数据资产</span><kbd>⌘ K</kbd></button>
           <div class="global-actions"><button class="icon-button" @click="toggleTheme" :aria-label="state.theme==='dark'?'切换浅色模式':'切换深色模式'"><Icon :name="state.theme==='dark'?'sun':'moon'" :size="17"/></button><span class="top-avatar">{{ userInitial }}</span></div>
         </header>
-        <div class="mobile-bar"><button class="icon-button" @click="state.sidebarOpen=true" aria-label="打开导航">☰</button><b>{{ activeRoute.label }}</b><button class="icon-button" @click="toggleTheme"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button></div>
+        <div class="mobile-bar"><button class="icon-button" @click="state.sidebarOpen=true" aria-label="打开导航">☰</button><b>{{ activeRoute.label }}</b><button class="icon-button" @click="toggleTheme" :aria-label="state.theme==='dark'?'切换浅色模式':'切换深色模式'"><Icon :name="state.theme==='dark'?'sun':'moon'"/></button></div>
         <div class="app-view">
           <ChatPanel v-if="state.route==='chat'" :ctx="ctx"/>
           <SourcesPanel v-else-if="state.route==='sources'" :ctx="ctx"/>
@@ -302,6 +338,18 @@ const Root = {
         <label v-if="state.sessionDialog.mode==='rename'" class="dialog-field"><span>记录名称</span><input v-model.trim="state.sessionDialog.name" maxlength="100" autofocus @keyup.enter="confirmSessionDialog"></label>
         <div v-else class="delete-session-copy"><p>确定删除“{{ state.sessionDialog.name }}”吗？</p><small>该记录将从分析列表中移除，不会删除关联数据源。</small></div>
         <template #footer><button class="button" @click="closeSessionDialog">取消</button><button class="button" :class="state.sessionDialog.mode==='delete' ? 'button--danger' : 'button--primary'" @click="confirmSessionDialog">{{ state.sessionDialog.mode==='delete' ? '删除' : '保存' }}</button></template>
+      </Modal>
+      <Modal :open="state.interactionDialog.open" :title="state.interactionDialog.title" @close="closeInteraction">
+        <p v-if="state.interactionDialog.message" class="dialog-description">{{ state.interactionDialog.message }}</p>
+        <div v-if="state.interactionDialog.kind==='form'" class="dialog-form">
+          <label v-for="field in state.interactionDialog.fields" :key="field.key" class="dialog-field">
+            <span>{{ field.label }}<em v-if="field.required"> *</em></span>
+            <textarea v-if="field.multiline" v-model="state.interactionDialog.values[field.key]" :placeholder="field.placeholder || ''" :maxlength="field.maxlength || 5000"></textarea>
+            <input v-else v-model="state.interactionDialog.values[field.key]" :placeholder="field.placeholder || ''" :maxlength="field.maxlength || 500" @keyup.enter="submitInteraction">
+          </label>
+        </div>
+        <p v-if="state.interactionDialog.error" class="dialog-error" role="alert">{{ state.interactionDialog.error }}</p>
+        <template #footer><button class="button" @click="closeInteraction">取消</button><button class="button" :class="state.interactionDialog.kind==='confirm' ? 'button--danger' : 'button--primary'" @click="submitInteraction">{{ state.interactionDialog.submitLabel }}</button></template>
       </Modal>
       <Transition name="fade"><div v-if="state.busy" class="busy-overlay"><span class="spinner"></span><b>{{ state.busyLabel || '正在处理' }}</b></div></Transition>
       <ToastStack :items="state.toasts"/>

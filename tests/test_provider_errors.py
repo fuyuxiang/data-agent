@@ -6,6 +6,14 @@ import httpx
 from openai import APIConnectionError
 
 
+def _stub_public_dns(monkeypatch):
+    # These tests exercise proxy configuration, not the host machine's DNS.
+    monkeypatch.setattr(
+        "backend.services.security.socket.getaddrinfo",
+        lambda _hostname, port: [(None, None, None, None, ("8.8.8.8", port))],
+    )
+
+
 def test_provider_connection_error_is_actionable(app, client, monkeypatch):
     provider_id = "provider-connection-error"
     app.extensions["meridian_db"].put(
@@ -80,6 +88,7 @@ def test_provider_resolution_ignores_broken_system_proxy_by_default(app, monkeyp
         captured.update(kwargs)
         return SimpleNamespace()
 
+    _stub_public_dns(monkeypatch)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     monkeypatch.delenv("MERIDIAN_MODEL_TRUST_ENV_PROXY", raising=False)
     monkeypatch.setattr("backend.services.models.OpenAI", fake_openai)
@@ -114,6 +123,7 @@ def test_provider_resolution_can_opt_into_system_proxy(app, monkeypatch):
         captured.update(kwargs)
         return SimpleNamespace()
 
+    _stub_public_dns(monkeypatch)
     monkeypatch.setenv("MERIDIAN_MODEL_TRUST_ENV_PROXY", "1")
     monkeypatch.setattr("backend.services.models.OpenAI", fake_openai)
     with app.app_context():

@@ -343,6 +343,21 @@ def test_publication_gate_replays_numeric_claims_against_result_cells(app, sourc
         claims = ResultService(store.db).claims(run["id"], workspace_id="default")
         assert claims[-1]["payload"]["numeric_replay"] == "PASS"
         assert claims[-1]["payload"]["evidence_cells"][0]["column"] == "total_sales"
+        response = app.test_client().get(
+            f"/api/analyses/{run['id']}/evidence/claims/{claims[-1]['id']}/cells/0"
+        )
+        assert response.status_code == 200
+        replayed = response.get_json()["item"]
+        assert float(replayed["value"]) == 745
+        assert float(replayed["row"]["total_sales"]) == 745
+        assert response.get_json()["item"]["result_id"] == result["id"]
+        assert app.test_client().get(
+            f"/api/analyses/{run['id']}/evidence/claims/{claims[-1]['id']}/cells/1"
+        ).status_code == 404
+        if len(claims) > 1:
+            assert app.test_client().get(
+                f"/api/analyses/{run['id']}/evidence/claims/{claims[0]['id']}/cells/0"
+            ).status_code == 404
 
 
 def test_numeric_claim_must_match_the_named_result_row(app, source):

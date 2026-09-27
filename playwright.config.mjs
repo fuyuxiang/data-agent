@@ -7,6 +7,7 @@ for (const name of ['ALL_PROXY', 'HTTPS_PROXY', 'HTTP_PROXY', 'all_proxy', 'http
 }
 process.env.NO_PROXY = '127.0.0.1,localhost';
 process.env.no_proxy = process.env.NO_PROXY;
+const fixturePort = Number(process.env.MERIDIAN_BROWSER_TEST_PORT || 5013);
 
 export default defineConfig({
   testDir: './tests/browser',
@@ -15,13 +16,13 @@ export default defineConfig({
   workers: 1,
   reporter: [['line']],
   use: {
-    baseURL: 'http://127.0.0.1:5013',
+    baseURL: `http://127.0.0.1:${fixturePort}`,
     browserName: 'chromium',
     trace: 'retain-on-failure',
   },
   webServer: {
     command: 'python3 -m scripts.run_browser_fixture',
-    url: 'http://127.0.0.1:5013/api/ready',
+    url: `http://127.0.0.1:${fixturePort}/api/ready`,
     timeout: 30_000,
     reuseExistingServer: false,
   },

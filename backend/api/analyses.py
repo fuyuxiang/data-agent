@@ -436,6 +436,15 @@ def evidence(run_id: str):
     ))
 
 
+@bp.get("/api/analyses/<run_id>/evidence/claims/<claim_id>/cells/<int:cell_index>")
+@api_errors
+def replay_evidence_cell(run_id: str, claim_id: str, cell_index: int):
+    run = _require_run(run_id)
+    return ok(item=ResultService(db()).replay_cell(
+        run_id, claim_id, cell_index, workspace_id=run["workspace_id"],
+    ))
+
+
 @bp.get("/api/analyses/<run_id>/validations")
 @api_errors
 def validations(run_id: str):

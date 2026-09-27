@@ -34,6 +34,7 @@ export const Icon = {
     };
     return () => Vue.h('svg', {
       viewBox: '0 0 24 24', width: props.size, height: props.size,
+      'aria-hidden': 'true', focusable: 'false',
       fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8,
       'stroke-linecap': 'round', 'stroke-linejoin': 'round',
       innerHTML: paths[props.name] || paths.bolt,
@@ -45,11 +46,35 @@ export const Modal = {
   components: { Icon },
   props: { open: Boolean, title: String, wide: Boolean },
   emits: ['close'],
+  data: () => ({ previousFocus: null }),
+  watch: {
+    open(value) {
+      if (value) {
+        this.previousFocus = document.activeElement;
+        nextTick(() => {
+          const dialog = this.$refs.dialog;
+          (dialog?.querySelector('[autofocus], input, textarea, select, button') || dialog)?.focus();
+        });
+      } else if (this.previousFocus?.isConnected) {
+        nextTick(() => this.previousFocus?.focus());
+      }
+    },
+  },
+  methods: {
+    keydown(event) {
+      if (event.key === 'Escape') { event.stopPropagation(); this.$emit('close'); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = [...(this.$refs.dialog?.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]') || [])];
+      if (!focusable.length) { event.preventDefault(); this.$refs.dialog?.focus(); return; }
+      if (event.shiftKey && document.activeElement === focusable[0]) { event.preventDefault(); focusable.at(-1).focus(); }
+      else if (!event.shiftKey && document.activeElement === focusable.at(-1)) { event.preventDefault(); focusable[0].focus(); }
+    },
+  },
   template: `
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="open" class="modal-backdrop" @mousedown.self="$emit('close')">
-          <section class="modal" :class="{ 'modal--wide': wide }" role="dialog" aria-modal="true" :aria-label="title">
+          <section ref="dialog" class="modal" :class="{ 'modal--wide': wide }" role="dialog" aria-modal="true" :aria-label="title" tabindex="-1" @keydown="keydown">
             <header class="modal__header"><h2>{{ title }}</h2><button class="icon-button" @click="$emit('close')" aria-label="关闭"><Icon name="close" /></button></header>
             <div class="modal__body"><slot /></div>
             <footer v-if="$slots.footer" class="modal__footer"><slot name="footer" /></footer>
@@ -82,13 +107,24 @@ export const DataTable = {
     shownColumns() { return this.columns.length ? this.columns : (this.rows[0] ? Object.keys(this.rows[0]) : []); },
   },
   methods: {
+    key(column) { return typeof column === 'string' ? column : column.key; },
+    label(column) { return typeof column === 'string' ? column : column.label || column.key; },
+    numeric(column) {
+      if (column?.align) return column.align === 'right';
+      const key = this.key(column);
+      const values = this.rows.slice(0, 30).map(row => row[key]).filter(value => value !== null && value !== undefined && value !== '');
+      return values.length > 0 && values.every(value =>
+        typeof value === 'number' && Number.isFinite(value)
+        || typeof value === 'string' && /^-?\d+(?:,\d{3})*(?:\.\d+)?%?$/.test(value.trim())
+      );
+    },
     format(value) {
       if (value === null || value === undefined || Number.isNaN(value)) return '—';
       if (typeof value === 'object') return JSON.stringify(value);
       return String(value);
     },
   },
-  template: `<div class="data-table-wrap" :style="{ maxHeight }"><table class="data-table"><thead><tr><th v-for="column in shownColumns" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in rows" :key="index"><td v-for="column in shownColumns" :key="column" :title="format(row[column])">{{ format(row[column]) }}</td></tr></tbody></table></div>`,
+  template: `<div class="data-table-wrap" :style="{ maxHeight }"><table class="data-table"><thead><tr><th v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }">{{ label(column) }}</th></tr></thead><tbody><tr v-for="(row, index) in rows" :key="index"><td v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }" :title="format(row[key(column)])">{{ format(row[key(column)]) }}</td></tr></tbody></table></div>`,
 };
 
 function genericSeries(spec) {
@@ -182,8 +218,9 @@ export const ChartView = {
       const option = props.spec.option
         ? JSON.parse(JSON.stringify(props.spec.option))
         : (composition ? compositionOption(props.spec) : genericSeries(props.spec));
-      option.color = ['#2563eb', '#0ea5a8', '#f59e0b', '#7c3aed', '#16a36a', '#e25555'];
-      option.animationDuration = 450;
+      const theme = getComputedStyle(document.documentElement);
+      option.color = [1, 2, 3, 4, 5, 6].map(index => theme.getPropertyValue(`--chart-${index}`).trim());
+      option.animationDuration = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 300;
       chart.setOption(option, true);
       chart.resize();
     };
