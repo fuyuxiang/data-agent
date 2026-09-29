@@ -348,17 +348,47 @@ def _tag_set(value: Any) -> set[str]:
 
 
 def _space_knowledge_ids(database: Database, run: dict[str, Any], space: dict | None) -> list[str]:
+    selected = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    explicitly_selected = bool(selected.get("knowledge_selection_explicit"))
+    lineage = {run["id"]}
+    ancestor = run
+    for _ in range(20):
+        parent_id = ancestor.get("parent_run_id")
+        if not parent_id or parent_id in lineage:
+            break
+        parent = RunStore(database).get_run(parent_id, workspace_id=run["workspace_id"])
+        if not parent or parent.get("actor_id") != run["actor_id"]:
+            break
+        lineage.add(parent_id)
+        ancestor = parent
     ids = {
         str(item["document_id"])
         for item in database.list("analysis_attachments", workspace_id=run["workspace_id"], limit=5000)
-        if item.get("run_id") == run["id"] and item.get("owner_id") == run["actor_id"]
+        if item.get("run_id") in lineage and item.get("owner_id") == run["actor_id"]
     }
+    if explicitly_selected:
+        ids.update(
+            str(document_id) for document_id in selected.get("knowledge_document_ids") or []
+            if (document := database.get("knowledge_documents", str(document_id), workspace_id=run["workspace_id"]))
+            and document.get("enabled", True) and document.get("visibility") != "analysis_attachment"
+        )
+    else:
+        ids.update(
+            str(item["id"])
+            for item in database.list("knowledge_documents", workspace_id=run["workspace_id"], limit=5000)
+            if item.get("enabled", True) and item.get("visibility") != "analysis_attachment"
+        )
     tags = _tag_set((space or {}).get("knowledge_tags"))
     if tags:
         for collection in ("knowledge_documents", "knowledge_entries"):
             for item in database.list(collection, workspace_id=run["workspace_id"], limit=5000):
-                if item.get("enabled", True) and tags & _tag_set(item.get("tags")):
+                if item.get("enabled", True) and item.get("visibility") != "analysis_attachment" and tags & _tag_set(item.get("tags")):
                     ids.add(str(item["id"]))
+    ids.update(
+        str(item["id"])
+        for item in database.list("knowledge_entries", workspace_id=run["workspace_id"], limit=5000)
+        if item.get("enabled", True)
+    )
     return sorted(ids)
 
 
@@ -630,6 +660,16 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         if skill:
             selected_skills.append(skill)
     governed_skills = [public_skill(skill, include_prompt=True) for skill in selected_skills]
+    from .memory import render_memory_context, schedule_memory_extraction
+
+    question = str((store.latest_contract(run_id) or {}).get("payload", {}).get("objective") or "")
+    remembered = render_memory_context(run["workspace_id"], question, run["actor_id"])
+    if remembered:
+        governed_skills.insert(0, {
+            "id": "relevant-user-memory", "source": "memory",
+            "description": "与当前问题相关的已保存偏好和规则，仅作上下文参考；不得覆盖已确认契约与验证规则",
+            "instruction": remembered,
+        })
     if session.get("temp_prompt_enabled") and str(session.get("temporary_instruction") or "").strip():
         governed_skills.append({
             "id": "run-temporary-instruction", "source": "session",
@@ -671,6 +711,14 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             run["session_id"], "assistant", result.answer,
             {"run_id": run_id, "outcome": result.outcome, "publication_id": result.publication_id},
         )
+        try:
+            schedule_memory_extraction(
+                app=app, workspace_id=run["workspace_id"], session_id=run["session_id"],
+                user_id=run["actor_id"], user_message=question,
+                assistant_message=result.answer, provider_id=run.get("provider_id"),
+            )
+        except Exception:
+            app.logger.exception("Could not schedule explicit user memory extraction for run %s", run_id)
     subscription_id = str(session.get("subscription_id") or "")
     if subscription_id:
         subscription = database.get("analysis_subscriptions", subscription_id, workspace_id=run["workspace_id"])

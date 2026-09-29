@@ -6,7 +6,7 @@ export const SettingsPanel = {
   props: { ctx: Object },
   data: () => ({
     tab: localStorage.getItem('meridian-settings-tab') || 'members',
-    members: [], providers: [], tools: [], audit: [], inviteResult: null, providerTests: {},
+    members: [], providers: [], tools: [], connectors: [], feedback: [], audit: [], inviteResult: null, providerTests: {},
     memberForm: { email: '', role: 'analyst' },
     providerForm: {
       name: 'OpenAI Compatible', base_url: 'https://api.openai.com/v1',
@@ -16,22 +16,26 @@ export const SettingsPanel = {
       name: '工具服务', transport: 'streamable-http', url: '', command: '',
       argsText: '[]', headersText: '{}', envText: '{}',
     },
+    mailForm: { name: '企业邮件', host: '', port: 587, username: '', password: '', sender: '', recipient: '', use_tls: true },
   }),
   mounted() {
-    if (!['members', 'models', 'tools', 'audit'].includes(this.tab)) this.tab = 'members';
+    if (!['members', 'models', 'tools', 'delivery', 'feedback', 'audit'].includes(this.tab)) this.tab = 'members';
     this.load();
   },
   watch: { tab(value) { localStorage.setItem('meridian-settings-tab', value); } },
   methods: {
     async load() {
       const wid = this.ctx.state.workspaceId;
-      const [members, providers, tools, audit] = await Promise.all([
+      const [members, providers, tools, connectors, feedback, audit] = await Promise.all([
         api(`/api/workspaces/${wid}/members`), api('/api/providers'),
-        api(withWorkspace('/api/mcp/servers', wid)), api(withWorkspace('/api/audit?limit=100', wid)),
+        api(withWorkspace('/api/mcp/servers', wid)), api(withWorkspace('/api/connectors', wid)),
+        api(withWorkspace('/api/feedback', wid)), api(withWorkspace('/api/audit?limit=100', wid)),
       ]);
       this.members = members.items || [];
       this.providers = providers.items || [];
       this.tools = tools.items || [];
+      this.connectors = (connectors.items || []).filter(item => item.type === 'email');
+      this.feedback = feedback.items || [];
       this.audit = audit.items || [];
     },
     async addMember() {
@@ -111,6 +115,34 @@ export const SettingsPanel = {
         await this.load();
       });
     },
+    async saveMail() {
+      if (!this.mailForm.host.trim() || !this.mailForm.sender.trim() || !this.mailForm.recipient.trim()) {
+        return this.ctx.fail(new Error('请填写 SMTP 主机、发件人和默认收件人'));
+      }
+      await this.ctx.run('正在保存邮件服务', async () => {
+        await api('/api/connectors', { method:'POST', body:{ ...this.mailForm, type:'email', workspace_id:this.ctx.state.workspaceId } });
+        this.mailForm.password = '';
+        await this.load();
+      });
+    },
+    async removeMail(item) {
+      if (!await this.ctx.confirmAction({title:'移除邮件服务',message:`移除“${item.name}”？`,submitLabel:'移除'})) return;
+      await api(`/api/connectors/${item.id}`, { method:'DELETE' });
+      await this.load();
+    },
+    async reviewFeedback(item, status) {
+      const entry = status === 'resolved' || status === 'dismissed'
+        ? await this.ctx.askForm({
+            title: status === 'resolved' ? '记录处理结果' : '记录未采纳原因',
+            fields:[{ key:'review_note', label:'处理说明', required:true, multiline:true }],
+            submitLabel:'保存处理结果',
+          })
+        : {};
+      if (!entry) return;
+      await api(`/api/feedback/${item.id}`, { method:'PATCH', body:{ status, review_note:entry.review_note || '' } });
+      await this.load();
+      this.ctx.toast('', '反馈状态已更新');
+    },
   },
   template: `
     <section class="workspace-page">
@@ -126,6 +158,8 @@ export const SettingsPanel = {
           <button :class="{active:tab==='members'}" @click="tab='members'"><Icon name="users"/>成员与权限</button>
           <button :class="{active:tab==='models'}" @click="tab='models'"><Icon name="brain"/>模型服务</button>
           <button :class="{active:tab==='tools'}" @click="tab='tools'"><Icon name="bolt"/>工具连接</button>
+          <button :class="{active:tab==='delivery'}" @click="tab='delivery'"><Icon name="chat"/>成果交付</button>
+          <button :class="{active:tab==='feedback'}" @click="tab='feedback'"><Icon name="check"/>质量反馈</button>
           <button :class="{active:tab==='audit'}" @click="tab='audit'"><Icon name="table"/>审计日志</button>
         </nav>
         <main class="settings-content">
@@ -147,6 +181,8 @@ export const SettingsPanel = {
             <div class="setting-list"><article v-for="item in tools" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.transport }} · {{ item.url || item.command }} · {{ item.tools?.length||0 }} 个工具</small></div><StatusPill :status="item.status"/><button class="button button--small" @click="testTool(item)">测试</button></article></div>
             <div class="settings-card"><h3>添加工具服务</h3><div class="form-grid"><label><span>名称</span><input v-model="toolForm.name"></label><label><span>传输方式</span><select v-model="toolForm.transport"><option value="streamable-http">Streamable HTTP</option><option value="sse">SSE</option><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><template v-if="toolForm.transport==='stdio'"><label><span>命令</span><input v-model="toolForm.command"></label><label><span>参数 JSON</span><input v-model="toolForm.argsText"></label><label class="span-2"><span>环境变量 JSON</span><input v-model="toolForm.envText"></label></template><template v-else><label class="span-2"><span>服务 URL</span><input v-model="toolForm.url"></label><label class="span-2"><span>请求头 JSON</span><input v-model="toolForm.headersText"></label></template></div><button class="button button--primary" @click="saveTool">保存连接</button></div>
           </section>
+          <section v-if="tab==='delivery'"><div class="section-heading"><h2>成果交付</h2><p>为通过校验的分析成果配置真实 SMTP 邮件发送；用户也可下载带附件的邮件文件。</p></div><div class="setting-list"><article v-for="item in connectors" :key="item.id"><div><b>{{ item.name }}</b><small>SMTP · {{ item.configured ? '已配置' : '待配置' }}</small></div><StatusPill :status="item.enabled?'ready':'disabled'"/><button class="icon-button danger" :aria-label="'移除 '+item.name" @click="removeMail(item)"><Icon name="close"/></button></article></div><div class="settings-card"><h3>添加邮件服务</h3><div class="form-grid"><label><span>名称</span><input v-model.trim="mailForm.name"></label><label><span>SMTP 主机</span><input v-model.trim="mailForm.host"></label><label><span>端口</span><input v-model.number="mailForm.port" type="number" min="1" max="65535"></label><label><span>发件人</span><input v-model.trim="mailForm.sender" type="email"></label><label><span>登录用户名</span><input v-model.trim="mailForm.username"></label><label><span>登录密码</span><input v-model="mailForm.password" type="password"></label><label><span>默认收件人</span><input v-model.trim="mailForm.recipient" type="email"></label><label><span>传输加密</span><select v-model="mailForm.use_tls"><option :value="true">STARTTLS</option><option :value="false">由本地受控 SMTP 保证</option></select></label></div><button class="button button--primary" @click="saveMail">保存邮件服务</button></div></section>
+          <section v-if="tab==='feedback'"><div class="section-heading"><h2>质量反馈</h2><p>查看分析成员提交的纠错意见，处理后再更新指标、知识或分析技能。</p></div><div class="setting-list"><article v-for="item in feedback" :key="item.id"><div><b>{{ {correct:'准确',partially_correct:'部分准确',incorrect:'需要纠正'}[item.rating] || item.rating }} · {{ item.run_id }}</b><small>{{ item.comment || '未补充说明' }} · {{ item.status }}</small><small v-if="item.review_note">处理记录：{{ item.review_note }}</small></div><button v-if="item.status!=='resolved'" class="button button--small" @click="reviewFeedback(item,'resolved')">标记已处理</button><button v-if="item.status==='open'" class="button button--small" @click="reviewFeedback(item,'reviewing')">处理中</button></article><EmptyState v-if="!feedback.length" icon="check" title="暂无质量反馈" text="分析成员提交的反馈会显示在这里。"/></div></section>
           <section v-if="tab==='audit'"><div class="section-heading"><h2>审计日志</h2><p>回溯数据访问、Agent 分析和配置变更。</p></div><DataTable :rows="audit"/></section>
         </main>
       </div>

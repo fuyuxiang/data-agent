@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import smtplib
 import ssl
@@ -63,12 +64,17 @@ def _doc_header(document: Document, manifest: dict, title: str) -> dict[str, Any
     document.add_paragraph(str(contract.get("objective") or ""))
     document.add_heading("统计覆盖范围", level=1)
     document.add_paragraph(str(contract.get("coverage") or ""))
+    dimensions = contract.get("dimensions") or []
+    if dimensions:
+        document.add_paragraph("查看维度：" + "、".join(str(value) for value in dimensions))
     return payload
 
 
 def _write_kpis(document: Document, kpis: list[dict[str, Any]]) -> None:
-    document.add_heading("四项关键指标", level=1)
-    table = document.add_table(rows=2, cols=4)
+    if not kpis:
+        return
+    document.add_heading("关键指标", level=1)
+    table = document.add_table(rows=2, cols=min(4, len(kpis)))
     table.style = "Table Grid"
     for index, item in enumerate(kpis[:4]):
         table.cell(0, index).text = str(item.get("label") or "不可用")
@@ -81,16 +87,35 @@ def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
 
-    figure, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-    for index, (axis, chart) in enumerate(zip(axes.flat, charts[:4])):
+    for font_path in (
+        Path("/System/Library/Fonts/STHeiti Medium.ttc"),
+        Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+    ):
+        if font_path.is_file():
+            try:
+                font_manager.fontManager.addfont(str(font_path))
+                plt.rcParams["font.family"] = [font_manager.FontProperties(fname=str(font_path)).get_name()]
+                break
+            except (OSError, ValueError):
+                continue
+    plt.rcParams["axes.unicode_minus"] = False
+
+    shown = [chart for chart in charts if chart.get("available")][:4]
+    count = max(1, len(shown))
+    columns = min(2, count)
+    rows = math.ceil(count / columns)
+    figure, axes = plt.subplots(rows, columns, figsize=(7 * columns, 4.5 * rows), constrained_layout=True, squeeze=False)
+    if not shown:
+        axes[0][0].text(0.5, 0.5, "No applicable verified chart data", ha="center", va="center")
+        axes[0][0].set_axis_off()
+    for index, (axis, chart) in enumerate(zip(axes.flat, shown)):
         option = chart.get("option") or {}
-        title = ["Value and trend", "Composition", "Stacked comparison", "Category comparison"][index]
+        title = str(chart.get("title") or "Verified data")
         axis.set_title(title)
-        if not chart.get("available"):
-            axis.text(0.5, 0.5, "No applicable verified data", ha="center", va="center")
-            axis.set_axis_off()
-            continue
         series = option.get("series") or []
         labels = (option.get("xAxis") or {}).get("data") or []
         if chart.get("type") == "pie":
@@ -103,7 +128,9 @@ def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
                 axis.text(0.5, 0.5, "Pie requires non-negative values", ha="center", va="center")
             continue
         positions = list(range(len(labels)))
-        if chart.get("type") == "bar_line" and series:
+        if chart.get("type") == "line" and series:
+            axis.plot(positions, series[0].get("data") or [], color="#2563eb", marker="o")
+        elif chart.get("type") == "bar_line" and series:
             axis.bar(positions, series[0].get("data") or [], color="#2563eb")
             twin = axis.twinx()
             twin.plot(positions, series[1].get("data") or [], color="#f97316", marker="o")
@@ -118,6 +145,8 @@ def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
             axis.bar(positions, series[0].get("data") or [], color="#2563eb")
         axis.set_xticks(positions, [str(value)[:16] for value in labels], rotation=30, ha="right")
         axis.grid(axis="y", alpha=0.2)
+    for axis in list(axes.flat)[len(shown):]:
+        axis.set_axis_off()
     figure.suptitle("Verified analysis dashboard", fontsize=16)
     figure.savefig(path, dpi=160, facecolor="white")
     plt.close(figure)
@@ -150,23 +179,34 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
         document.add_heading("经验证结论", level=1)
         document.add_paragraph(str(current.get("summary") or ""))
         _write_kpis(document, current.get("kpis") or [])
+        claim_details = current.get("claim_details") or []
+        if claim_details:
+            document.add_heading("结论依据", level=1)
+            for claim in claim_details:
+                document.add_paragraph(str(claim.get("text") or ""), style="List Bullet")
         if kind == "report_docx":
             png_path = export_dir / f"{base}_dashboard_embed.png"
             _render_png(png_path, current.get("charts") or [])
-            document.add_heading("四图看板", level=1)
-            document.add_picture(str(png_path), width=Inches(6.4))
+            document.add_heading("数据看板", level=1)
+            if any(chart.get("available") for chart in current.get("charts") or []):
+                document.add_picture(str(png_path), width=Inches(6.4))
+            else:
+                document.add_paragraph("当前已验证数据没有适合绘图的维度和数值列。")
             report = current.get("report") or {}
             document.add_heading("数据结果与归因边界", level=1)
-            for item in report.get("attribution") or []:
+            attribution = report.get("attribution") or []
+            for item in attribution:
                 document.add_paragraph(f"[{item.get('type', 'fact')}] {item.get('text', '')}")
+            if not attribution:
+                document.add_paragraph("尚无可核验的归因结论。")
             document.add_heading("建议", level=1)
             recommendations = report.get("recommendations") or {}
             for key, label in (("short_term", "短期"), ("medium_term", "中期"), ("long_term", "长期")):
                 values = recommendations.get(key) or []
                 document.add_paragraph(f"{label}：" + ("；".join(str(value) for value in values) if values else "尚无经证据支持的建议"))
-            document.add_heading("限制与存疑问题", level=1)
-            for value in current.get("limitations") or ["无"]:
-                document.add_paragraph(str(value), style="List Bullet")
+        document.add_heading("限制与待核对事项", level=1)
+        for value in current.get("limitations") or ["无"]:
+            document.add_paragraph(str(value), style="List Bullet")
         document.save(path)
     return _record_artifact(database, path, kind, workspace_id, run_id, publication, manifest)
 

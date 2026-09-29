@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -54,25 +55,13 @@ def _query_result(database: Database, workspace_id: str, refs: list[str]) -> tup
 
 def _kpis(frame: pd.DataFrame) -> list[dict[str, Any]]:
     numeric = list(frame.select_dtypes(include="number").columns)
-    items: list[dict[str, Any]] = []
-    if len(frame) == 1 and numeric:
-        for column in numeric[:4]:
-            items.append({"id": f"kpi_{len(items) + 1}", "label": str(column), "value": _json_value(frame.iloc[0][column]), "aggregation": "query_value"})
-    elif numeric:
-        column = numeric[0]
-        stats = [
-            (f"{column} 总和", frame[column].sum(), "sum"),
-            (f"{column} 平均", frame[column].mean(), "mean"),
-            (f"{column} 最大", frame[column].max(), "max"),
-            (f"{column} 最小", frame[column].min(), "min"),
-        ]
-        items = [{"id": f"kpi_{index}", "label": str(label), "value": _json_value(value), "aggregation": aggregation} for index, (label, value, aggregation) in enumerate(stats, 1)]
-    while len(items) < 4:
-        items.append({
-            "id": f"kpi_{len(items) + 1}", "label": "暂无可用指标", "value": None,
-            "aggregation": "not_applicable", "unavailable_reason": "已验证结果没有可映射的数值列",
-        })
-    return items[:4]
+    if len(frame) != 1:
+        return []
+    return [
+        {"id": f"kpi_{index}", "label": str(column),
+         "value": _json_value(frame.iloc[0][column]), "aggregation": "query_value"}
+        for index, column in enumerate(numeric[:4], 1)
+    ]
 
 
 def _series(frame: pd.DataFrame) -> tuple[str | None, list[str], list[Any]]:
@@ -90,42 +79,57 @@ def _charts(frame: pd.DataFrame) -> list[dict[str, Any]]:
     def values(column: str | None) -> list[Any]:
         return [_json_value(value) for value in shown[column].tolist()] if column and column in shown else []
 
-    first = numeric[0] if numeric else None
-    second = numeric[1] if len(numeric) > 1 else first
-    charts = [
-        {
-            "id": "chart_combo", "title": "数值与趋势", "type": "bar_line",
-            "option": {"xAxis": {"type": "category", "data": labels}, "yAxis": [{"type": "value"}, {"type": "value"}], "series": [
-                {"name": first or "N/A", "type": "bar", "data": values(first)},
-                {"name": second or "N/A", "type": "line", "yAxisIndex": 1, "data": values(second)},
-            ]},
-        },
-        {
-            "id": "chart_pie", "title": "构成", "type": "pie",
+    if not category or not numeric or not labels:
+        return []
+    first = numeric[0]
+    time_dimension = bool(re.search(r"日期|时间|月份|年月|date|time|month|year", category, re.I))
+    kind = "line" if time_dimension else "bar"
+    charts = [{
+        "id": "chart_primary", "title": f"{first}按{category}{'趋势' if time_dimension else '对比'}",
+        "type": kind, "available": True,
+        "option": {"xAxis": {"type": "category", "data": labels}, "yAxis": {"type": "value"},
+                   "series": [{"name": first, "type": kind, "data": values(first)}]},
+    }]
+    second = numeric[1] if len(numeric) > 1 else None
+    if second:
+        charts.append({
+            "id": "chart_secondary", "title": f"{second}按{category}对比",
+            "type": "bar", "available": True,
+            "option": {"xAxis": {"type": "category", "data": labels}, "yAxis": {"type": "value"},
+                       "series": [{"name": second, "type": "bar", "data": values(second)}]},
+        })
+    first_values = values(first)
+    additive = not re.search(r"率|占比|比例|平均|均值|rate|ratio|percent|avg|mean|%", first, re.I)
+    if additive and not time_dimension and 2 <= len(labels) <= 10 and len(set(map(str, labels))) == len(labels) and all(
+        isinstance(value, (int, float)) and math.isfinite(value) and value >= 0 for value in first_values
+    ) and sum(first_values) > 0:
+        charts.append({
+            "id": "chart_composition", "title": f"{first}构成", "type": "pie", "available": True,
             "option": {"series": [{"type": "pie", "data": [
-                {"name": str(label), "value": value}
-                for label, value in zip(labels, values(first)) if value is not None
+                {"name": str(label), "value": value} for label, value in zip(labels, first_values)
             ]}]},
-        },
-        {
-            "id": "chart_stacked", "title": "分类堆叠对比", "type": "stacked_bar",
-            "option": {"xAxis": {"type": "category", "data": labels}, "yAxis": {"type": "value"}, "series": [
-                {"name": first or "N/A", "type": "bar", "stack": "total", "data": values(first)},
-                {"name": second or "N/A", "type": "bar", "stack": "total", "data": values(second)},
-            ]},
-        },
-        {
-            "id": "chart_bar", "title": "分类对比", "type": "bar",
-            "option": {"xAxis": {"type": "category", "data": labels}, "yAxis": {"type": "value"}, "series": [
-                {"name": first or "N/A", "type": "bar", "data": values(first)},
-            ]},
-        },
-    ]
-    for chart in charts:
-        chart["available"] = bool(category and first and labels)
-        if not chart["available"]:
-            chart["unavailable_reason"] = "已验证结果缺少可绘图的分类列或数值列"
+        })
     return charts
+
+
+def _report_recommendations(answer: str) -> dict[str, list[str]]:
+    """Preserve only recommendations explicitly present in the validated answer."""
+    result: dict[str, list[str]] = {"short_term": [], "medium_term": [], "long_term": []}
+    current = ""
+    mapping = {"短期": "short_term", "中期": "medium_term", "长期": "long_term"}
+    for raw in answer.splitlines():
+        line = raw.strip().lstrip("#").strip()
+        heading = re.match(r"^(短期|中期|长期)(?:建议|行动|措施)?\s*[:：]?\s*(.*)$", line)
+        if heading:
+            current = mapping[heading.group(1)]
+            if heading.group(2):
+                result[current].append(heading.group(2)[:1000])
+            continue
+        if current and line.startswith(("- ", "* ", "• ")):
+            result[current].append(line[2:][:1000])
+        elif line and not line.startswith(("- ", "* ", "• ")):
+            current = ""
+    return result
 
 
 def build_manifest_payload(
@@ -154,8 +158,8 @@ def build_manifest_payload(
         "report": {
             "problem_and_definitions": contract,
             "data_results": answer,
-            "attribution": [{"type": "fact", "text": answer, "evidence_refs": evidence_refs}],
-            "recommendations": {"short_term": [], "medium_term": [], "long_term": []},
+            "attribution": [],
+            "recommendations": _report_recommendations(answer),
             "limitations": limitations,
         },
         "code": [], "environment": {},

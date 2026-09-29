@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +20,7 @@ from backend.agent.model import (
 )
 from backend.agent.store import RunStore
 from backend.agent.tools import ToolExecutor, ToolRegistry, _validate
-from backend.services.advanced_agent import FORMAL_AGENT_TOOLS
+from backend.services.advanced_agent import FORMAL_AGENT_TOOLS, _space_knowledge_ids
 from backend.services.data_plane.contracts import DatasetRef, DatasetRefStore
 from backend.services.data_plane.sandbox import SandboxUnavailable
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
@@ -113,7 +114,52 @@ def test_analysis_attachments_are_bounded_and_contract_scope_locks(client):
     assert client.delete(f"/api/analyses/{run['id']}/attachments/{item['id']}").status_code == 400
 
 
-def test_single_agent_loop_publishes_only_after_independent_validation(app):
+def test_analysis_attachment_stays_private_and_follows_its_run_lineage(app, client):
+    parent = client.post("/api/analyses", json={"objective": "核对私有口径"}).get_json()["item"]
+    response = client.post(
+        f"/api/analyses/{parent['id']}/attachments",
+        data={"files": (io.BytesIO("私有口径：核算已授权订单。".encode()), "private.md")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 201
+    document_id = response.get_json()["items"][0]["document_id"]
+    assert document_id not in {
+        item["id"] for item in client.get("/api/knowledge/documents").get_json()["items"]
+    }
+    assert client.post("/api/knowledge/search", json={"query": "私有口径"}).get_json()["items"] == []
+    assert client.post("/api/analyses", json={
+        "objective": "错误引用", "knowledge_document_ids": [document_id],
+    }).status_code == 400
+
+    unrelated = client.post("/api/analyses", json={"objective": "另一项分析"}).get_json()["item"]
+    child_response = client.post(
+        f"/api/analyses/{parent['id']}/branch", json={"mode": "followup", "prompt": "继续核对口径"},
+    )
+    assert child_response.status_code == 201
+    child = child_response.get_json()["item"]
+    database = app.extensions["meridian_db"]
+    with app.app_context():
+        assert document_id in _space_knowledge_ids(database, parent, None)
+        assert document_id in _space_knowledge_ids(database, child, None)
+        assert document_id not in _space_knowledge_ids(database, unrelated, None)
+
+
+def test_attachment_batch_failure_does_not_leave_partial_documents(client):
+    run = client.post("/api/analyses", json={"objective": "读取两份定义"}).get_json()["item"]
+    response = client.post(
+        f"/api/analyses/{run['id']}/attachments",
+        data={"files": [
+            (io.BytesIO("有效定义".encode()), "valid.md"),
+            (io.BytesIO(b""), "empty.md"),
+        ]},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert client.get(f"/api/analyses/{run['id']}/attachments").get_json()["items"] == []
+    assert client.get("/api/knowledge/documents").get_json()["items"] == []
+
+
+def test_single_agent_loop_publishes_only_after_independent_validation(app, client):
     store, run = _confirmed_run(app)
     store.db.put("query_results", {
         "id": "result-1", "workspace_id": "default", "source_ids": [],
@@ -142,6 +188,36 @@ def test_single_agent_loop_publishes_only_after_independent_validation(app):
     assert result.outcome == "complete"
     assert result.publication_id
     assert {item["tool_id"] for item in store.actions(run["id"])} == {"query", "validate"}
+    feedback = client.post("/api/feedback", json={
+        "run_id": run["id"], "rating": "incorrect", "comment": "请复核统计口径",
+    })
+    assert feedback.status_code == 201
+    item = feedback.get_json()["item"]
+    assert item["status"] == "open"
+    assert client.get(f"/api/analyses/{run['id']}/feedback").get_json()["item"]["rating"] == "incorrect"
+    changed = client.post("/api/feedback", json={
+        "run_id": run["id"], "rating": "partially_correct", "comment": "有一项口径需复查",
+    })
+    assert changed.status_code == 200
+    assert changed.get_json()["item"]["id"] == item["id"]
+    reviewed = client.patch(f"/api/feedback/{item['id']}", json={
+        "status": "resolved", "review_note": "已核对口径",
+    })
+    assert reviewed.status_code == 200
+    assert reviewed.get_json()["item"]["status"] == "resolved"
+    artifacts = client.post(f"/api/analyses/{run['id']}/artifacts", json={
+        "kinds": ["summary_docx", "report_docx", "dashboard_png"],
+    })
+    assert artifacts.status_code == 201
+    assert {item["kind"] for item in artifacts.get_json()["items"]} == {
+        "summary_docx", "report_docx", "dashboard_png",
+    }
+    email = client.post(f"/api/analyses/{run['id']}/email/eml", json={
+        "recipients": "reviewer@example.com", "kinds": ["summary_docx", "report_docx"],
+    })
+    assert email.status_code == 201
+    eml = store.db.get("artifacts", email.get_json()["eml"]["id"], workspace_id="default")
+    assert Path(eml["path"]).read_bytes().count(b"Content-Disposition: attachment") == 2
 
 
 def test_agent_deterministically_removes_unverified_numeric_claim_before_retry(app):

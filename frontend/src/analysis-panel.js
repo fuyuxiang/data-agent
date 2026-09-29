@@ -24,11 +24,14 @@ export const AnalysisPanel = {
   components: { ChartView, DataTable, Icon, StatusPill },
   props: { ctx: Object },
   data: () => ({
-    prompt: '', executionMode: 'auto', current: null, runs: [], events: [], eventCursor: 0, result: null, evidence: null,
+    prompt: '', current: null, runs: [], events: [], eventCursor: 0, result: null, evidence: null,
     activeEvidence: null, evidenceLoading: false, evidenceError: '', showEventDetails: false,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
-    artifacts: [], attachments: [], sourcePickerOpen: false,
-    clarificationAnswer: '', feedbackSent: '',
+    artifacts: [], attachments: [], sourcePickerOpen: false, knowledgePickerOpen: false,
+    knowledgeDocuments: [], selectedKnowledgeIds: [], pendingFiles: [], drafting: false,
+    emailOpen: false, emailBusy: false, emailConnectors: [],
+    emailForm: { recipients: '', subject: '', body: '', connectorId: '', kinds: ['summary_docx', 'report_docx', 'dashboard_png'] },
+    clarificationAnswer: '', feedbackSent: '', feedbackItem: null,
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
     artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png'],
   }),
@@ -46,7 +49,7 @@ export const AnalysisPanel = {
       return event?.payload || null;
     },
     canSend() {
-      return !!this.prompt.trim() && !!this.session && !this.processing
+      return !!this.prompt.trim() && !!this.session && !this.processing && !this.drafting
         && (!this.current || TERMINAL.has(this.current.execution_status));
     },
   },
@@ -54,14 +57,44 @@ export const AnalysisPanel = {
     session(value, previous) {
       if (value?.id !== previous?.id) this.load();
     },
+    'state.workspaceId'(value, previous) {
+      if (value !== previous) this.loadKnowledge();
+    },
   },
   mounted() {
     if (this.state.pendingPrompt) { this.prompt = this.state.pendingPrompt; this.state.pendingPrompt = ''; }
+    this.loadKnowledge();
     this.load();
   },
   beforeUnmount() { clearTimeout(this.pollingTimer); },
   methods: {
     md: renderMarkdown,
+    async loadKnowledge() {
+      try {
+        const response = await api(withWorkspace('/api/knowledge/documents', this.state.workspaceId));
+        this.knowledgeDocuments = (response.items || []).filter(item => item.enabled !== false);
+        this.selectedKnowledgeIds = this.knowledgeDocuments.map(item => item.id);
+      } catch (error) { this.ctx.fail(error); }
+    },
+    toggleKnowledge(item) {
+      const selected = new Set(this.selectedKnowledgeIds);
+      selected.has(item.id) ? selected.delete(item.id) : selected.add(item.id);
+      this.selectedKnowledgeIds = [...selected];
+    },
+    stageFiles(files) {
+      const allowed = new Set(['docx', 'xlsx', 'pdf', 'md', 'txt']);
+      const chosen = [...(files || [])];
+      for (const file of chosen) {
+        const suffix = file.name.split('.').pop().toLowerCase();
+        if (!allowed.has(suffix) || file.size > 50 * 1024 * 1024) {
+          this.ctx.fail(new Error(`附件 ${file.name} 格式不受支持或超过 50MB`));
+          return;
+        }
+      }
+      const pending = [...this.pendingFiles, ...chosen];
+      if (pending.length > 20) return this.ctx.fail(new Error('单次分析最多引入 20 个文件'));
+      this.pendingFiles = pending;
+    },
     formatResultValue(value) {
       if (value === null || value === undefined || Number.isNaN(value)) return '不可用';
       if (typeof value === 'number') {
@@ -94,7 +127,7 @@ export const AnalysisPanel = {
     async setRun(run) {
       clearTimeout(this.pollingTimer);
       this.current = run; this.eventCursor = 0; this.events = []; this.result = null;
-      this.details = []; this.artifacts = []; this.evidence = null; this.activeEvidence = null; this.evidenceError = ''; this.activeTab = 'summary';
+      this.details = []; this.artifacts = []; this.evidence = null; this.activeEvidence = null; this.evidenceError = ''; this.activeTab = 'summary'; this.feedbackSent = ''; this.feedbackItem = null;
       this.syncContract();
       await this.refresh(true);
     },
@@ -128,9 +161,14 @@ export const AnalysisPanel = {
           this.result = result;
           this.artifacts = this.result.artifacts || [];
           if (this.result.status === 'published') {
-            const evidence = await api(withWorkspace(base + '/evidence', this.state.workspaceId));
+            const [evidence, feedback] = await Promise.all([
+              api(withWorkspace(base + '/evidence', this.state.workspaceId)),
+              api(withWorkspace(base + '/feedback', this.state.workspaceId)),
+            ]);
             if (this.current?.id !== selectedRunId) return;
             this.evidence = evidence;
+            this.feedbackItem = feedback.item || null;
+            this.feedbackSent = feedback.item?.rating || '';
           }
         }
         this.syncContract();
@@ -156,7 +194,7 @@ export const AnalysisPanel = {
         this.ctx.fail(new Error('请先选择至少一个数据源，再发起分析'));
         return;
       }
-      this.prompt = '';
+      this.drafting = true;
       try {
         const response = await api('/api/analyses', {
           method: 'POST',
@@ -164,14 +202,27 @@ export const AnalysisPanel = {
           body: {
             session_id: this.session.id, objective,
             source_ids: this.session.source_ids || [],
+            knowledge_document_ids: this.selectedKnowledgeIds,
             provider_id: this.session.provider_id || null,
-            execution_mode: this.executionMode, auto_confirm: this.executionMode !== 'deep',
-            confirm_required: this.executionMode === 'deep',
+            execution_mode: 'auto', confirm_required: true,
           },
         });
+        this.prompt = '';
         this.runs.unshift(response.item);
         await this.setRun(response.item);
+        if (this.pendingFiles.length) {
+          const form = new FormData();
+          this.pendingFiles.forEach(file => form.append('files', file));
+          form.append('tags', '分析附件');
+          await api('/api/analyses/' + response.item.id + '/attachments', { method: 'POST', body: form });
+          this.pendingFiles = [];
+        }
+        const draft = await api('/api/analyses/' + response.item.id + '/contract/suggest', { method: 'POST' });
+        this.current = draft.item;
+        this.syncContract();
+        await this.refresh(true);
       } catch (error) { this.ctx.fail(error); }
+      finally { this.drafting = false; }
     },
     async toggleSource(source) {
       if (!this.session) return;
@@ -381,22 +432,71 @@ export const AnalysisPanel = {
         this.detailCursor = response.next_cursor;
       } catch (error) { this.ctx.fail(error); }
     },
-    async generateArtifacts() {
+    async generateArtifacts(kind = '') {
       try {
         const response = await api('/api/analyses/' + this.current.id + '/artifacts', {
-          method: 'POST', body: { kinds: this.artifactKinds },
+          method: 'POST', body: { kinds: kind ? [kind] : this.artifactKinds },
         });
-        this.artifacts = response.items || [];
-        this.ctx.toast('两个 Word 与四图 PNG 已绑定当前发布版本', '成果已生成');
+        const records = new Map(this.artifacts.map(item => [item.id, item]));
+        for (const item of response.items || []) records.set(item.id, item);
+        this.artifacts = [...records.values()];
+        this.ctx.toast('文件已绑定当前通过校验的结果版本', '成果已生成');
       } catch (error) { this.ctx.fail(error); }
+    },
+    async openEmail() {
+      if (!this.current || !this.manifest) return;
+      try {
+        const response = await api(withWorkspace('/api/connectors', this.state.workspaceId));
+        this.emailConnectors = (response.items || []).filter(item => item.type === 'email' && item.enabled !== false);
+        this.emailForm = {
+          recipients: '', subject: `分析成果：${this.contract?.payload?.objective || '数据分析'}`.slice(0, 180),
+          body: String(this.manifest.summary || '').slice(0, 4000),
+          connectorId: this.emailConnectors[0]?.id || '',
+          kinds: ['summary_docx', 'report_docx', 'dashboard_png'],
+        };
+        this.emailOpen = true;
+      } catch (error) { this.ctx.fail(error); }
+    },
+    async deliverEmail(send = false) {
+      if (!this.emailForm.recipients.trim()) return this.ctx.fail(new Error('请填写收件人邮箱'));
+      if (!this.emailForm.kinds.length) return this.ctx.fail(new Error('请至少选择一个附件'));
+      if (send && !this.emailForm.connectorId) return this.ctx.fail(new Error('请先配置邮件连接器'));
+      this.emailBusy = true;
+      try {
+        const response = await api(`/api/analyses/${this.current.id}/email/${send ? 'send' : 'eml'}`, {
+          method: 'POST', headers: send ? { 'Idempotency-Key': idempotencyKey('email') } : {},
+          body: {
+            recipients: this.emailForm.recipients, subject: this.emailForm.subject,
+            body: this.emailForm.body, kinds: this.emailForm.kinds,
+            connector_id: this.emailForm.connectorId,
+          },
+        });
+        if (!send && response.eml?.download_url) {
+          const downloaded = await fetch(response.eml.download_url, { credentials: 'same-origin' });
+          if (!downloaded.ok) throw new Error('邮件文件下载失败，请稍后重试');
+          const objectUrl = URL.createObjectURL(await downloaded.blob());
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.download = response.eml.filename || 'analysis.eml';
+          document.body.append(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        }
+        this.ctx.toast(send ? '邮件及附件已提交发送' : '包含真实附件的邮件文件已生成', '交付完成');
+        this.emailOpen = false;
+      } catch (error) { this.ctx.fail(error); }
+      finally { this.emailBusy = false; }
     },
     async feedback(rating) {
       if (!this.current) return;
-      const entry = rating === 'incorrect' ? await this.ctx.askForm({title:'反馈分析问题',fields:[{key:'category',label:'主要问题',placeholder:'例如：口径错误、数据错误或理解错误',required:true}],submitLabel:'提交反馈'}) : null;
-      if (rating === 'incorrect' && !entry) return;
+      const needsComment = rating !== 'correct';
+      const entry = needsComment ? await this.ctx.askForm({title:'反馈分析问题',fields:[{key:'category',label:'主要问题',placeholder:'例如：口径错误、数据错误或理解错误',required:true}],submitLabel:'提交反馈'}) : null;
+      if (needsComment && !entry) return;
       const category = entry?.category || '';
       try {
-        await api('/api/feedback', { method: 'POST', body: { workspace_id: this.state.workspaceId, run_id: this.current.id, rating, category } });
+        const response = await api('/api/feedback', { method: 'POST', body: { workspace_id: this.state.workspaceId, run_id: this.current.id, rating, category } });
+        this.feedbackItem = response.item;
         this.feedbackSent = rating; this.ctx.toast('反馈将进入管理员的质量运营闭环', '感谢反馈');
       } catch (error) { this.ctx.fail(error); }
     },
@@ -499,7 +599,7 @@ export const AnalysisPanel = {
           </article>
 
           <section v-if="contract && !contract.confirmed_at" class="analysis-contract">
-            <header><div><small class="section-label">分析范围确认</small><h2>请核对复杂任务的统计范围</h2></div><StatusPill status="draft" label="待确认"/></header>
+            <header><div><small class="section-label">需求理解确认</small><h2>请核对本次分析的目标与范围</h2></div><StatusPill status="draft" label="待确认"/></header>
             <div class="contract-grid">
               <label><span>业务分析目标</span><textarea v-model="contractForm.objective"></textarea></label>
               <label><span>统计覆盖范围</span><textarea v-model="contractForm.coverage"></textarea></label>
@@ -515,7 +615,7 @@ export const AnalysisPanel = {
             </div>
             <footer>
               <button class="button" @click="current=null;events=[]">重新描述</button>
-              <button class="button button--primary" @click="confirmContract"><Icon name="check"/>确认范围并分析</button>
+              <button class="button button--primary" :disabled="drafting" @click="confirmContract"><Icon name="check"/>确认需求并开始分析</button>
             </footer>
           </section>
 
@@ -554,8 +654,9 @@ export const AnalysisPanel = {
 
           <section v-if="manifest" class="analysis-results">
             <nav class="result-tabs">
-              <button :class="{active:activeTab==='summary'}" @click="activeTab='summary'">分析结论</button>
-              <button :class="{active:activeTab==='dashboard'}" @click="activeTab='dashboard';loadDetails(true)">指标与图表</button>
+              <button :class="{active:activeTab==='summary'}" @click="activeTab='summary'">极简结论</button>
+              <button :class="{active:activeTab==='dashboard'}" @click="activeTab='dashboard';loadDetails(true)">可视化看板</button>
+              <button :class="{active:activeTab==='report'}" @click="activeTab='report'">完整报告</button>
             </nav>
             <div v-if="activeTab==='summary'" class="result-pane">
               <div v-if="manifest.kpis?.length" class="kpi-grid summary-kpi-grid"><article v-for="item in manifest.kpis" :key="item.id"><small>{{ item.label }}</small><b>{{ formatResultValue(item.value) }}</b><span v-if="item.unavailable_reason">{{ item.unavailable_reason }}</span></article></div>
@@ -581,31 +682,50 @@ export const AnalysisPanel = {
             </div>
             <div v-else-if="activeTab==='dashboard'" class="result-pane">
               <div class="four-chart-grid"><article v-for="chart in manifest.charts" :key="chart.id"><h3>{{ chart.title }}</h3><ChartView v-if="chart.available" :spec="chart"/><p v-else>{{ chart.unavailable_reason }}</p></article></div>
+              <p v-if="!manifest.charts?.length" class="result-empty-note">当前已验证数据没有适合绘图的维度和数值列。</p>
               <section class="detail-table"><header><h3>授权明细分页</h3><span>不会向浏览器加载全仓明细</span></header><DataTable :rows="details" :columns="detailColumns"/><button v-if="detailCursor!==null" class="button button--small" @click="loadDetails()">加载下一页</button></section>
+            </div>
+            <div v-else class="result-pane analysis-report">
+              <section><h3>问题与统计口径</h3><p><b>目标：</b>{{ manifest.report?.problem_and_definitions?.objective || manifest.contract?.objective }}</p><p><b>覆盖范围：</b>{{ manifest.report?.problem_and_definitions?.coverage || manifest.contract?.coverage }}</p><p><b>查看维度：</b>{{ manifest.contract?.dimensions?.join('、') || '未指定' }}</p></section>
+              <section><h3>数据结果</h3><div class="markdown" v-html="md(manifest.report?.data_results || manifest.summary)"></div></section>
+              <section><h3>归因与判断边界</h3><p v-for="(item,index) in manifest.report?.attribution || []" :key="index">{{ item.text }}</p><p v-if="!manifest.report?.attribution?.length">尚无可核验的归因结论。</p></section>
+              <section><h3>行动建议</h3><template v-for="(label,key) in {short_term:'短期',medium_term:'中期',long_term:'长期'}" :key="key"><h4>{{ label }}</h4><ul v-if="manifest.report?.recommendations?.[key]?.length"><li v-for="(item,index) in manifest.report.recommendations[key]" :key="index">{{ item }}</li></ul><p v-else>当前没有经证据支持的{{ label }}建议。</p></template></section>
+              <section><h3>限制与待核对事项</h3><ul><li v-for="(item,index) in manifest.limitations || []" :key="index">{{ item }}</li></ul></section>
             </div>
             <footer class="result-actions">
               <button class="button button--primary" @click="branch('followup')"><Icon name="chat"/>继续追问</button>
-              <button class="button" @click="generateArtifacts"><Icon name="download"/>导出成果</button>
+              <button class="button" @click="generateArtifacts('summary_docx')"><Icon name="download"/>结论 Word</button>
+              <button class="button" @click="generateArtifacts('report_docx')"><Icon name="download"/>报告 Word</button>
+              <button class="button" @click="generateArtifacts('dashboard_png')"><Icon name="download"/>看板 PNG</button>
+              <button class="button" @click="openEmail">邮件分享</button>
               <a v-for="item in artifacts" :key="item.id" class="button button--small" :href="item.download_url">{{ item.filename }}</a>
             </footer>
-            <div class="result-feedback"><span>这个结果对你有帮助吗？</span><button :class="{active:feedbackSent==='correct'}" @click="feedback('correct')">准确</button><button :class="{active:feedbackSent==='partially_correct'}" @click="feedback('partially_correct')">部分准确</button><button :class="{active:feedbackSent==='incorrect'}" @click="feedback('incorrect')">需要纠正</button></div>
+            <div class="result-feedback"><span>这个结果对你有帮助吗？</span><button :class="{active:feedbackSent==='correct'}" @click="feedback('correct')">准确</button><button :class="{active:feedbackSent==='partially_correct'}" @click="feedback('partially_correct')">部分准确</button><button :class="{active:feedbackSent==='incorrect'}" @click="feedback('incorrect')">需要纠正</button><small v-if="feedbackItem">反馈状态：{{ {open:'待处理',reviewing:'处理中',resolved:'已处理',dismissed:'未采纳'}[feedbackItem.status] || feedbackItem.status }}<template v-if="feedbackItem.review_note"> · {{ feedbackItem.review_note }}</template></small></div>
           </section>
         </template>
       </div>
 
       <form class="composer" @submit.prevent="send">
+        <section v-if="knowledgePickerOpen" class="composer-knowledge-picker">
+          <header><b>本次分析参考的知识文档</b><button type="button" @click="knowledgePickerOpen=false">完成</button></header>
+          <label v-for="item in knowledgeDocuments" :key="item.id"><input type="checkbox" :checked="selectedKnowledgeIds.includes(item.id)" @change="toggleKnowledge(item)">{{ item.name }}</label>
+          <p v-if="!knowledgeDocuments.length">暂无知识文档；管理员可在知识库导入。业务术语和规则仍会按权限检索。</p>
+        </section>
         <section v-if="sourcePickerOpen && current" class="source-picker composer-source-picker">
           <header><b>下次提问的数据范围</b><button v-if="['owner','editor'].includes(state.workspaceRole)" type="button" @click="ctx.go('sources')">管理数据源</button></header>
           <button v-for="source in availableSources" :key="source.id" type="button" :class="{selected:session?.source_ids?.includes(source.id)}" @click="toggleSource(source)"><span class="source-picker-check"><Icon v-if="session?.source_ids?.includes(source.id)" name="check" :size="13"/></span><span><b>{{ source.name }}</b><small>{{ source.kind==='database' ? '数据库' : '文件' }} · {{ source.tables?.length || 0 }} 张表</small></span></button>
           <p v-if="!availableSources.length">当前没有可用数据源，请联系工作空间管理员。</p>
         </section>
+        <div v-if="pendingFiles.length" class="composer-attachments"><span v-for="(file,index) in pendingFiles" :key="index">{{ file.name }}<button type="button" :aria-label="'移除 '+file.name" @click="pendingFiles.splice(index,1)">×</button></span></div>
         <textarea ref="composer" v-model="prompt" :disabled="processing" @keydown="keydown" placeholder="描述分析问题；Enter 发送，Shift+Enter 换行"></textarea>
         <div class="composer__toolbar">
           <button type="button" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database" :size="14"/>{{ current ? '下次提问 · ' : '' }}{{ selectedSources.length }} 个数据源</button>
+          <button type="button" @click="knowledgePickerOpen=!knowledgePickerOpen"><Icon name="book" :size="14"/>{{ selectedKnowledgeIds.length }} 份知识文档</button>
+          <label class="composer-file-button"><Icon name="upload" :size="14"/>引入文件<input hidden multiple type="file" accept=".docx,.xlsx,.pdf,.md,.txt" @change="stageFiles($event.target.files);$event.target.value=''"/></label>
           <span class="composer__toolbar-spacer"></span>
-          <label class="composer__mode"><Icon name="bolt" :size="13"/>分析模式<select v-model="executionMode"><option value="auto">智能判断</option><option value="quick">快速问数</option><option value="deep">深度分析</option></select></label>
-          <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'发起分析':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>
+          <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'核对需求':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>
         </div>
       </form>
+      <div v-if="emailOpen" class="modal-backdrop" @mousedown.self="emailOpen=false"><section class="modal" role="dialog" aria-modal="true" aria-label="邮件分享分析成果"><header class="modal__header"><h2>邮件分享分析成果</h2><button class="icon-button" @click="emailOpen=false" aria-label="关闭">×</button></header><div class="modal__body dialog-form"><label class="dialog-field"><span>收件人邮箱，多个用逗号分隔</span><input v-model.trim="emailForm.recipients" type="text" autocomplete="email"></label><label class="dialog-field"><span>主题</span><input v-model.trim="emailForm.subject"></label><label class="dialog-field"><span>正文</span><textarea v-model="emailForm.body"></textarea></label><fieldset class="email-attachments"><legend>附件</legend><label><input v-model="emailForm.kinds" type="checkbox" value="summary_docx">极简结论 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_docx">完整报告 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="dashboard_png">看板 PNG</label></fieldset><label v-if="emailConnectors.length" class="dialog-field"><span>邮件服务</span><select v-model="emailForm.connectorId"><option v-for="item in emailConnectors" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><p v-else>尚未配置 SMTP 邮件服务。可下载包含附件的 .eml 文件，用本地邮件客户端发送。</p></div><footer class="modal__footer"><button class="button" @click="emailOpen=false">取消</button><button class="button" :disabled="emailBusy" @click="deliverEmail(false)">下载邮件文件</button><button v-if="emailConnectors.length" class="button button--primary" :disabled="emailBusy" @click="deliverEmail(true)">发送邮件</button></footer></section></div>
     </section>`,
 };

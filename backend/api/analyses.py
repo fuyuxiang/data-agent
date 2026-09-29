@@ -9,9 +9,11 @@ from flask import Blueprint, Response, current_app, request, stream_with_context
 
 from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
+from ..core.database import utcnow
 from ..services.advanced_agent import available_formal_tools
 from ..services.authorization import require_sources_access
 from ..services.jobs import get_job_manager
+from ..services.intent import suggest_contract
 from ..services.knowledge import add_document
 from ..services.results.manifests import ResultService
 from ..services.saas import assert_agent_run_limit, assert_feature_enabled
@@ -172,6 +174,16 @@ def create_analysis():
     assert_agent_run_limit(db(), wid)
     session = _session(payload, wid)
     source_ids, business_space_id = _analysis_scope(payload, session, wid)
+    selected_knowledge = payload.get("knowledge_document_ids")
+    if selected_knowledge is not None and not isinstance(selected_knowledge, list):
+        raise ValueError("knowledge_document_ids 必须是数组")
+    knowledge_ids = list(dict.fromkeys(str(value) for value in selected_knowledge or []))
+    if len(knowledge_ids) > 100:
+        raise ValueError("单次分析最多选择 100 份知识文档")
+    for document_id in knowledge_ids:
+        document = db().get("knowledge_documents", document_id, workspace_id=wid)
+        if not document or not document.get("enabled", True) or document.get("visibility") == "analysis_attachment":
+            raise ValueError("所选知识文档不存在或已停用")
     provider_id = str(payload.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id, wid)
@@ -198,6 +210,11 @@ def create_analysis():
         idempotency_key=idempotency_key,
     )
     if created:
+        db().put("analysis_context", {
+            "id": run["id"], "workspace_id": wid,
+            "knowledge_document_ids": knowledge_ids,
+            "knowledge_selection_explicit": selected_knowledge is not None,
+        }, workspace_id=wid)
         db().patch("sessions", session["id"], {
             "source_ids": source_ids, "provider_id": provider_id or session.get("provider_id"),
             "business_space_id": business_space_id, "owner_id": current_user_id(), "current_run_id": run["id"],
@@ -214,6 +231,44 @@ def create_analysis():
             run = _store().get_run(run["id"]) or run
             return ok(item=_snapshot(run), created=True, auto_confirmed=True, job=job), 201
     return ok(item=_snapshot(run), created=created, auto_confirmed=False), 201 if created else 200
+
+
+@bp.post("/api/analyses/<run_id>/contract/suggest")
+@api_errors
+def suggest_analysis_contract(run_id: str):
+    run = _require_run(run_id, write=True)
+    latest = _store().latest_contract(run_id)
+    if not latest or latest.get("confirmed_at"):
+        raise ValueError("只能为待确认任务生成需求草稿")
+    source_names = [
+        str(source.get("name") or source["id"])
+        for source_id in run.get("source_scope") or []
+        if (source := db().get("sources", source_id, workspace_id=run["workspace_id"]))
+    ]
+    attachment_names = [
+        str(item.get("filename") or "")
+        for item in db().list("analysis_attachments", workspace_id=run["workspace_id"], limit=5000)
+        if item.get("run_id") == run_id and item.get("owner_id") == current_user_id()
+    ]
+    try:
+        suggested = suggest_contract(
+            question=str(latest["payload"]["objective"]), source_names=source_names,
+            attachment_names=attachment_names, provider_id=run.get("provider_id"),
+            workspace_id=run["workspace_id"],
+        )
+    except Exception:
+        # An unavailable drafting model must not prevent the user from editing
+        # and confirming the deterministic contract already on screen.
+        suggested = None
+    if not suggested:
+        return ok(item=_snapshot(run), suggested=False)
+    merged = {**latest["payload"], **suggested, "source_scope": run["source_scope"]}
+    merged["dimensions"] = suggested.get("dimensions") or latest["payload"]["dimensions"]
+    merged["deliverables"] = suggested.get("deliverables") or latest["payload"]["deliverables"]
+    contract = TaskContract.from_payload(merged)
+    _store().add_contract(run_id, contract, expected_version=int(latest["version"]))
+    _store().append_event(run_id, "contract.suggested", {"source": "model", "editable": True})
+    return ok(item=_snapshot(_store().get_run(run_id) or run), suggested=True)
 
 
 @bp.get("/api/analyses")
@@ -248,7 +303,7 @@ def add_analysis_attachments(run_id: str):
         raise ValueError("单次最多上传 20 个分析附件")
     allowed = {".docx", ".xlsx", ".pdf", ".md", ".txt"}
     tags = [value.strip()[:80] for value in request.form.get("tags", "").split(",") if value.strip()]
-    items = []
+    prepared = []
     for file in files:
         suffix = Path(str(file.filename or "")).suffix.lower()
         if suffix not in allowed:
@@ -260,15 +315,33 @@ def add_analysis_attachments(run_id: str):
         stream.seek(position)
         if size > 50 * 1024 * 1024:
             raise ValueError(f"附件 {file.filename} 超过 50MB")
-        document = add_document(file, run["workspace_id"], tags)
-        attachment = db().put("analysis_attachments", {
-            "id": db().new_id("attachment"), "workspace_id": run["workspace_id"],
-            "run_id": run_id, "owner_id": current_user_id(), "document_id": document["id"],
-            "filename": document["filename"], "format": document["format"], "size": size,
-            "tags": tags, "evidence_locations": document.get("evidence_locations", False),
-            "visual_only_pages": document.get("visual_only_pages") or [],
-        }, workspace_id=run["workspace_id"])
-        items.append(attachment)
+        prepared.append((file, size))
+    items = []
+    created_documents = []
+    try:
+        for file, size in prepared:
+            document = add_document(file, run["workspace_id"], tags)
+            created_documents.append(document["id"])
+            db().patch("knowledge_documents", document["id"], {
+                "visibility": "analysis_attachment", "owner_id": current_user_id(), "run_id": run_id,
+            }, workspace_id=run["workspace_id"])
+            attachment = db().put("analysis_attachments", {
+                "id": db().new_id("attachment"), "workspace_id": run["workspace_id"],
+                "run_id": run_id, "owner_id": current_user_id(), "document_id": document["id"],
+                "filename": document["filename"], "format": document["format"], "size": size,
+                "tags": tags, "evidence_locations": document.get("evidence_locations", False),
+                "visual_only_pages": document.get("visual_only_pages") or [],
+            }, workspace_id=run["workspace_id"])
+            items.append(attachment)
+    except Exception:
+        for item in items:
+            db().archive("analysis_attachments", item["id"], workspace_id=run["workspace_id"])
+        for document_id in created_documents:
+            record = db().get("knowledge_documents", document_id, workspace_id=run["workspace_id"])
+            if record:
+                Path(record["path"]).unlink(missing_ok=True)
+                db().archive("knowledge_documents", document_id, workspace_id=run["workspace_id"])
+        raise
     _store().append_event(run_id, "attachments.added", {
         "items": [{"id": item["id"], "filename": item["filename"], "tags": item["tags"]} for item in items],
     })
@@ -365,6 +438,86 @@ def analysis_events(run_id: str):
     return Response(generate(), mimetype="text/event-stream", headers={
         "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no",
     })
+
+
+@bp.post("/api/feedback")
+@api_errors
+def create_analysis_feedback():
+    payload = body()
+    run = _require_run(str(payload.get("run_id") or ""))
+    if not ResultService(db()).publication(run["id"], workspace_id=run["workspace_id"]):
+        raise ValueError("只有已发布的分析结果可以提交质量反馈")
+    rating = str(payload.get("rating") or "")
+    if rating not in {"correct", "partially_correct", "incorrect"}:
+        raise ValueError("反馈类型无效")
+    comment = str(payload.get("category") or payload.get("comment") or "").strip()[:2000]
+    if rating in {"partially_correct", "incorrect"} and not comment:
+        raise ValueError("请说明需要纠正的问题")
+    previous = next((
+        item for item in db().list("analysis_feedback", workspace_id=run["workspace_id"], limit=5000)
+        if item.get("run_id") == run["id"] and item.get("actor_id") == current_user_id()
+    ), None)
+    if previous:
+        item = db().patch("analysis_feedback", previous["id"], {
+            "rating": rating, "comment": comment, "status": "open", "updated_at": utcnow(),
+        }, workspace_id=run["workspace_id"])
+    else:
+        item = db().put("analysis_feedback", {
+            "id": db().new_id("feedback"), "workspace_id": run["workspace_id"],
+            "run_id": run["id"], "actor_id": current_user_id(), "rating": rating,
+            "comment": comment, "status": "open", "created_at": utcnow(),
+        }, workspace_id=run["workspace_id"])
+    db().audit(
+        "analysis.feedback", workspace_id=run["workspace_id"], actor=current_user_id(),
+        object_type="agent_run", object_id=run["id"], detail={"rating": rating},
+    )
+    return ok(item=item), 200 if previous else 201
+
+
+@bp.get("/api/analyses/<run_id>/feedback")
+@api_errors
+def get_analysis_feedback(run_id: str):
+    run = _require_run(run_id)
+    item = next((
+        record for record in db().list("analysis_feedback", workspace_id=run["workspace_id"], limit=5000)
+        if record.get("run_id") == run_id and record.get("actor_id") == current_user_id()
+    ), None)
+    return ok(item=item)
+
+
+@bp.get("/api/feedback")
+@api_errors
+def list_analysis_feedback():
+    wid = workspace_id()
+    membership = workspace_membership(wid)
+    if not membership or membership.get("role") not in {"owner", "editor"}:
+        raise PermissionError("只有管理员可以查看分析反馈")
+    return ok(items=db().list("analysis_feedback", workspace_id=wid, limit=500))
+
+
+@bp.patch("/api/feedback/<feedback_id>")
+@api_errors
+def review_analysis_feedback(feedback_id: str):
+    wid = workspace_id()
+    membership = workspace_membership(wid)
+    if not membership or membership.get("role") not in {"owner", "editor"}:
+        raise PermissionError("只有管理员可以处理分析反馈")
+    require_workspace_record("analysis_feedback", feedback_id, wid)
+    status = str(body().get("status") or "")
+    if status not in {"reviewing", "resolved", "dismissed"}:
+        raise ValueError("反馈处理状态无效")
+    review_note = str(body().get("review_note") or "").strip()[:2000]
+    if status in {"resolved", "dismissed"} and not review_note:
+        raise ValueError("请记录处理结论或未采纳原因")
+    item = db().patch("analysis_feedback", feedback_id, {
+        "status": status, "reviewed_by": current_user_id(),
+        "review_note": review_note, "reviewed_at": utcnow(),
+    }, workspace_id=wid)
+    db().audit(
+        "analysis.feedback.reviewed", workspace_id=wid, actor=current_user_id(),
+        object_type="analysis_feedback", object_id=feedback_id, detail={"status": status},
+    )
+    return ok(item=item)
 
 
 def _active_job(run_id: str) -> dict[str, Any] | None:
@@ -481,6 +634,8 @@ def _branch(run: dict[str, Any], mode: str, prompt: str) -> dict[str, Any]:
 @api_errors
 def branch_analysis(run_id: str):
     run = _require_run(run_id)
+    assert_feature_enabled(db(), run["workspace_id"], "governed_agent")
+    assert_agent_run_limit(db(), run["workspace_id"])
     payload = body()
     mode = str(payload.get("mode") or "followup")
     if mode not in {"followup", "refresh", "reproduce", "reanalyze"}:
@@ -497,6 +652,12 @@ def branch_analysis(run_id: str):
         allowed_tool_ids=available_formal_tools(db(), run["workspace_id"], run["session_id"], source_ids),
         provider_id=run.get("provider_id"), parent_run_id=run["id"], run_kind=mode,
     )
+    parent_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    db().put("analysis_context", {
+        "id": child["id"], "workspace_id": run["workspace_id"],
+        "knowledge_document_ids": parent_context.get("knowledge_document_ids") or [],
+        "knowledge_selection_explicit": bool(parent_context.get("knowledge_selection_explicit")),
+    }, workspace_id=run["workspace_id"])
     _store().add_contract(child["id"], contract, expected_version=0)
     db().add_message(run["session_id"], "user", contract.objective, {"run_id": child["id"], "parent_run_id": run["id"]})
     _store().append_event(child["id"], "analysis.branched", {"parent_run_id": run["id"], "mode": mode})

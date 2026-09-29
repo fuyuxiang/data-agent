@@ -369,10 +369,14 @@ def _entry_text(entry: dict) -> str:
     return "\n".join(values)
 
 
-def _search_rows(workspace_id: str) -> list[dict]:
+def _search_rows(workspace_id: str, document_ids: set[str] | None = None) -> list[dict]:
     rows = []
     for document in _db().list("knowledge_documents", workspace_id=workspace_id):
         if not document.get("enabled", True):
+            continue
+        if document.get("visibility") == "analysis_attachment" and (
+            document_ids is None or document["id"] not in document_ids
+        ):
             continue
         chunks = document.get("chunks") or []
         index = document.get("chunk_index")
@@ -409,9 +413,9 @@ def search(
     query: str, workspace_id: str, limit: int = 6,
     document_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[dict]:
-    rows = _search_rows(workspace_id)
+    allowed = {str(value) for value in document_ids} if document_ids is not None else None
+    rows = _search_rows(workspace_id, allowed)
     if document_ids is not None:
-        allowed = {str(value) for value in document_ids}
         rows = [row for row in rows if row.get("document_id") in allowed]
     if not rows or not query.strip():
         return []

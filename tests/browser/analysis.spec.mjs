@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 test('shows the login portal when authentication is required', async ({ page }) => {
   await page.route('**/api/auth/me', route => route.fulfill({ json: {
@@ -91,16 +92,16 @@ test('creates an analysis contract and manages a real indexed attachment', async
   await expect(page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行')).toBeVisible();
 
   const composer = page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行');
-  await page.getByLabel('分析模式').selectOption('deep');
+  await page.locator('.composer-file-button input[type=file]').setInputFiles({
+    name: 'definition.md', mimeType: 'text/markdown', buffer: Buffer.from('# 指标口径\n销售额按区域汇总。'),
+  });
+  await expect(page.getByText('definition.md')).toBeVisible();
   await composer.fill('核对区域销售额及口径');
   await composer.press('Enter');
-  await expect(page.getByRole('heading', { name: '请核对复杂任务的统计范围' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '请核对本次分析的目标与范围' })).toBeVisible();
 
   const coverage = page.locator('.contract-grid label').filter({ hasText: '统计覆盖范围' }).locator('textarea');
   await coverage.fill('已选授权来源的全部完整记录');
-  await page.locator('input[type=file]').setInputFiles({
-    name: 'definition.md', mimeType: 'text/markdown', buffer: Buffer.from('# 指标口径\n销售额按区域汇总。'),
-  });
   await expect(page.getByText('definition.md')).toBeVisible();
   await page.getByTitle('移除').click();
   await expect(page.getByText('definition.md')).toHaveCount(0);
@@ -120,7 +121,7 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
   const manifest = {
     summary: '北区销售额为 120 元，结果已通过独立验证。',
     kpis: [1, 2, 3, 4].map(id => ({ id: `k${id}`, label: `指标 ${id}`, value: id * 10 })),
-    charts: [1, 2, 3, 4].map(id => ({ id: `c${id}`, title: `图表 ${id}`, available: false, unavailable_reason: '此浏览器样例不渲染数据' })),
+    charts: [],
     limitations: ['仅适用于已确认范围'],
     report: { problem_and_definitions: {}, data_results: '已核对', attribution: [], limitations: [] },
   };
@@ -138,6 +139,9 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
     if (path === '/api/analyses/run-ui/attachments') {
       return route.fulfill({ json: { items: [] } });
     }
+    if (path === '/api/analyses/run-ui/details') {
+      return route.fulfill({ json: { items: [], columns: [], next_cursor: null } });
+    }
     if (path === '/api/analyses/run-ui/results') {
       return route.fulfill({ json: {
         status: 'published', manifest: { payload: manifest },
@@ -146,6 +150,12 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
     }
     if (path === '/api/analyses/run-ui/evidence') {
       return route.fulfill({ json: { claims: [{ id: 'claim-1', payload: { text: '北区销售额为 120 元，结果已通过独立验证。', evidence_refs: ['dataset-ref-1'], numbers: [{ text: '120', start: 7, end: 10 }], evidence_cells: [{ number: '120', ref: 'dataset-ref-1', result_id: 'qry-1', row: 0, column: 'sales', value: 120 }], definition_refs: ['metric:sales@1'], status: 'validated', numeric_replay: 'PASS' } }] } });
+    }
+    if (path === '/api/analyses/run-ui/feedback') {
+      return route.fulfill({ json: { item: null } });
+    }
+    if (path === '/api/analyses/run-ui/email/eml' && request.method() === 'POST') {
+      return route.fulfill({ json: { eml: { id: 'email-ui', filename: 'analysis.eml', download_url: '/api/artifacts/email-ui/download' } } });
     }
     if (path === '/api/analyses/run-ui/evidence/claims/claim-1/cells/0') {
       return route.fulfill({ json: { item: { claim: '北区销售额为 120 元，结果已通过独立验证。', number: '120', result_id: 'qry-1', row_index: 0, column: 'sales', value: '120', row: { region: '北区', sales: '120' }, metric: { metric_id: 'sales', metric_version: 1 } } } });
@@ -158,6 +168,11 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
     headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'Content-Disposition': 'attachment; filename="summary.docx"' },
     body: Buffer.from('browser-download-fixture'),
   }));
+  await page.route(/\/api\/artifacts\/email-ui\/download(?:\?.*)?$/, route => route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'message/rfc822', 'Content-Disposition': 'attachment; filename="analysis.eml"' },
+    body: Buffer.from('browser-email-fixture'),
+  }));
 
   await page.goto('/');
   await page.getByRole('button', { name: '智能分析' }).click();
@@ -166,6 +181,19 @@ test('opens grounded evidence and downloads a published artifact', async ({ page
   await page.locator('.analysis-summary-markdown').getByRole('button', { name: '回放数字 120 的数据证据' }).click();
   await expect(page.getByRole('heading', { name: '数据证据回放' })).toBeVisible();
   await expect(page.getByText('北区', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '可视化看板' }).click();
+  await expect(page.getByText('当前已验证数据没有适合绘图的维度和数值列。')).toBeVisible();
+  await page.getByRole('button', { name: '完整报告' }).click();
+  await expect(page.getByRole('heading', { name: '行动建议' })).toBeVisible();
+  await page.getByRole('button', { name: '邮件分享' }).click();
+  const emailDialog = page.getByRole('dialog', { name: '邮件分享分析成果' });
+  await expect(emailDialog).toBeVisible();
+  await emailDialog.getByLabel('收件人邮箱，多个用逗号分隔').fill('reviewer@example.com');
+  const emailDownloadPromise = page.waitForEvent('download');
+  await emailDialog.getByRole('button', { name: '下载邮件文件' }).click();
+  const emailDownload = await emailDownloadPromise;
+  expect(emailDownload.suggestedFilename()).toBe('analysis.eml');
+  expect((await readFile(await emailDownload.path())).toString()).toBe('browser-email-fixture');
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('link', { name: 'summary.docx' }).click();
   const download = await downloadPromise;

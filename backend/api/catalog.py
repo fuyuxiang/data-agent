@@ -469,7 +469,10 @@ def query_semantic_metric():
 
 @bp.get("/api/knowledge/documents")
 def list_documents():
-    return ok(items=[public_document(item) for item in db().list("knowledge_documents", workspace_id=workspace_id())])
+    return ok(items=[
+        public_document(item) for item in db().list("knowledge_documents", workspace_id=workspace_id())
+        if item.get("visibility") != "analysis_attachment"
+    ])
 
 
 @bp.post("/api/knowledge/documents")
@@ -493,6 +496,8 @@ def upload_document():
 @api_errors
 def update_document(document_id: str):
     document = require_workspace_record("knowledge_documents", document_id)
+    if document.get("visibility") == "analysis_attachment":
+        raise FileNotFoundError("知识文档不存在")
     assert_feature_enabled(db(), document["workspace_id"], "knowledge_base")
     allowed = {key: value for key, value in body().items() if key in {"name", "tags", "enabled"}}
     return ok(item=public_document(db().patch("knowledge_documents", document_id, allowed)))
@@ -501,7 +506,9 @@ def update_document(document_id: str):
 @bp.delete("/api/knowledge/documents/<document_id>")
 @api_errors
 def archive_document(document_id: str):
-    require_workspace_record("knowledge_documents", document_id)
+    document = require_workspace_record("knowledge_documents", document_id)
+    if document.get("visibility") == "analysis_attachment":
+        raise FileNotFoundError("知识文档不存在")
     if not db().archive("knowledge_documents", document_id):
         raise FileNotFoundError("知识文档不存在")
     return ok(archived=True)
