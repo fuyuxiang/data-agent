@@ -20,11 +20,12 @@ from backend.agent.model import (
 )
 from backend.agent.store import RunStore
 from backend.agent.tools import ToolExecutor, ToolRegistry, _validate
-from backend.services.advanced_agent import FORMAL_AGENT_TOOLS, _space_knowledge_ids
+from backend.services.advanced_agent import FORMAL_AGENT_TOOLS, _run_knowledge_ids
 from backend.services.data_plane.contracts import DatasetRef, DatasetRefStore
 from backend.services.data_plane.sandbox import SandboxUnavailable
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
 from backend.services.results.manifests import ResultService
+from backend.services.skills import get_skill, unsupported_formal_tools
 
 
 def _contract(source_ids=(), objective="按区域核对销售额"):
@@ -79,6 +80,22 @@ def test_analysis_api_requires_versioned_confirmation_and_uses_typed_job(client,
     assert confirmed.status_code == 200
     job = confirmed.get_json()["job"]
     assert job["typed"] is True
+
+
+def test_formal_analysis_exposes_only_supported_skills(client, source):
+    with client.application.app_context():
+        assert unsupported_formal_tools(get_skill("quality-audit", "default")) == []
+    listed = client.get("/api/skills").get_json()["items"]
+    assert {item["id"] for item in listed} == {"executive-summary", "quality-audit", "trend-diagnosis"}
+    assert all(item["formal_compatible"] for item in listed)
+    rejected = client.post("/api/analyses", json={
+        "objective": "评估业务", "source_ids": [source["id"]], "skill_id": "bcg-matrix",
+    })
+    assert rejected.status_code == 400
+    agent = client.post("/api/agents", json={
+        "name": "不兼容智能体", "source_ids": [source["id"]], "skill_id": "bcg-matrix",
+    })
+    assert agent.status_code == 400
 
 
 @pytest.mark.parametrize("mode,expected", [
@@ -139,9 +156,9 @@ def test_analysis_attachment_stays_private_and_follows_its_run_lineage(app, clie
     child = child_response.get_json()["item"]
     database = app.extensions["meridian_db"]
     with app.app_context():
-        assert document_id in _space_knowledge_ids(database, parent, None)
-        assert document_id in _space_knowledge_ids(database, child, None)
-        assert document_id not in _space_knowledge_ids(database, unrelated, None)
+        assert document_id in _run_knowledge_ids(database, parent)
+        assert document_id in _run_knowledge_ids(database, child)
+        assert document_id not in _run_knowledge_ids(database, unrelated)
 
 
 def test_attachment_batch_failure_does_not_leave_partial_documents(client):
@@ -213,7 +230,7 @@ def test_single_agent_loop_publishes_only_after_independent_validation(app, clie
         "summary_docx", "report_docx", "dashboard_png",
     }
     result_path = app.config["SETTINGS"].export_dir / "result-1.csv"
-    result_path.write_text("checked\n1\n", encoding="utf-8")
+    result_path.write_text('checked,=HYPERLINK("https://example.test")\n1,=SUM(1+1)\n', encoding="utf-8")
     store.db.patch("query_results", "result-1", {"path": str(result_path)}, workspace_id="default")
     more_artifacts = client.post(f"/api/analyses/{run['id']}/artifacts", json={
         "kinds": ["data_xlsx", "report_pptx"],
@@ -225,6 +242,10 @@ def test_single_agent_loop_publishes_only_after_independent_validation(app, clie
     created = {item["kind"]: item for item in more_artifacts.get_json()["items"]}
     workbook = load_workbook(store.db.get("artifacts", created["data_xlsx"]["id"])["path"], read_only=True)
     assert workbook["验证数据"]["A2"].value == 1
+    assert workbook["验证数据"]["B1"].data_type != "f"
+    assert workbook["验证数据"]["B1"].value.startswith("'=")
+    assert workbook["验证数据"]["B2"].data_type != "f"
+    assert workbook["验证数据"]["B2"].value.startswith("'=")
     presentation = Presentation(store.db.get("artifacts", created["report_pptx"]["id"])["path"])
     assert len(presentation.slides) >= 3
     email = client.post(f"/api/analyses/{run['id']}/email/eml", json={
@@ -433,6 +454,7 @@ def test_publication_gate_replays_numeric_claims_against_result_cells(app, sourc
         assert published["published"] is True
         claims = ResultService(store.db).claims(run["id"], workspace_id="default")
         assert claims[-1]["payload"]["numeric_replay"] == "PASS"
+        assert claims[-1]["payload"]["attribution_status"] == "value_only"
         assert claims[-1]["payload"]["evidence_cells"][0]["column"] == "total_sales"
         response = app.test_client().get(
             f"/api/analyses/{run['id']}/evidence/claims/{claims[-1]['id']}/cells/0"
@@ -824,29 +846,6 @@ def test_retired_host_mutation_tools_are_physically_absent(app):
     assert retired.isdisjoint(FORMAL_AGENT_TOOLS)
 
 
-def test_pre_tool_hook_is_enforced_inside_formal_executor(app, source):
-    from backend.services.advanced_agent import build_executor
-
-    database = app.extensions["meridian_db"]
-    hook = database.put("hooks", {
-        "id": "reject-query", "workspace_id": "default", "name": "禁止查询",
-        "event": "pre_tool_use", "condition": "tool == query_data", "reject": True,
-        "action": {"type": "prompt", "message": "策略拒绝 $TOOL_NAME"}, "enabled": True,
-    }, workspace_id="default")
-    store, run = _confirmed_run(app, source_ids=(source["id"],), allowed=("query_data",))
-    context = store.acquire_lease(run["id"], "hook-test")
-    decision = store.record_decision(run["id"], ModelResponse(
-        "scripted_test", "fixture", "", (), "tool_calls", None, {"total_tokens": 0},
-    ))
-    executed = build_executor(database, store.get_run(run["id"])).execute(
-        context=context, decision_id=decision["id"], call_id="query",
-        tool_id="query_data", arguments={"sql": "SELECT * FROM data"},
-    )
-    assert executed.result.status.value == "FAILED"
-    assert executed.result.error_code == "permission_denied"
-    assert database.get("hooks", hook["id"])["run_count"] == 1
-
-
 def test_trino_query_id_cannot_masquerade_as_durable_large_result(app):
     database = app.extensions["meridian_db"]
     query = database.put("warehouse_queries", {
@@ -1013,34 +1012,3 @@ def test_formal_python_analysis_fails_closed_without_sandbox(app, source, monkey
     assert analyzed.result.status.value == "FAILED"
     assert "隔离容器不可用" in analyzed.value["error"]
     assert not database.list("analysis_runs", workspace_id="default")
-
-
-def test_skill_candidate_test_publish_edit_and_rollback_lifecycle(client):
-    created = client.post("/api/skills", json={
-        "name": "区域核对", "description": "按区域核对指标",
-        "instruction": "先查询，再验证完整性。", "allowed_tools": ["query_data", "validate_result"],
-    })
-    assert created.status_code == 201
-    skill = created.get_json()["item"]
-    assert skill["status"] == "candidate"
-    assert client.post(f"/api/skills/{skill['id']}/publish").status_code == 400
-
-    failed = client.post(f"/api/skills/{skill['id']}/evaluate", json={"cases": [{
-        "input": "执行大型 Spark 分析", "required_tools": ["warehouse_spark_submit"],
-    }]})
-    assert failed.get_json()["item"]["status"] == "FAIL"
-    passed = client.post(f"/api/skills/{skill['id']}/evaluate", json={"cases": [{
-        "input": "核对区域销售", "required_tools": ["query_data", "validate_result"],
-        "forbidden_tools": ["warehouse_spark_submit"],
-    }]})
-    assert passed.get_json()["item"]["status"] == "PASS"
-    published = client.post(f"/api/skills/{skill['id']}/publish")
-    assert published.get_json()["item"]["status"] == "published"
-
-    edited = client.patch(f"/api/skills/{skill['id']}", json={"instruction": "增加口径检查后再查询。"})
-    assert edited.get_json()["item"]["status"] == "candidate"
-    assert edited.get_json()["item"]["version"] == 2
-    rolled = client.post(f"/api/skills/{skill['id']}/rollback", json={"version": 1})
-    assert rolled.get_json()["item"]["status"] == "candidate"
-    assert rolled.get_json()["item"]["version"] == 3
-    assert rolled.get_json()["item"]["rolled_back_from"] == 1

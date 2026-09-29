@@ -31,6 +31,7 @@ export const Icon = {
       brain: '<path d="M9.5 4A3.5 3.5 0 0 0 6 7.5v.7A3.5 3.5 0 0 0 5 15v.5A3.5 3.5 0 0 0 11 18V6a2 2 0 0 0-1.5-2ZM14.5 4A3.5 3.5 0 0 1 18 7.5v.7A3.5 3.5 0 0 1 19 15v.5A3.5 3.5 0 0 1 13 18V6a2 2 0 0 1 1.5-2Z"/>',
       bolt: '<path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/>',
       users: '<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 4a4 4 0 0 1 0 8M17 15a6 6 0 0 1 5 6"/>',
+      lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2"/>',
     };
     return () => Vue.h('svg', {
       viewBox: '0 0 24 24', width: props.size, height: props.size,
@@ -102,7 +103,7 @@ export const StatusPill = {
 };
 
 export const DataTable = {
-  props: { rows: { type: Array, default: () => [] }, columns: { type: Array, default: () => [] }, maxHeight: { default: '420px' } },
+  props: { rows: { type: Array, default: () => [] }, columns: { type: Array, default: () => [] }, maxHeight: { default: '420px' }, stickyFirst: { type: Boolean, default: false } },
   computed: {
     shownColumns() { return this.columns.length ? this.columns : (this.rows[0] ? Object.keys(this.rows[0]) : []); },
   },
@@ -124,7 +125,7 @@ export const DataTable = {
       return String(value);
     },
   },
-  template: `<div class="data-table-wrap" :style="{ maxHeight }"><table class="data-table"><thead><tr><th v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }">{{ label(column) }}</th></tr></thead><tbody><tr v-for="(row, index) in rows" :key="index"><td v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }" :title="format(row[key(column)])">{{ format(row[key(column)]) }}</td></tr></tbody></table></div>`,
+  template: `<div class="data-table-wrap" :class="{ 'data-table-wrap--sticky-first': stickyFirst }" :style="{ maxHeight }"><table class="data-table"><thead><tr><th v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }">{{ label(column) }}</th></tr></thead><tbody><tr v-for="(row, index) in rows" :key="index"><td v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }" :title="format(row[key(column)])">{{ format(row[key(column)]) }}</td></tr></tbody></table></div>`,
 };
 
 function genericSeries(spec) {

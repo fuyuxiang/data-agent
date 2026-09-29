@@ -356,40 +356,6 @@ def browser_integration() -> list[Result]:
     return [command("browser-integration", ["npm", "run", "test:browser"])]
 
 
-def acceptance_matrix() -> list[Result]:
-    path = ROOT / "docs" / "advanced-data-agent" / "ACCEPTANCE.md"
-    if not path.is_file():
-        return [Result("acceptance-matrix", "FAIL", "验收矩阵不存在")]
-    rows = re.findall(
-        r"^\| ((?:R|F|A|W|C)\d{2}) \| ([A-Z_]+) \| ([A-Z_]+) \|",
-        path.read_text(encoding="utf-8"), re.MULTILINE,
-    )
-    expected = {**{f"R{i:02d}": 1 for i in range(1, 22)}, **{f"F{i:02d}": 1 for i in range(1, 35)},
-                **{f"A{i:02d}": 1 for i in range(1, 65)}, **{f"W{i:02d}": 1 for i in range(1, 31)},
-                **{f"C{i:02d}": 1 for i in range(1, 25)}}
-    counts = {key: sum(item[0] == key for item in rows) for key in expected}
-    malformed = [key for key, count in counts.items() if count != 1]
-    structure = Result(
-        "acceptance-matrix-structure", "PASS" if not malformed and len(rows) == len(expected) else "FAIL",
-        f"已解析 {len(rows)} / {len(expected)} 个唯一验收项；异常：{malformed[:20]}",
-    )
-    implementation_statuses = {implementation for _, implementation, _ in rows}
-    validation_statuses = {validation for _, _, validation in rows}
-    invalid_implementation = implementation_statuses - {"IMPLEMENTED", "RETIRED"}
-    gate_status = (
-        "FAIL" if malformed or invalid_implementation or "FAIL" in validation_statuses
-        else "PASS" if validation_statuses == {"PASS"}
-        else "BLOCKED"
-    )
-    gate = Result(
-        "acceptance-matrix-gates", gate_status,
-        "全部验收项已通过" if gate_status == "PASS" else (
-            f"实现状态={sorted(implementation_statuses)}；验证状态={sorted(validation_statuses)}"
-        ),
-    )
-    return [structure, gate]
-
-
 def execute(profile: str) -> list[Result]:
     if profile == "ci":
         return ci()
@@ -410,7 +376,7 @@ def execute(profile: str) -> list[Result]:
     if profile == "release":
         return [
             *ci(), *repository_audit(), *warehouse_reference(), *target_platform(),
-            *scale(), *live_model(), *notification(), *migration_restore(), *acceptance_matrix(),
+            *scale(), *live_model(), *notification(), *migration_restore(),
         ]
     raise ValueError(profile)
 

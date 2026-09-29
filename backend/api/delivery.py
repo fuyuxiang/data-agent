@@ -6,12 +6,10 @@ import pandas as pd
 from flask import Blueprint, current_app, request, send_file
 
 from ..agent.store import RunStore
-from ..services.exports import export_data, export_report
 from ..services.authorization import actor_role, require_sources_access
 from ..services.data_policy import policy_fingerprint
 from ..services.results.delivery import ARTIFACT_KINDS, generate_artifacts, prepare_eml, send_email
 from ..services.results.manifests import ResultService
-from ..services.saas import assert_feature_enabled
 from .common import (
     api_errors, current_user_id,
     body,
@@ -24,22 +22,6 @@ from .common import (
 
 
 bp = Blueprint("delivery", __name__)
-
-
-@bp.post("/api/exports/data")
-@api_errors
-def create_data_export():
-    assert_feature_enabled(db(), workspace_id(), "result_delivery")
-    artifact = export_data(body(), workspace_id(), current_user_id())
-    return ok(artifact=_public_artifact(artifact)), 201
-
-
-@bp.post("/api/exports/report")
-@api_errors
-def create_report_export():
-    assert_feature_enabled(db(), workspace_id(), "result_delivery")
-    artifact = export_report(body(), workspace_id(), current_user_id())
-    return ok(artifact=_public_artifact(artifact)), 201
 
 
 def _public_artifact(item: dict) -> dict:

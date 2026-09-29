@@ -7,9 +7,9 @@ const { computed, createApp, onBeforeUnmount, onMounted, reactive } = Vue;
 
 const productRoutes = [
   { id: 'chat', label: '智能分析', icon: 'chat' },
-  { id: 'sources', label: '数据资产', icon: 'database', adminOnly: true },
-  { id: 'semantic', label: '指标中心', icon: 'chart', adminOnly: true },
-  { id: 'knowledge', label: '知识库', icon: 'book', adminOnly: true },
+  { id: 'sources', label: '数据资产', icon: 'database' },
+  { id: 'semantic', label: '指标中心', icon: 'chart' },
+  { id: 'knowledge', label: '知识库', icon: 'book' },
   { id: 'settings', label: '系统管理', icon: 'settings', adminOnly: true, utility: true },
 ];
 
@@ -218,13 +218,10 @@ const Root = {
     };
     const command = async (raw) => {
       let [name,...rest]=raw.slice(1).trim().split(/\s+/); const arg=rest.join(' ');
-      const aliases={n:'new',c:'compact',h:'help','?':'help',i:'instruction',kb:'knowledge',session:'sessions',s:'status',ws:'workspace'};name=aliases[name]||name;
+      const aliases={n:'new',h:'help','?':'help',i:'instruction',kb:'knowledge',session:'sessions',s:'status',ws:'workspace'};name=aliases[name]||name;
       if(name==='new') return newSession(arg||'新分析会话');
       if(name==='data'||name==='sources'||name==='profile') return go('sources');
       if(name==='knowledge') return go('knowledge');
-      if(name==='clear') { const session=activeSession();if(session)await api(`/api/sessions/${session.id}/clear`,{method:'POST'});toast('','会话上下文已清除');return; }
-      if(name==='compact'){const session=activeSession();if(!session)return;await api(`/api/sessions/${session.id}/commands/compact/execute`,{method:'POST',body:{arguments:arg}});toast('','上下文已压缩');return;}
-      if(name==='save') { const session=activeSession(); if(session){await api(`/api/sessions/${session.id}/save`,{method:'POST',body:{name:arg||session.name}});toast('当前消息与分析证据已保存','会话已保存');} return; }
       if(name==='instruction'){const session=activeSession();if(!session)return;const entry=arg?{value:arg}:await askForm({title:'本会话临时指令',fields:[{key:'value',label:'指令内容',value:session.temporary_instruction||'',required:true,multiline:true}],submitLabel:'保存指令'});const value=entry?.value||'';if(value){session.temporary_instruction=value;session.temp_prompt_enabled=true;await api(`/api/sessions/${session.id}`,{method:'PATCH',body:{temporary_instruction:value,temp_prompt_enabled:true}});toast('','临时指令已更新');}return;}
       if(name==='mcp'||name==='workspace'){localStorage.setItem('meridian-settings-tab',name==='mcp'?'tools':'members');return go('settings');}
       if(name==='sessions'){if(arg==='new')return newSession();toast(`${state.sessions.length} 个当前工作空间会话`,'会话');return;}
@@ -242,7 +239,13 @@ const Root = {
     const syncHash=()=>go(location.hash.slice(1)||'chat');
     onMounted(()=>{bootstrap();window.addEventListener('keydown',keydown);window.addEventListener('hashchange',syncHash);});
     onBeforeUnmount(()=>{window.removeEventListener('keydown',keydown);window.removeEventListener('hashchange',syncHash);});
-    const filteredCommands=computed(()=>state.commands.filter(item=>(item.name+' '+item.description).toLowerCase().includes(state.commandQuery.toLowerCase())));
+    const filteredCommands=computed(()=>state.commands.filter(item=>{
+      const role = state.workspaceRole;
+      const visible = role === 'viewer' ? ['help', 'sessions', 'status']
+        : role === 'analyst' ? ['help', 'sessions', 'status', 'new', 'instruction'] : null;
+      return (!visible || visible.includes(item.name))
+        && (item.name+' '+item.description).toLowerCase().includes(state.commandQuery.toLowerCase());
+    }));
     const canAdmin=computed(()=>['owner','editor'].includes(state.workspaceRole));
     const routes=computed(()=>productRoutes.filter(item=>canAdmin.value||!item.adminOnly));
     const routeGroups=computed(()=>[
@@ -258,10 +261,10 @@ const Root = {
     <main v-else-if="state.authRequired" class="auth-screen portal-screen">
       <section class="portal-shell">
         <div class="portal-hero">
-          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>教育数据智能分析平台</small></div></header>
-          <p class="portal-eyebrow">EDU DATA INTELLIGENCE PLATFORM</p>
+          <header class="portal-brand"><span class="brand__mark brand__mark--image"><img src="/src/assets/logo-shuqing.png" alt="数擎" /></span><div><b>数擎 Data Agent</b><small>企业数据智能分析平台</small></div></header>
+          <p class="portal-eyebrow">数据可追溯 · 结论可核验</p>
           <h1>统一数据、知识与指标<br>构建可信分析闭环</h1>
-          <p class="portal-summary">面向成绩分析、课程评价与就业质量分析，统一数据资产、指标口径、业务知识和智能分析流程，让结论可核验、过程可追踪、成果可交付。</p>
+          <p class="portal-summary">统一数据资产、指标口径和业务知识，让团队用自然语言提出问题、核对分析范围，并查看可回放的数据证据。</p>
           <div class="portal-workflow">
             <span><i>01</i><b>多源数据接入</b></span>
             <span><i>02</i><b>指标口径治理</b></span>
@@ -310,7 +313,7 @@ const Root = {
             <button v-for="item in group.items" :key="item.id" :aria-label="item.label" :class="{active:state.route===item.id}" @click="go(item.id)"><Icon :name="item.icon"/><span>{{ item.label }}</span></button>
           </section>
         </nav>
-        <section class="sidebar-sessions"><header><span>分析记录</span><button @click="newSession()" title="新建分析"><Icon name="plus"/></button></header><div class="sidebar-session-list"><div v-for="session in state.sessions" :key="session.id" class="sidebar-session-row" :class="{active:session.id===state.activeSessionId}"><button class="sidebar-session-main" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button><span class="sidebar-session-actions"><button @click.stop="openSessionDialog('rename',session)" :aria-label="'重命名 '+session.name" title="重命名"><Icon name="edit" :size="14"/></button><button class="danger" @click.stop="openSessionDialog('delete',session)" :aria-label="'删除 '+session.name" title="删除"><Icon name="trash" :size="14"/></button></span></div></div></section>
+        <section class="sidebar-sessions"><header><span>分析记录</span><button v-if="state.workspaceRole!=='viewer'" @click="newSession()" title="新建分析"><Icon name="plus"/></button></header><div class="sidebar-session-list"><div v-for="session in state.sessions" :key="session.id" class="sidebar-session-row" :class="{active:session.id===state.activeSessionId}"><button class="sidebar-session-main" :class="{active:session.id===state.activeSessionId}" @click="switchSession(session.id)"><i></i><span>{{ session.name }}</span><small>{{ ctx.time(session.updated_at) }}</small></button><span v-if="state.workspaceRole!=='viewer'" class="sidebar-session-actions"><button @click.stop="openSessionDialog('rename',session)" :aria-label="'重命名 '+session.name" title="重命名"><Icon name="edit" :size="14"/></button><button class="danger" @click.stop="openSessionDialog('delete',session)" :aria-label="'删除 '+session.name" title="删除"><Icon name="trash" :size="14"/></button></span></div></div></section>
         <footer class="sidebar-footer">
           <button v-if="canAdmin" class="sidebar-utility" :class="{active:state.route==='settings'}" @click="go('settings')"><Icon name="settings" :size="16"/><span>系统管理</span></button>
           <button class="command-entry" @click="state.commandOpen=true"><Icon name="search" :size="15"/><span>全局搜索</span><kbd>⌘ K</kbd></button>

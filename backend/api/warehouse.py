@@ -7,7 +7,7 @@ from ..services.data_plane.factory import livy_adapter, public_engine, trino_ada
 from ..services.data_plane.livy import LivyBatchAdapter, LivyConfig
 from ..services.data_plane.trino import TrinoAdapter, TrinoConfig
 from ..services.authorization import require_sources_access
-from ..services.saas import assert_collection_limit, assert_feature_enabled
+from ..services.product import assert_feature_enabled
 from ..services.security import SecretVault
 from .common import api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id
 
@@ -29,7 +29,6 @@ def engines():
 def create_engine():
     payload, wid = body(), workspace_id()
     assert_feature_enabled(db(), wid, "warehouse")
-    assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
     engine_type = str(payload.get("type") or "trino").lower()
     engine_id = db().new_id("engine")
     vault = SecretVault(current_app.config["VAULT_KEY"])

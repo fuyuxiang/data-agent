@@ -196,6 +196,11 @@ def _build_claims(
             "numbers": numbers,
             "unmatched_numbers": unmatched,
             "numeric_replay": "FAIL" if unmatched else "PASS" if numbers else "NOT_EVALUATED",
+            # Equal numbers alone cannot establish metric, group, time, or causal meaning.
+            "attribution_status": (
+                "context_matched" if numbers and len(matched) == len(numbers) and mentioned_labels and mentioned_columns
+                and not unmatched else "value_only" if matched else "not_evaluated"
+            ),
         })
     return claims
 
@@ -241,7 +246,7 @@ class ResultService:
             )),
             Rule("numeric_claim_replay", "1", "expression", "blocking", 3, lambda ctx: outcome(
                 "PASS" if all(item["numeric_replay"] != "FAIL" for item in ctx["claims"]) else "FAIL",
-                "显式数字可在证据单元格中找到；业务解释仍需人工判断"
+                "显式数字可在证据单元格中定位；指标、分组及业务解释仍需核对"
                 if all(item["numeric_replay"] != "FAIL" for item in ctx["claims"])
                 else "回答包含无法从证据单元格核对的数字",
                 unmatched=[

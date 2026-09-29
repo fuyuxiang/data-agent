@@ -201,8 +201,7 @@ def artifact_references(database: Database, workspace_id: str) -> dict:
     artifacts = database.list("artifacts", workspace_id=workspace_id, limit=5000)
     corpus = str({
         collection: database.list(collection, workspace_id=workspace_id, limit=5000)
-        for collection in ("saved_sessions", "dashboards", "workflow_artifacts", "messages")
-        if collection != "messages"
+        for collection in ("saved_sessions",)
     })
     items = []
     for artifact in artifacts:

@@ -15,7 +15,7 @@ from flask import Blueprint, current_app, request
 
 from ..services.mcp import get_mcp_manager
 from ..services.models import public_provider, save_provider, test_provider
-from ..services.saas import assert_feature_enabled
+from ..services.product import assert_feature_enabled
 from ..services.security import SecretVault, safe_http_request, validate_outbound_url
 from .common import (
     api_errors, body, current_user_id, db, ok, require_system_owner,

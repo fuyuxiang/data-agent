@@ -209,15 +209,3 @@ def lifecycle_session_reclaim(): return _record_reclaim("sessions")
 
 @bp.post("/api/lifecycle/session-trash/<trash_id>/restore")
 def lifecycle_session_restore(trash_id: str): return _record_restore("sessions", trash_id, "回收站项目不存在")
-
-
-@bp.get("/api/lifecycle/memory-trash")
-def lifecycle_memory_trash(): return _record_trash("memories")
-
-
-@bp.post("/api/lifecycle/memory-trash/reclaim")
-def lifecycle_memory_reclaim(): return _record_reclaim("memories")
-
-
-@bp.post("/api/lifecycle/memory-trash/<trash_id>/restore")
-def lifecycle_memory_restore(trash_id: str): return _record_restore("memories", trash_id, "记忆回收站项目不存在")

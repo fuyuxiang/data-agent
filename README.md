@@ -18,7 +18,7 @@
 
 数擎 Data Agent 是一套 Vue 3 + Python 的企业数据分析 Agent。产品只围绕“接入数据 → 治理指标与知识 → 发起分析 → 生成报告”这条主链路展开；数据库、文件、API 和数仓是受治理的数据源，MCP 是 Agent 的受控工具连接。
 
-产品以业务分析人员为主要用户：业务用户进入后直接提问，系统自动完成意图澄清、查询、分析、验证和报告生成；管理员只在需要时进入数据管理、指标中心、业务知识和系统设置。当前产品边界与删减原则见 [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)，正式分析与行列权限的配置方式见 [企业分析链路配置](docs/enterprise-capabilities.md)。
+产品以业务分析人员为主要用户：业务用户进入后直接提问，系统自动完成意图澄清、查询、分析、验证和报告生成；管理员只在需要时进入数据管理、指标中心、业务知识和系统设置。当前产品边界与删减原则见 [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)。
 
 数据、中间结果、知识索引、审计记录与导出文件默认保存在本机 `storage/`；模型和外部工具按需连接。没有模型配置时，数据浏览和确定性指标查询仍可用，正式自主分析则明确返回 `model_not_configured`，不会伪造结果。
 
@@ -146,12 +146,11 @@ flowchart TB
 │   ├── api/                     # HTTP/SSE 接口与边界校验
 │   ├── core/                    # 配置、SQLite 存储、观测性和实例锁
 │   ├── agent/                   # 唯一模型协议、AgentLoop、RunStore 与 ToolExecutor
-│   ├── services/                # 数据面、验证、结果、工作流、MCP 与交付服务
+│   ├── services/                # 数据面、验证、结果、MCP 与交付服务
+│   │   └── results/             # 正式成果验证与交付
 │   ├── analysis_modules/        # 统计、机器学习与时序分析实现
-│   ├── data_cleaning/           # 可追溯的数据处理能力
-│   └── document_output/         # Excel、Word 与 PowerPoint 交付
+│   └── data_cleaning/           # 可追溯的数据处理能力
 ├── frontend/                    # Vue 应用与必要本地依赖
-├── skills/                      # 28 个内置分析/交付技能 SOP
 ├── scripts/                     # 构建、验收、仓库审计、备份与恢复
 ├── deploy/warehouse/            # 固定版本的 Trino/Iceberg/Spark-Livy 参考环境
 ├── tests/                       # API、安全、自动化与产品化测试
@@ -317,7 +316,7 @@ npm run test:browser
 
 PostgreSQL 和 MySQL 连接器测试需要临时数据库，环境变量与执行方式可参考 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。CI 还会执行覆盖率门槛、锁定依赖安全审计、Compose 配置校验和生产镜像构建。
 
-高级数据 Agent 的逐条验收账本位于 [`docs/advanced-data-agent/ACCEPTANCE.md`](docs/advanced-data-agent/ACCEPTANCE.md)。本地与外部证据分 profile 执行：
+当前版本按验证场景生成可重现的结果，不再使用从已缺失旧规范自动填入 `IMPLEMENTED` 的验收矩阵。运行以下 profile，分别检查本地代码及需要真实外部环境的能力：
 
 ```bash
 python scripts/verify_advanced_agent.py --profile ci
@@ -343,7 +342,7 @@ python scripts/verify_advanced_agent.py --profile release
 - **出站防护：** 外部 HTTP 请求校验 scheme、域名白名单和解析后 IP，默认禁止本机、内网、链路本地与保留地址，并限制重定向和响应体大小。
 - **身份与隔离：** 生产环境强制登录，首位所有者需初始化令牌；工作空间角色、数据源成员白名单和私有会话所有权同时生效，且结果、任务、快照与导出会重新检查当前数据授权；写请求受 Origin 和 CSRF 校验保护。
 - **受控执行：** stdio MCP 默认关闭；Agent 不具备宿主写改删、Shell/Git、自改 Hook 或任意远程代码能力；Docker sandbox 缺失时 fail closed。
-- **可追溯：** 查询、分析、工具调用、工作流、快照恢复和交付动作保留审计证据。
+- **可追溯：** 查询、分析、工具调用、快照恢复和交付动作保留审计证据。
 
 安全控制不代替部署环境的 TLS、网络分区、最小权限数据库账号、密钥托管、异地备份和安全监控。生产上线前应根据组织的数据分类分级和合规要求完成独立评审。
 
@@ -351,12 +350,12 @@ python scripts/verify_advanced_agent.py --profile release
 
 - `storage/`、`.env`、本地数据库、日志和构建产物已通过 `.gitignore` 排除；请勿将真实数据、密钥或备份提交到 Git。
 - 依赖版本由 `requirements.lock` 以哈希锁定，生产镜像使用 `--require-hashes` 安装。
-- 当前仓库**没有项目级 `LICENSE`**，且部分分析、清洗、文档交付与 Skill 实现受 CC BY-NC 4.0 等第三方条款约束。在企业内部商用、SaaS、分发或二次销售前，必须先完成权利审核并取得必要授权。详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+- 当前仓库**没有项目级 `LICENSE`**，且部分分析与清洗实现受第三方条款约束。在企业内部商用、分发或二次销售前，须确认相关授权。详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 ---
 
 <div align="center">
 
-**Meridian Analytics Workbench · 让每一个结论都能回到数据，让每一次分析都能沉淀为流程。**
+**数擎 Data Agent · 让每一个结论都能回到数据。**
 
 </div>

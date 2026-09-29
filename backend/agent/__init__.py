@@ -1,7 +1,7 @@
 """Governed, Flask-independent agent runtime.
 
-The package owns the only model/tool decision loop.  HTTP, scheduled workflows,
-and child analyses construct trusted contexts and delegate here.
+The package owns the only model/tool decision loop. HTTP requests and
+child analyses construct trusted contexts and delegate here.
 """
 
 from .contracts import RunContext, TaskContract, ToolResult, ToolStatus

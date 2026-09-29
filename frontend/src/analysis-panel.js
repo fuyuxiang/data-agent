@@ -33,13 +33,17 @@ export const AnalysisPanel = {
     emailOpen: false, emailBusy: false, emailConnectors: [],
     emailForm: { recipients: '', subject: '', body: '', connectorId: '', kinds: ['summary_docx', 'report_docx', 'dashboard_png'] },
     clarificationAnswer: '', feedbackSent: '', feedbackItem: null,
-    contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
+    contractForm: { objective: '', coverage: '', dimensions: '', deliverables: [] },
     artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png', 'data_xlsx', 'report_pptx'],
   }),
   computed: {
     state() { return this.ctx.state; },
     session() { return this.ctx.activeSession(); },
     selectedSources() { return this.ctx.selectedSources(); },
+    canAnalyze() { return ['owner', 'editor', 'analyst'].includes(this.state.workspaceRole); },
+    runSourceNames() {
+      return (this.current?.source_scope || []).map(id => this.state.sources.find(item => item.id === id)?.name || `已移除的数据源（${id}）`);
+    },
     selectedAgent() { return this.agents.find(item => item.id === this.selectedAgentId) || null; },
     availableSources() { return this.state.sources.filter(item => item.status === 'ready'); },
     demoMode() { return this.selectedSources.some(item => item.sample_seed?.id === 'instant_retail_city_pack'); },
@@ -51,7 +55,7 @@ export const AnalysisPanel = {
       return event?.payload || null;
     },
     canSend() {
-      return !!this.prompt.trim() && !!this.session && !this.processing && !this.drafting
+      return this.canAnalyze && !!this.prompt.trim() && !!this.session && !this.processing && !this.drafting
         && (!this.current || TERMINAL.has(this.current.execution_status));
     },
   },
@@ -133,7 +137,7 @@ export const AnalysisPanel = {
       this.contractForm = {
         objective: value.objective || '', coverage: value.coverage || '',
         dimensions: (value.dimensions || []).join('，'),
-        deliverables: (value.deliverables || []).join('，'),
+        deliverables: [...(value.deliverables || [])],
       };
     },
     async load() {
@@ -356,7 +360,8 @@ export const AnalysisPanel = {
     claimStatus(claim) {
       const payload = claim.payload || {};
       if (payload.numeric_replay === 'FAIL') return '待核对';
-      if ((payload.evidence_cells || []).length) return '数字已核对 · 解释需判断';
+      if ((payload.evidence_cells || []).length) return payload.attribution_status === 'context_matched'
+        ? '数值与字段、分组匹配 · 解释待复核' : '数值可定位 · 口径待复核';
       if ((payload.definition_numbers || []).length) return '口径常量已核对 · 解释需判断';
       return '解释需人工判断';
     },
@@ -386,7 +391,7 @@ export const AnalysisPanel = {
       return {
         ...(this.contract?.payload || {}), ...this.contractForm,
         dimensions: this.split(this.contractForm.dimensions),
-        deliverables: this.split(this.contractForm.deliverables),
+        deliverables: this.contractForm.deliverables,
         source_scope: this.current.source_scope,
       };
     },
@@ -599,15 +604,11 @@ export const AnalysisPanel = {
             <header><div><b>{{ demoMode ? '演示问题' : '试试这样问' }}</b></div></header>
             <div v-if="demoMode" class="prompt-grid">
               <button @click="usePrompt('活跃合作商家总数是多少，各省份如何分布？')"><span class="prompt-icon"><Icon name="table"/></span><span><b>供给规模</b><small>总量与省份分布</small></span><Icon name="chevron"/></button>
-              <button @click="usePrompt('哪些城市的商家供给存在明显差异？')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>城市差异</b><small>识别结构异常</small></span><Icon name="chevron"/></button>
               <button @click="usePrompt('结合盈利状态、补贴和履约成本，分析需要优先关注的城市。')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>经营诊断</b><small>定位重点城市</small></span><Icon name="chevron"/></button>
-              <button @click="usePrompt('生成一份城市经营简报，包含结论、证据、风险和建议。')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论、证据与建议</small></span><Icon name="chevron"/></button>
             </div>
             <div v-else class="prompt-grid">
               <button @click="usePrompt('概览已选数据，指出最重要的三个发现和数据质量风险')"><span class="prompt-icon"><Icon name="table"/></span><span><b>经营概览</b><small>关键指标与结构</small></span><Icon name="chevron"/></button>
               <button @click="usePrompt('识别关键指标的异常变化，并定位贡献最大的群组')"><span class="prompt-icon"><Icon name="warning"/></span><span><b>异常归因</b><small>变化与贡献度</small></span><Icon name="chevron"/></button>
-              <button @click="usePrompt('分析核心数值的时间趋势，并说明可验证的变化')"><span class="prompt-icon"><Icon name="chart"/></span><span><b>趋势洞察</b><small>走势与关键拐点</small></span><Icon name="chevron"/></button>
-              <button @click="usePrompt('生成一份适合经营会的分析摘要，包含结论、证据和建议')"><span class="prompt-icon"><Icon name="workflow"/></span><span><b>经营简报</b><small>结论与行动建议</small></span><Icon name="chevron"/></button>
             </div>
           </section>
         </div>
@@ -624,11 +625,12 @@ export const AnalysisPanel = {
 
           <section v-if="contract && !contract.confirmed_at" class="analysis-contract">
             <header><div><small class="section-label">需求理解确认</small><h2>请核对本次分析的目标与范围</h2></div><StatusPill status="draft" label="待确认"/></header>
+            <div class="contract-source-scope"><b>实际使用的数据源</b><div v-if="runSourceNames.length" class="contract-source-list"><span v-for="name in runSourceNames" :key="name"><Icon name="database" :size="14"/>{{ name }}</span></div><p v-else>本次任务尚未选择数据源。请重新描述并选择来源。</p><small>此范围已固定在本次任务中；下方来源选择仅影响下一次提问。</small></div>
             <div class="contract-grid">
               <label><span>业务分析目标</span><textarea v-model="contractForm.objective"></textarea></label>
               <label><span>统计覆盖范围</span><textarea v-model="contractForm.coverage"></textarea></label>
-              <label><span>查看维度</span><textarea v-model="contractForm.dimensions" placeholder="用逗号或换行分隔"></textarea></label>
-              <label><span>需要的结果</span><textarea v-model="contractForm.deliverables" placeholder="结论、图表、报告"></textarea></label>
+              <label><span>查看维度</span><textarea v-model="contractForm.dimensions" placeholder="例如：月份、省份；整体分析可填写“整体”"></textarea></label>
+              <fieldset class="contract-deliverables"><legend>需要的结果</legend><label><input v-model="contractForm.deliverables" type="checkbox" value="summary">分析结论</label><label><input v-model="contractForm.deliverables" type="checkbox" value="dashboard">可视化图表</label><label><input v-model="contractForm.deliverables" type="checkbox" value="report">完整报告</label></fieldset>
             </div>
             <div class="attachment-drop" @dragover.prevent @drop.prevent="uploadFiles($event.dataTransfer.files)">
               <Icon name="upload"/><span>拖拽 docx / xlsx / pdf / md / txt，单文件不超过 50MB</span>
@@ -639,7 +641,7 @@ export const AnalysisPanel = {
             </div>
             <footer>
               <button class="button" @click="current=null;events=[]">重新描述</button>
-              <button class="button button--primary" :disabled="drafting" @click="confirmContract"><Icon name="check"/>确认需求并开始分析</button>
+              <button v-if="canAnalyze" class="button button--primary" :disabled="drafting || !runSourceNames.length || !contractForm.deliverables.length" @click="confirmContract"><Icon name="check"/>确认需求并开始分析</button>
             </footer>
           </section>
 
@@ -717,7 +719,7 @@ export const AnalysisPanel = {
               <section><h3>限制与待核对事项</h3><ul><li v-for="(item,index) in manifest.limitations || []" :key="index">{{ item }}</li></ul></section>
             </div>
             <footer class="result-actions">
-              <button class="button button--primary" @click="branch('followup')"><Icon name="chat"/>继续追问</button>
+              <button class="button button--primary" @click="branch('followup')" title="沿用本次分析的数据源与知识范围"><Icon name="chat"/>继续追问 · 沿用本次范围</button>
               <button class="button" @click="generateArtifacts('summary_docx')"><Icon name="download"/>结论 Word</button>
               <button class="button" @click="generateArtifacts('report_docx')"><Icon name="download"/>报告 Word</button>
               <button class="button" @click="generateArtifacts('dashboard_png')"><Icon name="download"/>看板 PNG</button>
@@ -731,7 +733,7 @@ export const AnalysisPanel = {
         </template>
       </div>
 
-      <form class="composer" @submit.prevent="send">
+      <form v-if="canAnalyze" class="composer" @submit.prevent="send">
         <section v-if="knowledgePickerOpen" class="composer-knowledge-picker">
           <header><b>本次分析参考的知识文档</b><button type="button" @click="knowledgePickerOpen=false">完成</button></header>
           <label v-for="item in knowledgeDocuments" :key="item.id"><input type="checkbox" :checked="selectedKnowledgeIds.includes(item.id)" @change="toggleKnowledge(item)">{{ item.name }}</label>
@@ -752,6 +754,7 @@ export const AnalysisPanel = {
           <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'核对需求':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>
         </div>
       </form>
+      <div v-else class="analysis-readonly-note"><Icon name="lock" :size="16"/>当前为只读角色，可查看已授权内容。发起分析需要分析成员权限。</div>
       <div v-if="emailOpen" class="modal-backdrop" @mousedown.self="emailOpen=false"><section class="modal" role="dialog" aria-modal="true" aria-label="邮件分享分析成果"><header class="modal__header"><h2>邮件分享分析成果</h2><button class="icon-button" @click="emailOpen=false" aria-label="关闭">×</button></header><div class="modal__body dialog-form"><label class="dialog-field"><span>收件人邮箱，多个用逗号分隔</span><input v-model.trim="emailForm.recipients" type="text" autocomplete="email"></label><label class="dialog-field"><span>主题</span><input v-model.trim="emailForm.subject"></label><label class="dialog-field"><span>正文</span><textarea v-model="emailForm.body"></textarea></label><fieldset class="email-attachments"><legend>附件</legend><label><input v-model="emailForm.kinds" type="checkbox" value="summary_docx">极简结论 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_docx">完整报告 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="dashboard_png">看板 PNG</label><label><input v-model="emailForm.kinds" type="checkbox" value="data_xlsx">验证数据 Excel</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_pptx">分析报告 PPT</label></fieldset><label v-if="emailConnectors.length" class="dialog-field"><span>邮件服务</span><select v-model="emailForm.connectorId"><option v-for="item in emailConnectors" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><p v-else>尚未配置 SMTP 邮件服务。可下载包含附件的 .eml 文件，用本地邮件客户端发送。</p></div><footer class="modal__footer"><button class="button" @click="emailOpen=false">取消</button><button class="button" :disabled="emailBusy" @click="deliverEmail(false)">下载邮件文件</button><button v-if="emailConnectors.length" class="button button--primary" :disabled="emailBusy" @click="deliverEmail(true)">发送邮件</button></footer></section></div>
     </section>`,
 };

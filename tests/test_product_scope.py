@@ -18,8 +18,20 @@ def test_retired_product_surfaces_are_not_exposed(client):
         "/api/teams",
         "/api/feishu-bot",
         "/api/dashboards",
+        "/api/analysis/methods",
+        "/api/analysis/runs",
+        "/api/charts/catalog",
+        "/api/commands/compact",
+        "/api/memories",
+        "/api/lifecycle/memory-trash",
+        "/api/skills/reload",
+        "/api/exports/data",
+        "/api/exports/report",
     ):
         assert client.get(path).status_code == 404
+    assert client.post("/api/analysis/run", json={"rows": [{"value": 1}]}).status_code == 404
+    assert client.post("/api/charts/spec", json={"rows": [{"value": 1}]}).status_code == 404
+    assert client.post("/api/skills", json={"name": "新技能"}).status_code == 405
 
 
 def test_agent_tool_surface_matches_focused_product(app):
@@ -35,7 +47,6 @@ def test_agent_tool_surface_matches_focused_product(app):
         "query_metric",
         "query_knowledge",
         "generate_chart",
-        "export_report",
     }.issubset(exposed)
     assert exposed.isdisjoint({
         "propose_dashboard_outline",
@@ -55,6 +66,9 @@ def test_agent_tool_surface_matches_focused_product(app):
         "workflow_list",
         "workflow_start",
         "workflow_status",
+        "memory_read",
+        "export_report",
+        "export_excel",
     })
 
 

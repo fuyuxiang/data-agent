@@ -86,7 +86,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
         "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
     )
     assert query.status_code == 200
-    result_id = query.get_json()["result"]["id"]
     model_response = member.post(
         "/api/semantic/models",
         json={
@@ -116,9 +115,6 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert member.patch(
         f"/api/semantic/models/{model['id']}", json={"description": "unauthorized change"},
     ).status_code == 403
-    artifact = member.post(
-        "/api/exports/data", json={"result_id": result_id, "format": "csv"},
-    ).get_json()["artifact"]
 
     assert member.get(f"/api/workspaces/{workspace['id']}/storage").status_code == 403
     assert member.get("/api/audit").status_code == 403
@@ -139,10 +135,9 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
         "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
     ).status_code == 403
     assert member.post(
-        "/api/analysis/run", json={"source_id": source["id"], "method": "profile"},
+        "/api/analyses", json={"objective": "核对受限来源", "source_ids": [source["id"]]},
     ).status_code == 403
     assert member.get(f"/api/query-results/{query.get_json()['result']['id']}").status_code == 403
-    assert member.get(f"/api/artifacts/{artifact['id']}/download").status_code == 403
 
     derived = owner.post(
         f"/api/sources/{source['id']}/clean/apply",

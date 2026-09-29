@@ -107,7 +107,7 @@ class StdioTransport(Transport):
         if os.name == "nt":
             # asyncio's Windows pipe transport requires named-pipe permissions
             # that restricted desktop hosts may not grant. Anonymous pipes work.
-            self.windows_process = subprocess.Popen(
+            self.windows_process = subprocess.Popen(  # noqa: S603 - command allowlist and disabled-by-default stdio gate
                 [self.command, *self.arguments], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.environment,
             )

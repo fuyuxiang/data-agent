@@ -26,6 +26,12 @@ ARTIFACT_KINDS = ("summary_docx", "report_docx", "dashboard_png", "data_xlsx", "
 DEFAULT_ARTIFACT_KINDS = ARTIFACT_KINDS[:3]
 
 
+def _safe_excel_text(value):
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -195,11 +201,10 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
             raise ValueError("明细行数超过 Excel 上限")
         frame = pd.read_csv(result_path)
         # Uploaded/source text is untrusted. Prevent spreadsheet clients from
-        # interpreting a data cell as a formula when the workbook is opened.
+        # interpreting source headers or data cells as formulas.
+        frame.columns = [_safe_excel_text(str(column)) for column in frame.columns]
         for column in frame.select_dtypes(include=["object", "string"]).columns:
-            frame[column] = frame[column].map(
-                lambda value: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value,
-            )
+            frame[column] = frame[column].map(_safe_excel_text)
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             pd.DataFrame([
                 {"项目": "成果版本", "内容": str(manifest["version"])},

@@ -3,8 +3,6 @@ from __future__ import annotations
 import io
 
 import pandas as pd
-from docx import Document
-from pptx import Presentation
 
 
 def test_bootstrap_and_capability_catalog(client):
@@ -17,10 +15,8 @@ def test_bootstrap_and_capability_catalog(client):
     assert bootstrap["active_workspace"]["id"] == "default"
     assert bootstrap["active_session"]
 
-    charts = client.get("/api/charts/catalog").get_json()["items"]
-    methods = client.get("/api/analysis/methods").get_json()["items"]
-    assert len(charts) >= 45
-    assert {item["id"] for item in methods} >= {"cluster", "ab_test", "forecast", "anomaly"}
+    assert client.get("/api/analyses").status_code == 200
+    assert client.get("/api/agents").status_code == 200
 
 
 def test_analysis_session_can_be_renamed_and_archived(client):
@@ -53,6 +49,62 @@ def test_session_source_scope_prunes_missing_sources(client, source):
     )
     assert patched.status_code == 200
     assert patched.get_json()["item"]["source_ids"] == [source["id"]]
+
+
+def test_explicit_analysis_sources_replace_legacy_business_space(client, app, source):
+    database = app.extensions["meridian_db"]
+    space = database.put("business_spaces", {
+        "id": "space_scope_regression", "workspace_id": "default",
+        "name": "旧数据空间", "status": "published", "source_ids": [source["id"]],
+    }, workspace_id="default")
+    assert client.post("/api/sessions", json={"business_space_id": space["id"]}).status_code == 400
+    created = client.post("/api/sessions", json={"source_ids": [source["id"]]})
+    assert created.status_code == 201
+    session = created.get_json()["item"]
+    database.patch("sessions", session["id"], {"business_space_id": space["id"]}, workspace_id="default")
+    assert session["source_ids"] == [source["id"]]
+
+    # An explicit empty selection must never silently restore the space's sources.
+    run = client.post("/api/analyses", json={
+        "session_id": session["id"], "objective": "仅核对本次显式范围", "source_ids": [],
+    })
+    assert run.status_code == 201
+    assert run.get_json()["item"]["source_scope"] == []
+    refreshed = client.get(f"/api/sessions/{session['id']}").get_json()["item"]
+    assert refreshed["source_ids"] == []
+    assert refreshed["business_space_id"] is None
+
+    patched = client.patch(f"/api/sessions/{session['id']}", json={"source_ids": [source["id"]]})
+    assert patched.status_code == 200
+    assert patched.get_json()["item"]["business_space_id"] is None
+    another = client.post("/api/analyses", json={
+        "session_id": session["id"], "objective": "重新选择数据源", "source_ids": [source["id"]],
+    })
+    assert another.status_code == 201
+    assert another.get_json()["item"]["source_scope"] == [source["id"]]
+
+    followup = client.post(f"/api/analyses/{another.get_json()['item']['id']}/branch", json={
+        "mode": "followup", "prompt": "继续核对相同数据",
+    })
+    assert followup.status_code == 201
+    assert followup.get_json()["item"]["source_scope"] == [source["id"]]
+
+    other = client.post("/api/sources/upload", data={
+        "file": (io.BytesIO(b"region,value\nEast,4\n"), "other.csv"),
+        "workspace_id": "default",
+    }, content_type="multipart/form-data").get_json()["items"][0]
+    agent = client.post("/api/agents", json={
+        "name": "指定来源智能体", "source_ids": [other["id"]],
+    }).get_json()["item"]
+    assert client.post(f"/api/agents/{agent['id']}/publish").status_code == 200
+    selected = client.patch(f"/api/sessions/{session['id']}", json={"source_ids": [other["id"]]})
+    assert selected.get_json()["item"]["business_space_id"] is None
+    agent_run = client.post("/api/analyses", json={
+        "session_id": session["id"], "objective": "核对新来源", "source_ids": [other["id"]],
+        "agent_id": agent["id"],
+    })
+    assert agent_run.status_code == 201
+    assert agent_run.get_json()["item"]["source_scope"] == [other["id"]]
 
 
 def test_archiving_source_removes_it_from_session_scope(client, source):
@@ -199,41 +251,17 @@ def test_database_analysis_tables_can_be_selected(app, client):
     assert rejected.status_code == 400
 
 
-def test_analysis_chart_and_delivery(client, source):
+def test_query_result_can_be_retrieved(client, source):
     source_id = source["id"]
-    correlation = client.post("/api/analysis/run", json={"source_id": source_id, "method": "correlation"})
-    assert correlation.status_code == 200
-    matrix = correlation.get_json()["run"]["result"]["matrix"]
-    assert "sales" in matrix
-
-    query = client.post("/api/query", json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM data GROUP BY region"}).get_json()["result"]
-    chart = client.post("/api/charts/spec", json={"result_id": query["id"], "title": "区域销售"})
-    assert chart.status_code == 200
-    assert chart.get_json()["item"]["spec"]["type"] in {"bar", "pie"}
-
-    for format_name in ("csv", "xlsx"):
-        export = client.post("/api/exports/data", json={"result_id": query["id"], "format": format_name})
-        assert export.status_code == 201
-        download = client.get(export.get_json()["artifact"]["download_url"])
-        assert download.status_code == 200
-        assert download.data
-
-    for format_name in ("docx", "pptx"):
-        report = client.post("/api/exports/report", json={"result_id": query["id"], "format": format_name, "insights": ["North 销售领先"]})
-        assert report.status_code == 201
-        artifact = report.get_json()["artifact"]
-        assert artifact["verification_status"] == "unverified"
-        assert artifact["title"].startswith("未验证草稿")
-        download = client.get(artifact["download_url"])
-        assert download.status_code == 200
-        if format_name == "docx":
-            assert "未验证草稿" in Document(io.BytesIO(download.data)).paragraphs[0].text
-        else:
-            first_slide = Presentation(io.BytesIO(download.data)).slides[0]
-            assert any("未验证草稿" in shape.text for shape in first_slide.shapes if shape.has_text_frame)
+    response = client.post("/api/query", json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM data GROUP BY region"})
+    assert response.status_code == 200
+    query = response.get_json()["result"]
+    fetched = client.get(f"/api/query-results/{query['id']}")
+    assert fetched.status_code == 200
+    assert fetched.get_json()["result"]["id"] == query["id"]
 
 
-def test_knowledge_skill_memory_and_session(client):
+def test_knowledge_and_session(client):
     document = client.post(
         "/api/knowledge/documents",
         data={"file": (io.BytesIO("GMV 指支付成功订单金额，不含取消订单。".encode()), "metric.md")},
@@ -242,11 +270,6 @@ def test_knowledge_skill_memory_and_session(client):
     assert document.status_code == 201
     results = client.post("/api/knowledge/search", json={"query": "GMV 口径"}).get_json()["items"]
     assert results and results[0]["document_name"] == "metric"
-
-    skill = client.post("/api/skills", json={"name": "利润诊断", "instruction": "分析收入、成本和利润率"})
-    assert skill.status_code == 201
-    memory = client.post("/api/memories", json={"title": "财年", "content": "财年从四月开始"})
-    assert memory.status_code == 201
 
     session = client.post("/api/sessions", json={"name": "季度复盘"}).get_json()["item"]
     saved = client.post(f"/api/sessions/{session['id']}/save", json={"name": "季度复盘快照"})
@@ -275,7 +298,7 @@ def test_knowledge_document_upload_accepts_chinese_txt_filename(client):
     assert results and results[0]["document_name"] == "及格率解析"
 
 
-def test_hybrid_knowledge_file_skills_and_governed_memory(client):
+def test_hybrid_knowledge_file_skills(client):
     metric = client.post(
         "/api/knowledge/entries",
         json={
@@ -291,34 +314,22 @@ def test_hybrid_knowledge_file_skills_and_governed_memory(client):
     assert found[0]["lexical_score"] > 0
 
     skills = client.get("/api/skills").get_json()
-    assert len(skills["items"]) >= 28
-    regression = client.get("/api/skills/regression").get_json()["item"]
-    assert regression["source"] == "builtin"
-    assert regression["allowed_tools"] == ["get_schema", "query_data", "run_analysis", "generate_chart"]
-    assert "线性回归" in regression["instruction"]
-
-    response = client.post("/api/memories", json={
-        "title": "图表语言偏好", "content": "以后所有图表标题默认使用中文。",
-        "scope": "user", "type": "user",
-    })
-    assert response.status_code == 201
-    memories = client.get("/api/memories").get_json()["items"]
-    assert any("图表标题" in item.get("content", "") for item in memories), client.get("/api/jobs").get_json()
-    assert client.get("/api/memories/search?q=图表标题").get_json()["items"]
+    assert len(skills["items"]) == 3
+    quality = client.get("/api/skills/quality-audit").get_json()["item"]
+    assert quality["source"] == "builtin"
+    assert "质量问题" in quality["instruction"]
 
 
-def test_local_conversation_stream(client, source):
+
+def test_formal_analysis_records_user_message(client, source):
     session = client.post("/api/sessions", json={"name": "对话测试", "source_ids": [source["id"]]}).get_json()["item"]
     response = client.post(
-        f"/api/sessions/{session['id']}/messages",
-        json={"message": "按 region 汇总 sales", "source_ids": [source["id"]], "skill_id": "executive-summary"},
+        "/api/analyses",
+        json={"session_id": session["id"], "objective": "按 region 汇总 sales", "source_ids": [source["id"]], "skill_id": "executive-summary"},
     )
-    text = response.data.decode("utf-8")
-    assert response.status_code == 200
-    assert "event: contract" in text
-    assert '"requires_confirmation": true' in text
-    assert "event: done" in text
-    assert client.get(f"/api/sessions/{session['id']}/messages").get_json()["items"][-1]["role"] == "user"
+    assert response.status_code == 201
+    assert response.get_json()["item"]["contract"]["payload"]["source_scope"] == [source["id"]]
+    assert client.get(f"/api/sessions/{session['id']}").get_json()["messages"][-1]["role"] == "user"
 
 
 def test_identity_password_not_exposed(client):
@@ -330,62 +341,7 @@ def test_identity_password_not_exposed(client):
     assert client.post("/api/auth/login", json={"email": "owner@example.com", "password": "correct-horse"}).status_code == 200
 
 
-def test_advanced_modeling_and_forecasting(client):
-    rows = [
-        {
-            "date": f"2026-01-{index + 1:02d}",
-            "visits": 100 + index * 4,
-            "spend": 20 + (index % 7) * 3,
-            "revenue": 150 + index * 6 + (index % 5),
-            "converted": int(index % 3 != 0),
-        }
-        for index in range(28)
-    ]
-    cases = [
-        ("decision_tree", {"target": "converted", "features": ["visits", "spend"]}),
-        ("gradient_boosting", {"target": "revenue", "features": ["visits", "spend"]}),
-        ("mlp", {"target": "revenue", "features": ["visits", "spend"], "max_iter": 120}),
-        ("univariate_screening", {"target": "revenue", "features": ["visits", "spend"]}),
-        ("prophet_like", {"date_column": "date", "value_column": "revenue", "horizon": 4, "season_length": 7}),
-        ("neural_forecast", {"date_column": "date", "value_column": "revenue", "horizon": 4, "lookback": 5, "max_iter": 150}),
-    ]
-    for method, params in cases:
-        response = client.post("/api/analysis/run", json={"rows": rows, "method": method, "params": params})
-        assert response.status_code == 200, (method, response.get_json())
-        assert response.get_json()["run"]["status"] == "completed"
-
-
-def test_registered_analysis_contracts_are_available_and_persist_tables(app, client, source):
-    registered_ids = {
-        "AB_Test_Analysis", "Data_Decile_Analysis", "Decision_Tree", "K_Means",
-        "Logistic_Regression", "Regression", "Sklearn_Model", "Torch_MLP",
-        "Univariate_Screening", "Time_Series_ARIMA", "Time_Series_SARIMA",
-        "Time_Series_VAR", "Time_Series_Prophet", "Time_Series_GRU",
-    }
-    methods = client.get("/api/analysis/methods").get_json()["items"]
-    assert {item["id"] for item in methods} >= registered_ids
-    response = client.post(
-        "/api/analysis/run",
-        json={
-            "rows": [
-                {"variant": "control", "converted": value} for value in [0, 1, 0, 1, 0, 1]
-            ] + [
-                {"variant": "treatment", "converted": value} for value in [1, 1, 0, 1, 1, 1]
-            ],
-            "method": "AB_Test_Analysis",
-            "params": {
-                "target_column": "converted", "groupby_column": "variant",
-                "analysis_options": {"control_group": "control", "metric_type": "binary"},
-            },
-        },
-    )
-    assert response.status_code == 200, response.get_json()
-    result = response.get_json()["run"]["result"]
-    assert set(result["tables"]) == {"analysis_result", "analysis_breakdown", "analysis_metrics"}
-    metrics = {row["metric"]: row["value"] for row in result["tables"]["analysis_metrics"]["data"]}
-    assert metrics["metric_type"] == "binary"
-    assert "p_value" in metrics and "srm_p_value" not in metrics
-
+def test_formal_analysis_tools_preserve_dataset_lineage(app, source):
     from backend.services.agent_tools import AgentToolContext, execute_tool
 
     with app.app_context():

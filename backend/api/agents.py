@@ -5,6 +5,7 @@ from __future__ import annotations
 from flask import Blueprint
 
 from ..services.authorization import actor_role
+from ..services.skills import get_skill, require_formal_skill
 from .common import (
     api_errors, body, current_user_id, db, ok, require_source_access,
     require_workspace_access, require_workspace_record, workspace_id,
@@ -47,9 +48,10 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
         require_workspace_record("providers", provider_id)
     skill_id = str(merged.get("skill_id") or "") or None
     if skill_id:
-        skill = require_workspace_record("skills", skill_id)
-        if skill.get("status") != "published":
+        skill = get_skill(skill_id, workspace_id())
+        if not skill or (skill.get("status") and skill.get("status") != "published"):
             raise ValueError("智能体只能绑定已发布的 Skill")
+        require_formal_skill(skill)
     instruction = str(merged.get("instruction") or "").strip()
     if len(instruction) > 16_000:
         raise ValueError("智能体说明超过 16000 字")

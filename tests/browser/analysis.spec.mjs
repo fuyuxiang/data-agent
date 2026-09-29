@@ -87,6 +87,12 @@ test('creates an analysis contract and manages a real indexed attachment', async
     buffer: Buffer.from('region,month,sales\nNorth,2026-01-01,120\nSouth,2026-01-01,90\n'),
   });
   await expect(page.getByText('sales', { exact: true }).first()).toBeVisible();
+  await page.getByLabel('查找预览记录').fill('North');
+  await expect(page.locator('.data-table-wrap').getByRole('cell', { name: 'North' })).toBeVisible();
+  await expect(page.locator('.data-table-wrap').getByRole('cell', { name: 'South' })).toHaveCount(0);
+  await page.locator('.preview-column-picker summary').click();
+  await page.locator('.preview-column-list').getByLabel('sales').uncheck();
+  await expect(page.locator('.data-table-wrap').getByRole('columnheader', { name: 'sales' })).toHaveCount(0);
 
   await page.getByRole('button', { name: '智能分析' }).click();
   await expect(page.getByPlaceholder('描述分析问题；Enter 发送，Shift+Enter 换行')).toBeVisible();
@@ -99,6 +105,11 @@ test('creates an analysis contract and manages a real indexed attachment', async
   await composer.fill('核对区域销售额及口径');
   await composer.press('Enter');
   await expect(page.getByRole('heading', { name: '请核对本次分析的目标与范围' })).toBeVisible();
+  await expect(page.locator('.contract-source-scope')).toContainText('sales');
+  await expect(page.locator('.contract-deliverables')).toContainText('分析结论');
+  await expect(page.locator('.contract-deliverables')).not.toContainText('summary');
+  await page.getByLabel('可视化图表').uncheck();
+  await expect(page.getByLabel('可视化图表')).not.toBeChecked();
 
   const coverage = page.locator('.contract-grid label').filter({ hasText: '统计覆盖范围' }).locator('textarea');
   await coverage.fill('已选授权来源的全部完整记录');
@@ -243,4 +254,32 @@ test('builds and validates an approved semantic metric from the UI', async ({ pa
   await page.getByRole('button', { name: '执行验收' }).click();
   await expect(page.getByText('结果可追溯')).toBeVisible();
   await expect(page.getByRole('cell', { name: '210' })).toBeVisible();
+  await expect(page.getByText('过滤条件 JSON')).toHaveCount(0);
+  await expect(page.getByText('按哪些维度查看')).toBeVisible();
+});
+
+test('shows read-only controls to a viewer across product pages', async ({ page }) => {
+  await page.route('**/api/auth/me', route => route.fulfill({ json: {
+    authenticated: true, local_mode: false, user: { id: 'viewer-test', name: '只读用户' },
+  } }));
+  await page.route('**/api/bootstrap?**', async route => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.active_membership = { ...(payload.active_membership || {}), role: 'viewer' };
+    await route.fulfill({ response, json: payload });
+  });
+  await page.goto('/');
+  await expect(page.getByText('当前为只读角色')).toBeVisible();
+
+  await page.getByRole('button', { name: '数据资产', exact: true }).click();
+  await expect(page.getByRole('button', { name: '新建连接' })).toHaveCount(0);
+  await expect(page.getByText('上传文件')).toHaveCount(0);
+
+  await page.getByRole('button', { name: '指标中心' }).click();
+  await expect(page.getByRole('button', { name: '新建指标' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '新建语义模型' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: '知识库' }).click();
+  await expect(page.getByText('导入知识文档')).toHaveCount(0);
+  await expect(page.getByText('解析结构化知识')).toHaveCount(0);
 });

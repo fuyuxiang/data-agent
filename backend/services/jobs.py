@@ -11,7 +11,6 @@ from typing import Any, Callable
 from flask import Flask
 
 from ..core.database import Database, utcnow
-from .hooks import dispatch_hooks
 
 
 JobHandler = Callable[[Flask, dict[str, Any], Callable[[float, str], None], threading.Event], dict]
@@ -129,8 +128,6 @@ class JobManager:
             with self._lock:
                 self.cancel_flags[job_id] = cancel
             self.db.job_event(job_id, "queued", job)
-            with self.app.app_context():
-                dispatch_hooks("job.queued", job, workspace_id, database=self.db)
             self.executor.submit(self._run_spec, job_id, workspace_id, cancel, False)
             return job
         except Exception:
@@ -177,20 +174,6 @@ class JobManager:
             job = self._mirror(job_id, status="running", started_at=utcnow(),
                                message="恢复并校验外部状态" if recovered else "正在执行")
             self.db.job_event(job_id, "running", job or {})
-            try:
-                dispatch_hooks("job.started", job or {"id": job_id}, workspace_id, database=self.db)
-            except Exception as exc:
-                self._finish_typed(job_id, "failed", None, type(exc).__name__)
-                failed = self._mirror(
-                    job_id, status="failed", message="启动 Hook 执行失败", error=str(exc),
-                    trace=traceback.format_exc(limit=12), finished_at=utcnow(),
-                )
-                self.db.job_event(job_id, "failed", failed or {})
-                with self._lock:
-                    self.cancel_flags.pop(job_id, None)
-                self._release(workspace_id)
-                return
-
             def progress(value: float, message: str) -> None:
                 current = self._mirror(job_id, progress=max(0, min(100, round(value, 1))), message=message)
                 self.db.job_event(job_id, "progress", current or {})
@@ -205,7 +188,6 @@ class JobManager:
                     result=result, finished_at=utcnow(),
                 )
                 self.db.job_event(job_id, status, final or {})
-                dispatch_hooks(f"job.{status}", final or {"id": job_id}, workspace_id, database=self.db)
             except Exception as exc:
                 self._finish_typed(job_id, "failed", None, type(exc).__name__)
                 final = self._mirror(
@@ -213,7 +195,6 @@ class JobManager:
                     trace=traceback.format_exc(limit=12), finished_at=utcnow(),
                 )
                 self.db.job_event(job_id, "failed", final or {})
-                dispatch_hooks("job.failed", final or {"id": job_id}, workspace_id, database=self.db)
             finally:
                 with self._lock:
                     self.cancel_flags.pop(job_id, None)

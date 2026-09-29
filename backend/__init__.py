@@ -101,9 +101,6 @@ def create_app(test_config: dict | None = None) -> Flask:
     database = Database(settings.database_path)
     database.initialize()
     app.extensions["meridian_db"] = database
-    from .services.saas import ensure_saas_baseline
-
-    ensure_saas_baseline(database)
     if not app.config.get("TESTING"):
         from .api.identity import ensure_portal_admin
 

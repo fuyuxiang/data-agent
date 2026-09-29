@@ -162,6 +162,11 @@
   }
 }
 @media (max-width: 760px) {
+  @layer product-responsive {
+    .semantic-filter-row { grid-template-columns: 1fr 1fr auto; }
+    .semantic-filter-row input { grid-column: 1 / 3; grid-row: 2; }
+    .semantic-filter-row button { grid-column: 3; grid-row: 1 / 3; }
+  }
   @layer legacy-responsive {
  .database-table-list { grid-template-columns:1fr; }.database-table-scope > header { align-items:flex-start; }
 

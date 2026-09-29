@@ -198,22 +198,6 @@ def test_online_self_update_is_removed(client):
     assert response.get_json()["error"] == "接口不存在"
 
 
-def test_spreadsheet_exports_neutralize_formula_cells(app):
-    from openpyxl import load_workbook
-
-    from backend.services.exports import export_data
-
-    with app.app_context():
-        artifact = export_data(
-            {"format": "xlsx", "rows": [{"label": "=HYPERLINK(\"https://example.test\")"}]},
-            "default",
-        )
-        workbook = load_workbook(app.config["SETTINGS"].export_dir / artifact["filename"], data_only=False)
-        cell = workbook.active["A2"]
-        assert cell.data_type != "f"
-        assert cell.value.startswith("'=")
-
-
 def test_workspace_invitation_registers_bound_member(app):
     owner = app.test_client()
     invited = app.test_client()
@@ -747,23 +731,19 @@ def test_job_manager_has_a_bounded_queue(app):
         manager.shutdown()
 
 
-def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch):
+def test_job_manager_releases_capacity_when_handler_fails(app):
     from backend.services import jobs
 
-    jobs.register_job_handler(
-        "started_hook_failure_test", lambda _app, _spec, _progress, _cancel: {"ok": True},
-    )
+    def handler(_app, spec, _progress, _cancel):
+        if spec["case"] == 1:
+            raise RuntimeError("handler failed")
+        return {"ok": True}
+
+    jobs.register_job_handler("handler_failure_test", handler)
     manager = jobs.JobManager(app, max_workers=1, max_pending=0)
-
-    def failing_started_hook(event, *_args, **_kwargs):
-        if event == "job.started":
-            raise RuntimeError("hook failed")
-        return []
-
-    monkeypatch.setattr(jobs, "dispatch_hooks", failing_started_hook)
     try:
         first = manager.submit_spec(
-            workspace_id="default", session_id=None, job_type="started_hook_failure_test",
+            workspace_id="default", session_id=None, job_type="handler_failure_test",
             title="first", spec={"case": 1},
         )
         deadline = time.time() + 3
@@ -773,7 +753,7 @@ def test_job_manager_releases_capacity_when_started_hook_fails(app, monkeypatch)
                 break
             time.sleep(0.02)
         second = manager.submit_spec(
-            workspace_id="default", session_id=None, job_type="started_hook_failure_test",
+            workspace_id="default", session_id=None, job_type="handler_failure_test",
             title="second", spec={"case": 2},
         )
         assert second["status"] == "queued"

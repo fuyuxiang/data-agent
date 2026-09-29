@@ -76,30 +76,6 @@ def test_old_formal_artifact_rechecks_run_policy_on_download(app, client):
     assert all(item["id"] != run["id"] for item in client.get("/api/analyses").get_json()["items"])
 
 
-def test_saved_chart_and_analysis_disappear_when_source_policy_changes(client):
-    source = _source(client)
-    analysis = client.post("/api/analysis/run", json={"source_id": source["id"], "method": "profile"})
-    assert analysis.status_code == 200, analysis.get_json()
-    query = client.post("/api/query", json={
-        "source_ids": [source["id"]], "sql": "SELECT region, sales FROM data",
-    }).get_json()["result"]
-    chart = client.post("/api/charts/spec", json={"result_id": query["id"], "title": "区域销售"})
-    assert chart.status_code == 200, chart.get_json()
-    exported = client.post("/api/exports/data", json={"result_id": query["id"], "format": "csv"})
-    assert exported.status_code == 201, exported.get_json()
-    download_url = exported.get_json()["artifact"]["download_url"]
-    assert client.get(download_url).status_code == 200
-    assert client.get("/api/charts").get_json()["items"]
-    changed = client.patch(f"/api/sources/{source['id']}", json={
-        "row_policy": {"column": "region", "allow": {"user:local-default": ["North"]}},
-    })
-    assert changed.status_code == 200, changed.get_json()
-    assert not client.get("/api/charts").get_json()["items"]
-    assert not client.get("/api/analysis/runs").get_json()["items"]
-    assert client.get(download_url).status_code == 403
-    assert not client.get("/api/artifacts").get_json()["items"]
-
-
 def test_database_policy_rewrite_filters_before_join_and_aggregation():
     connection = sqlite3.connect(":memory:")
     connection.execute("CREATE TABLE sales(region TEXT, sales INTEGER, cost INTEGER)")

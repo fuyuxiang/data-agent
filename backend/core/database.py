@@ -19,7 +19,6 @@ class Database:
 
     GLOBAL_COLLECTIONS = frozenset({
         "workspaces", "users", "email_codes",
-        "tenants", "tenant_members", "plans", "subscriptions",
     })
 
     def __init__(self, path: Path):
@@ -350,7 +349,7 @@ class Database:
             {
                 "id": "default",
                 "name": "默认分析空间",
-                "description": "用于数据接入、分析、流程编排与成果交付",
+                "description": "用于数据接入、分析、指标治理与成果交付",
                 "permission": "write",
             },
             workspace_id="default",

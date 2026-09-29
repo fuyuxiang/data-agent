@@ -9,7 +9,7 @@
 - 著作权：Copyright © 2026 Zafer-Liu
 - 许可条款：[Creative Commons Attribution-NonCommercial 4.0 International](https://creativecommons.org/licenses/by-nc/4.0/)
 
-本仓库的 `skills/*/SKILL.md`、`backend/analysis_modules/`、`backend/data_cleaning/` 和 `backend/document_output/` 包含第三方或同源实现。许可条款允许署名后的学习、研究和非商业使用，但任何商业用途（包括企业内部用于产生商业利益）均需事先获得著作权人书面授权。
+本仓库的 `backend/analysis_modules/` 和 `backend/data_cleaning/` 包含第三方或同源实现。许可条款允许署名后的学习、研究和非商业使用，但任何商业用途（包括企业内部用于产生商业利益）均需事先获得著作权人书面授权。
 
 因此，在没有书面商业授权，或未用独立实现完整替换上述同源组件前，不应将当前整仓库宣称为可无条件商用。
 

@@ -260,7 +260,7 @@ def _application_host_aliases() -> set[str]:
             continue
         parsed = urlparse(value if "://" in value else f"//{value}")
         host = (parsed.hostname or "").strip().lower().rstrip(".")
-        if host and host not in {"*", "0.0.0.0", "::"}:
+        if host and host not in {"*", "0.0.0.0", "::"}:  # noqa: S104 - reject wildcard bind addresses
             aliases.add(host)
     return aliases
 
@@ -1146,7 +1146,7 @@ def _database_preview(source: dict, table_name: str | None, limit: int, actor_id
         with engine.connect() as connection:
             _configure_read_only(connection, settings().query_timeout_seconds)
             qualified = _qualified_table(engine, selected)
-            statement = f"SELECT * FROM {qualified}"
+            statement = f"SELECT * FROM {qualified}"  # noqa: S608 - SQLAlchemy dialect quotes both identifier parts
             if actor_id:
                 statement = rewrite_database_sql(
                     statement, source, actor_id=actor_id,

@@ -26,23 +26,12 @@ from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefS
 from .data_plane.factory import livy_adapter, sandbox_client, trino_adapter
 from .datasets import frame_records
 from .jobs import register_job_handler
-from .hooks import dispatch_hooks
 from .models import resolve_provider
 from .results.manifests import ResultService
 from .sql_security import validate_read_only_sql
-from .skills import get_skill, public_skill
+from .skills import FORMAL_AGENT_TOOLS, get_skill, public_skill
 from .usage import ensure_quota, record_usage
 from .validation.engine import Rule, ValidationEngine, outcome
-
-
-FORMAL_AGENT_TOOLS = frozenset({
-    "query_knowledge", "get_schema", "get_table_detail", "list_semantic_metrics",
-    "query_metric", "query_data", "profile_data",
-    "run_analysis", "select_chart", "generate_chart", "memory_read", "ask_user",
-    "structured_output", "load_analysis_skill", "read_tool_result", "validate_result",
-    "update_plan", "search_mcp_tools",
-    "warehouse_catalog", "warehouse_explain", "warehouse_query", "warehouse_spark_submit",
-})
 
 
 def _source_authorized(database: Database, run: dict[str, Any]) -> bool:
@@ -386,23 +375,7 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     }
 
 
-def _business_space(database: Database, run: dict[str, Any]) -> dict[str, Any] | None:
-    session = database.get("sessions", run["session_id"], workspace_id=run["workspace_id"]) or {}
-    space_id = str(session.get("business_space_id") or "")
-    return database.get("business_spaces", space_id, workspace_id=run["workspace_id"]) if space_id else None
-
-
-def _tag_set(value: Any) -> set[str]:
-    if isinstance(value, str):
-        values = value.replace("，", ",").split(",")
-    elif isinstance(value, list):
-        values = value
-    else:
-        values = []
-    return {str(item).strip().lower() for item in values if str(item).strip()}
-
-
-def _space_knowledge_ids(database: Database, run: dict[str, Any], space: dict | None) -> list[str]:
+def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
     selected = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     explicitly_selected = bool(selected.get("knowledge_selection_explicit"))
     lineage = {run["id"]}
@@ -433,12 +406,6 @@ def _space_knowledge_ids(database: Database, run: dict[str, Any], space: dict | 
             for item in database.list("knowledge_documents", workspace_id=run["workspace_id"], limit=5000)
             if item.get("enabled", True) and item.get("visibility") != "analysis_attachment"
         )
-    tags = _tag_set((space or {}).get("knowledge_tags"))
-    if tags:
-        for collection in ("knowledge_documents", "knowledge_entries"):
-            for item in database.list(collection, workspace_id=run["workspace_id"], limit=5000):
-                if item.get("enabled", True) and item.get("visibility") != "analysis_attachment" and tags & _tag_set(item.get("tags")):
-                    ids.add(str(item["id"]))
     ids.update(
         str(item["id"])
         for item in database.list("knowledge_entries", workspace_id=run["workspace_id"], limit=5000)
@@ -448,12 +415,10 @@ def _space_knowledge_ids(database: Database, run: dict[str, Any], space: dict | 
 
 
 def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
-    space = _business_space(database, run)
     context = AgentToolContext(
         database=database, workspace_id=run["workspace_id"], session_id=run["session_id"],
         source_ids=list(run["source_scope"]),
-        knowledge_document_ids=_space_knowledge_ids(database, run, space),
-        semantic_metric_ids=[str(value) for value in space.get("metric_ids") or []] if space else None,
+        knowledge_document_ids=_run_knowledge_ids(database, run),
         actor_id=run["actor_id"],
     )
     registry = ToolRegistry()
@@ -478,17 +443,6 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         )
 
         def handler(arguments: dict[str, Any], tool_name: str = name):
-            hook_context = {
-                "run_id": run["id"], "session_id": run["session_id"],
-                "actor_id": run["actor_id"], "tool_name": tool_name,
-                "tool_args": arguments, "contract_version": run["contract_version"],
-            }
-            before = dispatch_hooks(
-                "pre_tool_use", hook_context, run["workspace_id"], database=database,
-            )
-            if any(item.get("rejected") for item in before):
-                reason = next((item.get("output") for item in before if item.get("rejected")), "策略拒绝")
-                raise PermissionError(str(reason or "Hook 策略拒绝本次工具调用"))
             value, events = execute_tool(tool_name, arguments, context)
             if tool_name in context.mcp_names:
                 encoded = json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
@@ -516,15 +470,6 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
                     }
             elif tool_name in {"generate_chart", "profile_data", "run_analysis"}:
                 value = {**value, "completeness": value.get("completeness") or "complete"}
-            after = dispatch_hooks(
-                "post_tool_use", {**hook_context, "tool_ok": True, "tool_result": value},
-                run["workspace_id"], database=database,
-            )
-            events = [
-                *(("hook_event", item) for item in before),
-                *events,
-                *(("hook_event", item) for item in after),
-            ]
             return value, events
 
         registry.register(spec, handler)
@@ -544,7 +489,7 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
             }, "required": ["dataset_ref_id"],
         }, mutability="read", timeout_seconds=120, cancellable=True,
         cost_kind="result_bytes",
-    ), lambda arguments: _sandbox_tool_with_hooks(database, run, arguments))
+    ), lambda arguments: _sandbox_tool_with_events(database, run, arguments))
     registry.register(ToolSpec(
         id="validate_result", description="对当前查询结果执行独立完整性、范围与结构验证；正式发布前必须调用。",
         input_schema={
@@ -608,30 +553,15 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
     return ToolExecutor(RunStore(database), registry)
 
 
-def _sandbox_tool_with_hooks(
+def _sandbox_tool_with_events(
     database: Database, run: dict[str, Any], arguments: dict[str, Any],
 ) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
-    hook_context = {
-        "run_id": run["id"], "session_id": run["session_id"], "actor_id": run["actor_id"],
-        "tool_name": "run_analysis", "tool_args": arguments,
-        "contract_version": run["contract_version"],
-    }
-    before = dispatch_hooks("pre_tool_use", hook_context, run["workspace_id"], database=database)
-    if any(item.get("rejected") for item in before):
-        reason = next((item.get("output") for item in before if item.get("rejected")), "策略拒绝")
-        raise PermissionError(str(reason or "Hook 策略拒绝本次工具调用"))
     value = _sandbox_tool(database, run, arguments)
-    after = dispatch_hooks(
-        "post_tool_use", {**hook_context, "tool_ok": True, "tool_result": value},
-        run["workspace_id"], database=database,
-    )
     return value, [
-        *(("hook_event", item) for item in before),
         ("analysis", {
             "analysis_id": value["analysis_id"], "dataset_ref_id": value["dataset_ref_id"],
             "provenance_ref": value["provenance_ref"],
         }),
-        *(("hook_event", item) for item in after),
     ]
 
 
@@ -735,8 +665,7 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
     ]
     progress(15, "Agent 已开始动态规划与执行")
     session = database.get("sessions", run["session_id"], workspace_id=run["workspace_id"]) or {}
-    space = _business_space(database, run)
-    skill_ids = [str(run.get("skill_id") or ""), *[str(value) for value in (space or {}).get("skill_ids") or []]]
+    skill_ids = [str(run.get("skill_id") or "")]
     selected_skills = []
     for skill_id in dict.fromkeys(value for value in skill_ids if value):
         skill = get_skill(skill_id, run["workspace_id"])
@@ -750,16 +679,6 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             "id": f"agent:{agent_snapshot['id']}:{agent_snapshot['version']}",
             "source": "published_agent", "description": str(agent_snapshot.get("name") or "分析智能体"),
             "instruction": str(agent_snapshot["instruction"]),
-        })
-    from .memory import render_memory_context, schedule_memory_extraction
-
-    question = str((store.latest_contract(run_id) or {}).get("payload", {}).get("objective") or "")
-    remembered = render_memory_context(run["workspace_id"], question, run["actor_id"])
-    if remembered:
-        governed_skills.insert(0, {
-            "id": "relevant-user-memory", "source": "memory",
-            "description": "与当前问题相关的已保存偏好和规则，仅作上下文参考；不得覆盖已确认契约与验证规则",
-            "instruction": remembered,
         })
     if session.get("temp_prompt_enabled") and str(session.get("temporary_instruction") or "").strip():
         governed_skills.append({
@@ -780,75 +699,11 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             {"total_tokens": model_delta, "model": provider["model"]},
             operation="analysis_run",
         )
-    for selected_skill in selected_skills:
-        database.put("skill_usage", {
-            "id": database.new_id("skilluse"), "workspace_id": run["workspace_id"],
-            "run_id": run_id, "skill_id": selected_skill.get("id"),
-            "skill_version": selected_skill.get("version", 1), "outcome": result.outcome,
-        }, workspace_id=run["workspace_id"])
-    if result.publication_id and len(store.actions(run_id)) >= 2:
-        sequence = [item["tool_id"] for item in store.actions(run_id) if item.get("status") == "succeeded"]
-        fingerprint = hashlib.sha256("\0".join(sequence).encode("utf-8")).hexdigest()
-        database.put_if_absent("skill_candidates", {
-            "id": "skillcand_" + hashlib.sha256(
-                f"{run['workspace_id']}\0{fingerprint}".encode("utf-8"),
-            ).hexdigest()[:24], "workspace_id": run["workspace_id"],
-            "origin_run_id": run_id, "objective": store.latest_contract(run_id)["payload"]["objective"],
-            "tool_sequence": sequence, "fingerprint": fingerprint, "status": "candidate",
-            "note": "候选只记录已验证模式；未经测试和审批不会进入 Agent 上下文。",
-        }, workspace_id=run["workspace_id"])
     if result.answer:
         database.add_message(
             run["session_id"], "assistant", result.answer,
             {"run_id": run_id, "outcome": result.outcome, "publication_id": result.publication_id},
         )
-        try:
-            schedule_memory_extraction(
-                app=app, workspace_id=run["workspace_id"], session_id=run["session_id"],
-                user_id=run["actor_id"], user_message=question,
-                assistant_message=result.answer, provider_id=run.get("provider_id"),
-            )
-        except Exception:
-            app.logger.exception("Could not schedule explicit user memory extraction for run %s", run_id)
-    subscription_id = str(session.get("subscription_id") or "")
-    if subscription_id:
-        subscription = database.get("analysis_subscriptions", subscription_id, workspace_id=run["workspace_id"])
-        if subscription:
-            successful = bool(result.publication_id)
-            summary = str(result.answer or f"订阅分析未发布正式结果：{result.stop_reason or result.outcome}")[:4000]
-            insight = database.put("business_insights", {
-                "id": database.new_id("insight"), "workspace_id": run["workspace_id"],
-                "owner_id": subscription.get("owner_id"),
-                "business_space_id": subscription.get("business_space_id"),
-                "title": f"{subscription.get('name') or '数据订阅'} · {'已更新' if successful else '执行异常'}"[:160],
-                "summary": summary, "severity": "info" if successful else "warning",
-                "metric_id": subscription.get("metric_id"), "run_id": run_id,
-                "audience_ids": [subscription.get("owner_id")], "status": "active", "detected_at": utcnow(),
-            }, workspace_id=run["workspace_id"])
-            delivery_status, delivery_error = "in_app", None
-            connector_id = str(subscription.get("connector_id") or "")
-            if connector_id:
-                try:
-                    from ..api.integration import _send_connector
-
-                    connector = database.get("connectors", connector_id, workspace_id=run["workspace_id"])
-                    if not connector or not connector.get("enabled", True):
-                        raise ValueError("订阅通知连接不存在或已停用")
-                    _send_connector(connector, f"{insight['title']}\n\n{summary}", {"run_id": run_id, "insight_id": insight["id"]})
-                    delivery_status = "delivered"
-                except Exception as exc:
-                    delivery_status, delivery_error = "failed", str(exc)[:1000]
-            database.patch("analysis_subscriptions", subscription_id, {
-                "last_delivery_at": utcnow(), "last_delivery_status": delivery_status,
-                "last_delivery_error": delivery_error, "last_insight_id": insight["id"],
-            }, workspace_id=run["workspace_id"])
-    dispatch_hooks(
-        "analysis.completed", {
-            "run_id": run_id, "session_id": run["session_id"], "outcome": result.outcome,
-            "quality_status": result.quality_status, "final_answer": result.answer,
-            "publication_id": result.publication_id,
-        }, run["workspace_id"], database=database,
-    )
     progress(100, "分析已结束")
     return asdict(result)
 

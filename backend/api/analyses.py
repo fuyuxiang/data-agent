@@ -16,7 +16,7 @@ from ..services.jobs import get_job_manager
 from ..services.intent import suggest_contract
 from ..services.knowledge import add_document
 from ..services.results.manifests import ResultService
-from ..services.saas import assert_agent_run_limit, assert_feature_enabled
+from ..services.product import assert_feature_enabled
 from ..services.validation.engine import ValidationEngine
 from .common import (
     api_errors, body, current_user_id, db, ok, require_session_access,
@@ -69,7 +69,6 @@ def _session(payload: dict[str, Any], wid: str) -> dict[str, Any]:
         "id": db().new_id("ses"), "workspace_id": wid,
         "name": str(payload.get("title") or payload.get("objective") or payload.get("message") or "新分析")[:100],
         "status": "active", "source_ids": [], "provider_id": payload.get("provider_id"),
-        "business_space_id": str(payload.get("business_space_id") or "") or None,
         "owner_id": current_user_id(), "analysis_mode": "intelligent",
     }, workspace_id=wid)
     return session
@@ -81,35 +80,26 @@ def _draft_contract(payload: dict[str, Any], source_ids: list[str]) -> TaskContr
     return TaskContract.from_payload({
         **raw,
         "objective": question,
-        "coverage": raw.get("coverage") or "所选来源的已授权数据范围；时间口径待在确认卡中核对",
-        "dimensions": raw.get("dimensions") or ["时间", "业务实体", "可用分类属性"],
+        "coverage": raw.get("coverage") or "所选数据源中的全部授权记录；如需限定时间或对象，请在确认前填写",
+        "dimensions": raw.get("dimensions") or ["整体"],
         "deliverables": raw.get("deliverables") or ["summary", "dashboard", "report"],
         "source_scope": source_ids,
     })
 
 
 def _analysis_scope(payload: dict[str, Any], session: dict[str, Any], wid: str) -> tuple[list[str], str | None]:
-    space_id = str(payload.get("business_space_id") or session.get("business_space_id") or "") or None
-    if space_id:
-        space = require_workspace_record("business_spaces", space_id, wid)
-        membership = workspace_membership(wid)
-        if not membership:
-            raise PermissionError("无权访问该工作空间")
-        role = str(membership.get("role") or "viewer")
-        members = {str(value) for value in space.get("member_ids") or []}
-        if role not in {"owner", "editor"} and (
-            space.get("status") != "published" or (members and current_user_id() not in members)
-        ):
-            raise FileNotFoundError("业务数据空间不存在")
-        source_ids = [str(value) for value in space.get("source_ids") or []]
-    else:
-        source_ids = [str(value) for value in payload.get("source_ids") or session.get("source_ids") or []]
+    if payload.get("business_space_id"):
+        raise ValueError("业务数据空间已停用，请直接选择数据源")
+    selected = payload["source_ids"] if "source_ids" in payload else session.get("source_ids") or []
+    if not isinstance(selected, list):
+        raise ValueError("source_ids 必须是数组")
+    source_ids = [str(value) for value in selected]
     source_ids = list(dict.fromkeys(source_ids))
     if len(source_ids) > 100:
         raise ValueError("单次分析最多选择 100 个来源")
     for source_id in source_ids:
         require_source_access(source_id, wid, action="analyze")
-    return source_ids, space_id
+    return source_ids, None
 
 
 def _auto_confirm_requested(payload: dict[str, Any], objective: str) -> bool:
@@ -176,7 +166,6 @@ def create_analysis():
     payload, wid = body(), workspace_id()
     require_workspace_access(wid)
     assert_feature_enabled(db(), wid, "governed_agent")
-    assert_agent_run_limit(db(), wid)
     session = _session(payload, wid)
     source_ids, business_space_id = _analysis_scope(payload, session, wid)
     agent_id = str(payload.get("agent_id") or "")
@@ -186,7 +175,7 @@ def create_analysis():
             raise PermissionError("只能使用已发布的智能体")
         agent_source_list = list(dict.fromkeys(str(value) for value in agent.get("source_ids") or []))
         agent_source_ids = set(agent_source_list)
-        if not source_ids:
+        if not source_ids and "source_ids" not in payload:
             source_ids = agent_source_list
             for source_id in source_ids:
                 require_source_access(source_id, wid, action="analyze")
@@ -213,15 +202,12 @@ def create_analysis():
         require_workspace_record("providers", provider_id, wid)
     skill_id = str((agent or {}).get("skill_id") or payload.get("skill_id") or "") or None
     if skill_id:
-        from ..services.skills import get_skill
+        from ..services.skills import get_skill, require_formal_skill
 
         skill = get_skill(skill_id, wid)
         if not skill or (skill.get("status") and skill.get("status") != "published"):
             raise ValueError("只能使用当前已发布的 Skill")
-        if business_space_id:
-            space = require_workspace_record("business_spaces", business_space_id, wid)
-            if skill_id not in {str(value) for value in space.get("skill_ids") or []}:
-                raise PermissionError("该分析技能未发布到当前业务数据空间")
+        require_formal_skill(skill)
     contract = _draft_contract(payload, source_ids)
     allowed_tools = available_formal_tools(db(), wid, session["id"], source_ids)
     idempotency_key = str(request.headers.get("Idempotency-Key") or payload.get("idempotency_key") or "") or None
@@ -663,7 +649,6 @@ def _branch(run: dict[str, Any], mode: str, prompt: str) -> dict[str, Any]:
 def branch_analysis(run_id: str):
     run = _require_run(run_id)
     assert_feature_enabled(db(), run["workspace_id"], "governed_agent")
-    assert_agent_run_limit(db(), run["workspace_id"])
     payload = body()
     mode = str(payload.get("mode") or "followup")
     if mode not in {"followup", "refresh", "reproduce", "reanalyze"}:

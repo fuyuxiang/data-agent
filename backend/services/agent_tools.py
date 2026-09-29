@@ -19,9 +19,7 @@ from .datasets import (
     schema_for_source,
     source_table,
 )
-from .exports import export_data, export_report
 from .knowledge import search as search_knowledge
-from .memory import search_memories
 from .security import safe_http_request
 from .semantic import execute_metric_query, visible_metrics
 from .workspace_tools import WorkspaceFiles
@@ -131,33 +129,6 @@ BUILTIN_TOOLS = [
         },
     ),
     _function(
-        "export_excel",
-        "Export a prior query result to a downloadable XLSX or CSV artifact.",
-        {
-            "result_id": {"type": "string"}, "format": {"type": "string", "enum": ["xlsx", "csv"]},
-            "title": {"type": "string"}, "filename": {"type": "string"},
-            "tables": {"type": "array", "items": {"type": "string"}},
-        },
-    ),
-    _function(
-        "export_report",
-        "Export a prior query result and grounded conclusions to a DOCX or PPTX artifact.",
-        {
-            "result_id": {"type": "string"}, "format": {"type": "string", "enum": ["docx", "pptx"]},
-            "title": {"type": "string"}, "summary": {"type": "string"},
-            "insights": {"type": "array", "items": {"type": "string"}},
-            "sections": {"type": "array", "items": {"type": "object"}},
-        },
-    ),
-    _function(
-        "memory_read",
-        "Read enabled long-term memories in the current workspace.",
-        {
-            "name": {"type": "string"}, "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
-        },
-    ),
-    _function(
         "search_mcp_tools",
         "Search tools discovered from connected MCP servers.",
         {
@@ -174,11 +145,6 @@ EXTRA_TOOLS = [
     _function("create_analysis_table", "Create a queryable derived table from read-only SQL.", {"sql": {"type": "string"}, "table_name": {"type": "string"}}, ["sql", "table_name"]),
     _function("delete_analysis_tables", "Delete named derived tables or archive exact derived sources only.", {"source_ids": {"type": "array", "items": {"type": "string"}}, "table_names": {"type": "array", "items": {"type": "string"}}, "confirm": {"type": "boolean"}}, ["confirm"]),
     _function("clean_data", "Apply non-destructive cleaning and create a derived source.", {"result_id": {"type": "string"}, "source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}, "operations": {"type": "array", "items": {"type": "object"}}, "operation": {"type": "string", "enum": ["fill_na", "winsorize", "trimming"]}, "columns": {"type": "array", "items": {"type": "string"}}, "fill_method": {"type": "string"}, "lower_pct": {"type": "number"}, "upper_pct": {"type": "number"}, "trim_column": {"type": "string"}, "min_val": {"type": "number"}, "max_val": {"type": "number"}, "output_table": {"type": "string"}, "name": {"type": "string"}}),
-    _function("propose_excel_export", "Return an Excel export outline for user review.", {"title": {"type": "string"}, "tables": {"type": "array", "items": {"type": "string"}}, "filename": {"type": "string"}, "summary": {"type": "string"}}),
-    _function("propose_report_outline", "Return a report outline for user review.", {"title": {"type": "string"}, "sections": {"type": "array", "items": {"type": "object"}}}),
-    _function("propose_ppt_outline", "Return a presentation outline for user review.", {"title": {"type": "string"}, "slides": {"type": "array", "items": {"type": "object"}}}),
-    _function("generate_ppt", "Generate a PPTX from a query result and grounded outline.", {"result_id": {"type": "string"}, "title": {"type": "string"}, "filename": {"type": "string"}, "slides": {"type": "array", "items": {"type": "object"}}, "summary": {"type": "string"}, "insights": {"type": "array", "items": {"type": "string"}}}),
-    _function("set_ppt_color_scheme", "Select a validated color scheme for later PPT generation.", {"scheme": {"type": "string"}, "colors": {"type": "array", "items": {"type": "string"}}}, ["scheme"]),
     _function("ask_user", "Ask the user for missing information; the question is surfaced as a structured event.", {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 6}, "choices": {"type": "array", "items": {"type": "string"}}, "multi_select": {"type": "boolean"}}, ["question"]),
     _function("browse_webpage", "Read bounded text from an explicitly provided public HTTP(S) page.", {"url": {"type": "string"}, "max_chars": {"type": "integer"}}, ["url"]),
     _function("workspace_glob", "Page through safe workspace file metadata.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "max_results": {"type": "integer"}, "cursor": {"type": "integer"}}, ["pattern"]),
@@ -203,8 +169,6 @@ EXTRA_TOOLS = [
 
 DEFAULT_EXTRA_TOOL_NAMES = frozenset({
     "workspace_status", "get_table_detail", "create_analysis_table", "clean_data",
-    "propose_excel_export", "propose_report_outline", "propose_ppt_outline",
-    "generate_ppt", "set_ppt_color_scheme",
     "ask_user", "browse_webpage", "workspace_glob", "workspace_grep", "workspace_read_file",
     "structured_output", "load_analysis_skill", "task_get", "task_list",
     "read_tool_result", "plan_complete",
@@ -219,13 +183,10 @@ class AgentToolContext:
     source_ids: list[str]
     latest_result_id: str = ""
     knowledge_references: list[dict] = field(default_factory=list)
-    artifact_ids: list[str] = field(default_factory=list)
     chart_ids: list[str] = field(default_factory=list)
     mcp_names: dict[str, tuple[str, str]] = field(default_factory=dict)
     analysis_source_id: str = ""
     read_paths: set[str] = field(default_factory=set)
-    ppt_color_scheme: dict = field(default_factory=dict)
-    outlines: list[dict] = field(default_factory=list)
     tool_result_ids: list[str] = field(default_factory=list)
     knowledge_document_ids: list[str] | None = None
     semantic_metric_ids: list[str] | None = None
@@ -272,9 +233,9 @@ def _allowed_agent_tool_names(context: AgentToolContext) -> set[str]:
 
 
 def tool_schemas(context: AgentToolContext) -> list[dict]:
-    schemas = [BUILTIN_TOOLS[0], *BUILTIN_TOOLS[-2:]]
+    schemas = [BUILTIN_TOOLS[0], BUILTIN_TOOLS[-1]]
     if context.source_ids:
-        schemas[1:1] = BUILTIN_TOOLS[1:-2]
+        schemas[1:1] = BUILTIN_TOOLS[1:-1]
     allow_mutations, allow_mcp = _agent_policy(context)
     schemas.extend(
         item for item in EXTRA_TOOLS
@@ -681,49 +642,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         context.chart_ids.append(chart["id"])
         events.append(("chart", spec))
         return _public_record(chart), events
-    if name in {"export_excel", "export_report"}:
-        payload = dict(args)
-        payload["result_id"] = str(payload.get("result_id") or context.latest_result_id or "")
-        if name == "export_excel" and args.get("tables"):
-            requested = {str(value) for value in args.get("tables") or []}
-            frames = {}
-            for source in context.sources():
-                for table in schema_for_source(source, actor_id=context.actor_id or "local-default").get("tables", []):
-                    table_name = str(table["name"])
-                    if "*" not in requested and table_name not in requested:
-                        continue
-                    _resolved_name, frame = source_table(source, table_name, actor_id=context.actor_id or "local-default")
-                    output_name = table_name
-                    if output_name in frames:
-                        output_name = f"{source.get('name', source['id'])}_{table_name}"
-                    frames[output_name] = frame
-            if not frames:
-                raise ValueError("没有找到待导出的表")
-            payload["frames"] = frames
-            payload["format"] = "xlsx"
-            payload["title"] = args.get("title") or args.get("filename") or "数据导出"
-        elif not payload["result_id"] and not payload.get("sections"):
-            raise ValueError("导出前必须先获得查询结果或提供报告章节")
-        payload.setdefault("source_ids", context.source_ids)
-        artifact = (
-            export_data(payload, context.workspace_id, context.actor_id or "local-default")
-            if name == "export_excel"
-            else export_report(payload, context.workspace_id, context.actor_id or "local-default")
-        )
-        context.artifact_ids.append(artifact["id"])
-        public = _public_record(artifact)
-        public["download_url"] = f"/api/artifacts/{artifact['id']}/download"
-        events.append(("artifact", public))
-        return public, events
-    if name == "memory_read":
-        query = str(args.get("name") or args.get("query") or "")
-        return {
-            "items": search_memories(
-                query, context.workspace_id,
-                max(1, min(int(args.get("limit", 12)), 20)),
-                context.actor_id,
-            ),
-        }, events
     if name == "search_mcp_tools":
         return {"items": _search_mcp(
             context, str(args.get("query") or ""), max(1, min(int(args.get("limit", 5)), 10)),
@@ -837,47 +755,6 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         )
         context.latest_result_id = query["id"]
         return {"source": _public_record(derived), "result_id": query["id"], "operations": operation_log}, events
-    if name in {"propose_excel_export", "propose_report_outline", "propose_ppt_outline"}:
-        event_type = {
-            "propose_excel_export": "excel_outline", "propose_report_outline": "report_outline",
-            "propose_ppt_outline": "ppt_outline",
-        }[name]
-        proposal = {"type": event_type, **args, "requires_confirmation": True}
-        context.outlines.append(proposal)
-        events.append(("outline", proposal))
-        return proposal, events
-    if name == "generate_ppt":
-        payload = {
-            **args, "format": "pptx", "result_id": args.get("result_id") or context.latest_result_id,
-            "color_scheme": args.get("color_scheme") or context.ppt_color_scheme,
-        }
-        if not payload.get("result_id") and not payload.get("slides"):
-            raise ValueError("PPT 生成需要 slides 大纲或查询结果")
-        payload.setdefault("source_ids", context.source_ids)
-        artifact = export_report(payload, context.workspace_id, context.actor_id or "local-default")
-        context.artifact_ids.append(artifact["id"])
-        public = _public_record(artifact) | {"download_url": f"/api/artifacts/{artifact['id']}/download"}
-        events.append(("artifact", public))
-        return public, events
-    if name == "set_ppt_color_scheme":
-        builtins = {
-            "mckinsey": ["#003B71", "#005CAB", "#0083CA", "#00A3E0", "#7FBA00", "#FFC000"],
-            "bcg": ["#006C5B", "#009879", "#00B398", "#CDECE5", "#A6192E", "#999999"],
-            "bain": ["#E41E26", "#FF5C5C", "#A6192E", "#F4E8E9", "#00B398", "#999999"],
-            "ey": ["#FFD100", "#FFED70", "#75787B", "#D9D9D6", "#7FBA00", "#DA3B01"],
-        }
-        scheme = str(args.get("scheme") or "mckinsey").lower()
-        colors = args.get("colors") or builtins.get(scheme)
-        if not isinstance(colors, list) or not 3 <= len(colors) <= 12:
-            raise ValueError("配色必须包含 3–12 个颜色")
-        normalized = []
-        for color in colors:
-            value = str(color).strip().upper()
-            if not re.fullmatch(r"#[0-9A-F]{6}", value):
-                raise ValueError(f"无效颜色：{color}")
-            normalized.append(value)
-        context.ppt_color_scheme = {"name": scheme, "colors": normalized}
-        return context.ppt_color_scheme, events
     if name == "ask_user":
         question = str(args.get("question") or "").strip()
         choices = args.get("options") if args.get("options") is not None else args.get("choices")

@@ -11,10 +11,9 @@ from flask import Blueprint, current_app, request, session as flask_session
 from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
-from ..services.memory import consolidate_memories, search_memories
 from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
-from ..services.saas import DEFAULT_TENANT_ID, assert_workspace_limit, product_status, seed_demo_workspace
+from ..services.product import product_status, seed_demo_workspace
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
     api_errors,
@@ -152,7 +151,6 @@ def create_workspace():
     name = str(payload.get("name") or "").strip()
     if not name:
         raise ValueError("工作空间名称不能为空")
-    assert_workspace_limit(db(), DEFAULT_TENANT_ID)
     record = db().put(
         "workspaces",
         {
@@ -161,7 +159,6 @@ def create_workspace():
             "description": str(payload.get("description") or "")[:500],
             "permission": "write",
             "owner_id": current_user_id(),
-            "tenant_id": DEFAULT_TENANT_ID,
         },
     )
     db().put(
@@ -379,7 +376,7 @@ def register_workspace_file(record_id: str):
 @api_errors
 def workspace_storage(record_id: str):
     require_workspace_access(record_id, owner=True)
-    collections = ("sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards", "decision_maps")
+    collections = ("sessions", "sources", "knowledge_documents", "artifacts")
     summary = []
     total_size = 0
     for collection in collections:
@@ -440,7 +437,7 @@ def create_checkpoint(record_id: str):
         "name": str(body().get("name") or f"快照 {utcnow()[:19]}")[:100],
         "state": {
             collection: db().list(collection, workspace_id=record_id)
-            for collection in ("sessions", "sources", "knowledge_documents", "dashboards", "workflows", "decision_maps")
+            for collection in ("sessions", "sources", "knowledge_documents")
         },
         "messages": {
             item["id"]: db().messages(item["id"], 1000)
@@ -555,17 +552,9 @@ def list_sessions():
 def create_session():
     wid = workspace_id()
     payload = body()
-    business_space_id = str(payload.get("business_space_id") or "") or None
+    if payload.get("business_space_id"):
+        raise ValueError("业务数据空间已停用，请直接选择数据源")
     source_ids = _validated_session_source_ids(payload.get("source_ids", []), wid)
-    if business_space_id:
-        space = require_workspace_record("business_spaces", business_space_id, wid)
-        membership = workspace_membership(wid) or {}
-        members = {str(value) for value in space.get("member_ids") or []}
-        if membership.get("role") not in {"owner", "editor"} and (
-            space.get("status") != "published" or (members and current_user_id() not in members)
-        ):
-            raise FileNotFoundError("业务数据空间不存在")
-        source_ids = [str(value) for value in space.get("source_ids") or []]
     provider_id = payload.get("provider_id")
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
@@ -581,7 +570,6 @@ def create_session():
             "status": "active",
             "source_ids": source_ids,
             "provider_id": provider_id,
-            "business_space_id": business_space_id,
             "owner_id": current_user_id(),
         },
         workspace_id=wid,
@@ -604,7 +592,7 @@ def update_session(session_id: str):
         key: value for key, value in body().items()
         if key in {
             "name", "status", "source_ids", "provider_id", "temporary_instruction",
-            "temp_prompt_enabled", "agent_allow_mutations", "agent_allow_mcp", "business_space_id",
+            "temp_prompt_enabled", "agent_allow_mutations", "agent_allow_mcp",
         }
     }
     for flag in {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
@@ -615,18 +603,9 @@ def update_session(session_id: str):
         allowed["source_ids"] = _validated_session_source_ids(
             allowed["source_ids"], current["workspace_id"],
         )
-    if "business_space_id" in allowed:
-        space_id = str(allowed.get("business_space_id") or "") or None
-        if space_id:
-            space = require_workspace_record("business_spaces", space_id, current["workspace_id"])
-            membership = workspace_membership(current["workspace_id"]) or {}
-            members = {str(value) for value in space.get("member_ids") or []}
-            if membership.get("role") not in {"owner", "editor"} and (
-                space.get("status") != "published" or (members and current_user_id() not in members)
-            ):
-                raise FileNotFoundError("业务数据空间不存在")
-            allowed["business_space_id"] = space_id
-            allowed["source_ids"] = [str(value) for value in space.get("source_ids") or []]
+        if "business_space_id" not in allowed:
+            # A direct source selection replaces the legacy space snapshot.
+            allowed["business_space_id"] = None
     if allowed.get("provider_id") and allowed["provider_id"] != "environment-default":
         require_workspace_record("providers", str(allowed["provider_id"]), current["workspace_id"])
     item = db().patch("sessions", session_id, allowed)
@@ -720,111 +699,6 @@ def _saved_session_owned(item: dict) -> bool:
     return bool(membership and membership.get("role") == "owner")
 
 
-@bp.get("/api/memories")
-def list_memories():
-    user_id = str(flask_session.get("user_id") or "local-default")
-    items = db().list("memories", workspace_id=workspace_id())
-    return ok(items=[item for item in items if not item.get("user_id") or item.get("user_id") == user_id])
-
-
-@bp.get("/api/memories/search")
-def find_memories():
-    return ok(items=search_memories(
-        request.args.get("q", ""), workspace_id(), int(request.args.get("limit", "12")),
-        str(flask_session.get("user_id") or "local-default"),
-    ))
-
-
-@bp.post("/api/memories")
-@api_errors
-def create_memory():
-    payload = body()
-    if not str(payload.get("title") or "").strip():
-        raise ValueError("记忆标题不能为空")
-    wid = workspace_id()
-    memory_type = str(payload.get("type") or ("user" if payload.get("scope") == "user" else "project"))
-    if memory_type not in {"user", "feedback", "project", "reference"}:
-        raise ValueError("记忆类型无效")
-    content = str(payload.get("body") or payload.get("content") or "")[:12000]
-    item = db().put(
-        "memories",
-        {
-            "id": db().new_id("mem"), "workspace_id": wid,
-            "name": str(payload.get("name") or db().new_id("memory"))[:100],
-            "title": str(payload["title"])[:120], "content": content, "body": content,
-            "type": memory_type,
-            "scope": str(payload.get("scope") or "workspace"), "tags": payload.get("tags", []),
-            "why": str(payload.get("why") or "")[:1000],
-            "how_to_apply": str(payload.get("how_to_apply") or "")[:2000],
-            "user_id": str(flask_session.get("user_id") or "local-default") if memory_type in {"user", "feedback"} else "",
-            "enabled": bool(payload.get("enabled", True)),
-        },
-        workspace_id=wid,
-    )
-    return ok(item=item), 201
-
-
-@bp.patch("/api/memories/<record_id>")
-@api_errors
-def update_memory(record_id: str):
-    memory = require_workspace_record("memories", record_id)
-    if memory.get("user_id") and memory.get("user_id") != current_user_id():
-        raise PermissionError("不能修改其他用户的个人记忆")
-    allowed = {
-        key: value for key, value in body().items()
-        if key in {"name", "title", "content", "body", "type", "scope", "tags", "why", "how_to_apply", "enabled"}
-    }
-    if "body" in allowed:
-        allowed["content"] = allowed["body"]
-    elif "content" in allowed:
-        allowed["body"] = allowed["content"]
-    return ok(item=db().patch("memories", record_id, allowed))
-
-
-@bp.delete("/api/memories/<record_id>")
-@api_errors
-def archive_memory(record_id: str):
-    if body().get("confirm") is not True:
-        raise ValueError("归档记忆需要 confirm=true")
-    memory = require_workspace_record("memories", record_id)
-    if memory.get("user_id") and memory.get("user_id") != current_user_id():
-        raise PermissionError("不能归档其他用户的个人记忆")
-    if not db().archive("memories", record_id):
-        raise FileNotFoundError("记忆不存在")
-    return ok(archived=True)
-
-
-@bp.post("/api/memories/consolidate")
-def consolidate_memory_records():
-    return ok(result=consolidate_memories(workspace_id()))
-
-
-@bp.get("/api/memory-notices")
-def memory_notices():
-    wid = workspace_id()
-    items = db().list("memory_notices", workspace_id=wid, limit=int(request.args.get("limit", "20")))
-    visible = []
-    for item in items:
-        if item.get("user_id"):
-            if str(item["user_id"]) == current_user_id():
-                visible.append(item)
-            continue
-        if item.get("session_id"):
-            try:
-                require_session_access(str(item["session_id"]), wid)
-            except (FileNotFoundError, PermissionError):
-                continue
-            visible.append(item)
-    items = visible
-    session_id = request.args.get("session_id")
-    if session_id:
-        items = [item for item in items if item.get("session_id") == session_id]
-    if request.args.get("mark_read") == "true":
-        for item in items:
-            db().patch("memory_notices", item["id"], {"read": True})
-    return ok(items=items)
-
-
 @bp.get("/api/audit")
 @api_errors
 def audit_entries():
@@ -850,7 +724,7 @@ def usage_metrics():
 @bp.get("/api/trash")
 def trash():
     require_workspace_access(workspace_id(), owner=True)
-    collections = request.args.getlist("collection") or ["sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards"]
+    collections = request.args.getlist("collection") or ["sessions", "sources", "knowledge_documents", "artifacts"]
     items = []
     for collection in collections:
         for item in db().list(collection, workspace_id=workspace_id(), include_archived=True):
@@ -863,7 +737,7 @@ def trash():
 @api_errors
 def restore_trash(collection: str, record_id: str):
     require_workspace_access(workspace_id(), owner=True)
-    allowed = {"sessions", "sources", "knowledge_documents", "memories", "artifacts", "workflows", "dashboards", "decision_maps"}
+    allowed = {"sessions", "sources", "knowledge_documents", "artifacts"}
     item = db().get(collection, record_id, include_archived=True) if collection in allowed else None
     if not item or item.get("workspace_id", "default") != workspace_id() or not db().restore(collection, record_id):
         raise FileNotFoundError("回收站记录不存在")
