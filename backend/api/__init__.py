@@ -6,6 +6,7 @@ from flask import Flask
 def register_blueprints(app: Flask) -> None:
     from .analysis import bp as analysis_bp
     from .analyses import bp as analyses_bp
+    from .agents import bp as agents_bp
     from .catalog import bp as catalog_bp
     from .conversation import bp as conversation_bp
     from .delivery import bp as delivery_bp
@@ -23,6 +24,7 @@ def register_blueprints(app: Flask) -> None:
         catalog_bp,
         analysis_bp,
         analyses_bp,
+        agents_bp,
         conversation_bp,
         delivery_bp,
         integration_bp,

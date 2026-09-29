@@ -5,8 +5,9 @@ from flask import Blueprint, current_app
 
 from ..agent.store import RunStore
 from ..services.analytics import ANALYSIS_METHODS, run_analysis
-from ..services.authorization import require_sources_access
+from ..services.authorization import actor_role, require_result_access, require_sources_access
 from ..services.charts import catalog as chart_catalog, make_spec
+from ..services.data_policy import policy_fingerprint
 from ..services.datasets import load_result_frame, source_table
 from .common import (
     api_errors, body, current_user_id, db, ok, require_query_result_access,
@@ -27,6 +28,32 @@ def _payload_source_ids(payload: dict) -> list[str]:
     return []
 
 
+def _current_policy_fingerprint(source_ids: list[str]) -> str | None:
+    if not source_ids:
+        return None
+    sources = require_sources_access(
+        db(), source_ids, workspace_id=workspace_id(), actor_id=current_user_id(),
+    )
+    return policy_fingerprint(
+        sources, actor_id=current_user_id(), role=actor_role(db(), workspace_id(), current_user_id()),
+    )
+
+
+def _stored_policy_access(item: dict, source_ids: list[str], *, action: str = "read") -> None:
+    sources = require_sources_access(
+        db(), source_ids, workspace_id=item["workspace_id"], actor_id=current_user_id(), action=action,
+    )
+    recorded = item.get("policy_fingerprint")
+    current = policy_fingerprint(
+        sources, actor_id=current_user_id(),
+        role=actor_role(db(), item["workspace_id"], current_user_id()),
+    ) if sources else None
+    if (recorded and recorded != current) or (not recorded and any(
+        source.get("row_policy") or source.get("column_policies") for source in sources
+    )):
+        raise PermissionError("数据权限已变更，请重新生成分析结果")
+
+
 def _owned_analysis(record: dict) -> bool:
     actor_id = str(record.get("actor_id") or "")
     if actor_id and actor_id != current_user_id():
@@ -40,10 +67,7 @@ def _owned_analysis(record: dict) -> bool:
         if not membership or membership.get("role") != "owner":
             return False
     try:
-        require_sources_access(
-            db(), record.get("source_ids") or [], workspace_id=record["workspace_id"],
-            actor_id=current_user_id(),
-        )
+        _stored_policy_access(record, record.get("source_ids") or [])
     except (FileNotFoundError, PermissionError):
         return False
     return True
@@ -63,10 +87,10 @@ def _chart_access(item: dict, *, action: str = "read") -> dict:
             not chart_actor and (not membership or membership.get("role") != "owner")
         ):
             raise FileNotFoundError("图表不存在")
-    require_sources_access(
-        db(), source_ids, workspace_id=item["workspace_id"],
-        actor_id=current_user_id(), action=action,
-    )
+    _stored_policy_access(item, source_ids, action=action)
+    if item.get("result_id"):
+        result = db().get("query_results", str(item["result_id"]), workspace_id=item["workspace_id"])
+        require_result_access(db(), result, workspace_id=item["workspace_id"], actor_id=current_user_id(), action=action)
     return item
 
 
@@ -76,7 +100,7 @@ def _resolve_frame(payload: dict) -> pd.DataFrame:
         return load_result_frame(str(payload["result_id"]))
     if payload.get("source_id"):
         source = require_source_access(str(payload["source_id"]), action="analyze")
-        return source_table(source, payload.get("table"))[1]
+        return source_table(source, payload.get("table"), actor_id=current_user_id())[1]
     if isinstance(payload.get("rows"), list):
         return pd.DataFrame(payload["rows"])
     raise ValueError("请选择数据源或查询结果")
@@ -112,6 +136,7 @@ def analyze():
             "workspace_id": workspace_id(),
             "actor_id": current_user_id(),
             "source_ids": source_ids,
+            "policy_fingerprint": _current_policy_fingerprint(source_ids),
             "method": method,
             "inputs": {key: value for key, value in payload.items() if key != "rows"},
             "result": result["result"],
@@ -156,6 +181,7 @@ def chart_spec():
         {
             "id": db().new_id("chart"), "workspace_id": workspace_id(),
             "actor_id": current_user_id(), "source_ids": source_ids,
+            "policy_fingerprint": _current_policy_fingerprint(source_ids),
             "name": spec["title"], "spec": spec,
             "source_id": payload.get("source_id"), "result_id": payload.get("result_id"),
         },

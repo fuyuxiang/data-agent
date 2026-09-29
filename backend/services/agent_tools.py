@@ -309,7 +309,7 @@ def _combined_schema(context: AgentToolContext) -> dict:
     table_counts: dict[str, int] = {}
     schemas = []
     for source in sources:
-        schema = schema_for_source(source)
+        schema = schema_for_source(source, actor_id=context.actor_id or "local-default")
         schemas.append((source, schema))
         for table in schema.get("tables", []):
             table_counts[table["name"]] = table_counts.get(table["name"], 0) + 1
@@ -354,7 +354,7 @@ def _frame(context: AgentToolContext, args: dict):
         context.database, [source_id], workspace_id=context.workspace_id,
         actor_id=context.actor_id or "local-default", action="analyze",
     )[0]
-    return source_table(source, args.get("table") or args.get("table_name"))[1], ""
+    return source_table(source, args.get("table") or args.get("table_name"), actor_id=context.actor_id or "local-default")[1], ""
 
 
 def _resolve_frame_columns(frame: pd.DataFrame, requested: list[Any]) -> list[str]:
@@ -688,11 +688,11 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             requested = {str(value) for value in args.get("tables") or []}
             frames = {}
             for source in context.sources():
-                for table in schema_for_source(source).get("tables", []):
+                for table in schema_for_source(source, actor_id=context.actor_id or "local-default").get("tables", []):
                     table_name = str(table["name"])
                     if "*" not in requested and table_name not in requested:
                         continue
-                    _resolved_name, frame = source_table(source, table_name)
+                    _resolved_name, frame = source_table(source, table_name, actor_id=context.actor_id or "local-default")
                     output_name = table_name
                     if output_name in frames:
                         output_name = f"{source.get('name', source['id'])}_{table_name}"
@@ -739,7 +739,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             context.database, [source_id], workspace_id=context.workspace_id,
             actor_id=context.actor_id or "local-default", action="read",
         )[0]
-        schema = schema_for_source(source)
+        schema = schema_for_source(source, actor_id=context.actor_id or "local-default")
         table_name = args.get("table") or args.get("table_name")
         if not table_name:
             raise ValueError("get_table_detail 需要 table 或 table_name")

@@ -9,7 +9,8 @@ import sqlglot
 from sqlglot import expressions as exp
 
 from ..core.database import Database, utcnow
-from .authorization import require_source_access
+from .authorization import actor_role, require_source_access
+from .data_policy import effective_policy
 from .datasets import execute_query, schema_for_source
 
 
@@ -127,11 +128,15 @@ def save_model(
     )
     table_name = str(payload.get("table") or (current or {}).get("table") or "").strip()
     table = _table(source, table_name)
-    columns = _columns(table)
+    denied = effective_policy(
+        source, str(table.get("name") or table.get("source_name")), actor_id,
+        actor_role(database, workspace_id, actor_id),
+    )[1]
+    columns = _columns(table) - denied
     if not columns:
         detailed = next(
             (
-                item for item in schema_for_source(source).get("tables") or []
+                item for item in schema_for_source(source, actor_id=actor_id).get("tables") or []
                 if table_name in {str(item.get("name") or ""), str(item.get("source_name") or "")}
             ),
             None,

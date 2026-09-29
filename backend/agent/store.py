@@ -49,6 +49,18 @@ class RunStore:
         idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         now = utcnow()
+        from ..services.authorization import actor_role
+        from ..services.data_policy import policy_fingerprint
+
+        scoped_sources = [
+            self.db.get("sources", str(source_id), workspace_id=workspace_id) or {"id": str(source_id)}
+            for source_id in dict.fromkeys(source_scope)
+        ]
+        try:
+            role = actor_role(self.db, workspace_id, actor_id)
+        except PermissionError:
+            role = "unknown"
+        policy_version = policy_fingerprint(scoped_sources, actor_id=actor_id, role=role)
         normalized_key = str(idempotency_key or "").strip()[:200] or None
         with self.db.transaction() as connection:
             if normalized_key:
@@ -75,7 +87,7 @@ class RunStore:
                 (
                     run_id, workspace_id, session_id, actor_id, normalized_key, parent_run_id, run_kind,
                     ExecutionStatus.WAITING_INPUT.value, "unknown", "not_evaluated", 0, 0,
-                    "agent-policy-v1", _json(list(dict.fromkeys(source_scope))),
+                    policy_version, _json(list(dict.fromkeys(source_scope))),
                     _json(list(dict.fromkeys(allowed_tool_ids))), provider_id, skill_id,
                     _json(budget or self.default_budget()), _json(self.empty_usage()), 1, now, now,
                 ),

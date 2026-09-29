@@ -496,7 +496,9 @@ def _execute_step(step: dict, config: dict, context: dict, workspace_id: str) ->
                 _db(), [str(source_id or "")], workspace_id=workspace_id,
                 actor_id=str(context.get("_actor_id") or "local-default"), action="analyze",
             )[0]
-            _, frame = source_table(source, config.get("table"))
+            _, frame = source_table(
+                source, config.get("table"), actor_id=str(context.get("_actor_id") or "local-default"),
+            )
         return run_analysis(frame, str(config["method"]), config.get("params", {}))
     if step_type == "export_data":
         return export_data(

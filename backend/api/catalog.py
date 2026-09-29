@@ -4,7 +4,8 @@ import pandas as pd
 from flask import Blueprint, current_app, request, send_file
 
 from ..services.analytics import clean_frame, profile
-from ..services.authorization import filter_authorized_sources, inherited_source_policy
+from ..services.authorization import actor_role, filter_authorized_sources, inherited_source_policy
+from ..services.data_policy import normalize_policies
 from ..services.datasets import (
     execute_query,
     preview_source,
@@ -191,7 +192,9 @@ def connect_lark_table():
 @bp.get("/api/sources/<source_id>")
 @api_errors
 def get_source(source_id: str):
-    return ok(item=public_source(require_source_access(source_id)))
+    source = require_source_access(source_id)
+    owner = actor_role(db(), source["workspace_id"], current_user_id()) == "owner"
+    return ok(item=public_source(source, include_policy=owner))
 
 
 @bp.patch("/api/sources/<source_id>")
@@ -204,6 +207,18 @@ def update_source(source_id: str):
         for key in ("name", "description", "classification", "sensitivity", "retention_policy")
         if key in payload
     }
+    if "row_policy" in payload or "column_policies" in payload:
+        require_workspace_access(source["workspace_id"], owner=True)
+        if source.get("kind") == "warehouse":
+            raise ValueError("数仓行列权限须由目标仓身份或安全视图执行，当前连接不接受本地规则")
+        policy_source = {**source, "row_policy": None, "column_policies": None}
+        rows, columns = normalize_policies(
+            payload.get("row_policy", source.get("row_policy")),
+            payload.get("column_policies", source.get("column_policies")),
+            schema_for_source(policy_source),
+        )
+        allowed["row_policy"] = rows
+        allowed["column_policies"] = columns
     if "analysis_tables" in payload:
         if source.get("kind") != "database":
             raise ValueError("仅数据库数据源支持设置分析表范围")
@@ -251,7 +266,8 @@ def update_source(source_id: str):
         "source.updated", workspace_id=source["workspace_id"], actor=current_user_id(),
         object_type="source", object_id=source_id, detail={"fields": sorted(allowed)},
     )
-    return ok(item=public_source(item or source))
+    owner = actor_role(db(), source["workspace_id"], current_user_id()) == "owner"
+    return ok(item=public_source(item or source, include_policy=owner))
 
 
 @bp.delete("/api/sources/<source_id>")
@@ -275,20 +291,20 @@ def refresh(source_id: str):
 @bp.get("/api/sources/<source_id>/schema")
 @api_errors
 def source_schema(source_id: str):
-    return ok(schema=schema_for_source(require_source_access(source_id)))
+    return ok(schema=schema_for_source(require_source_access(source_id), actor_id=current_user_id()))
 
 
 @bp.get("/api/sources/<source_id>/preview")
 @api_errors
 def source_preview(source_id: str):
     limit = int(request.args.get("limit", "100"))
-    return ok(preview=preview_source(require_source_access(source_id), request.args.get("table"), min(limit, 500)))
+    return ok(preview=preview_source(require_source_access(source_id), request.args.get("table"), min(limit, 500), actor_id=current_user_id()))
 
 
 @bp.get("/api/sources/<source_id>/profile")
 @api_errors
 def source_profile(source_id: str):
-    _, frame = source_table(require_source_access(source_id), request.args.get("table"))
+    _, frame = source_table(require_source_access(source_id), request.args.get("table"), actor_id=current_user_id())
     return ok(profile=profile(frame))
 
 
@@ -298,7 +314,7 @@ def clean_preview(source_id: str):
     payload = body()
     source = require_source_access(source_id, action="analyze")
     assert_feature_enabled(db(), source["workspace_id"], "data_sources")
-    _, frame = source_table(source, payload.get("table"))
+    _, frame = source_table(source, payload.get("table"), actor_id=current_user_id())
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     return ok(
         before=profile(frame),
@@ -316,7 +332,7 @@ def clean_apply(source_id: str):
     wid = source.get("workspace_id", workspace_id())
     assert_feature_enabled(db(), wid, "data_sources")
     assert_collection_limit(db(), wid, limit_key="sources", collection="sources")
-    _, frame = source_table(source, payload.get("table"))
+    _, frame = source_table(source, payload.get("table"), actor_id=current_user_id())
     cleaned, log = clean_frame(frame, payload.get("operations") or [])
     derived_id = db().new_id("src")
     target = current_app.config["SETTINGS"].upload_dir / f"{derived_id}.csv"

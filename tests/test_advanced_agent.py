@@ -212,6 +212,21 @@ def test_single_agent_loop_publishes_only_after_independent_validation(app, clie
     assert {item["kind"] for item in artifacts.get_json()["items"]} == {
         "summary_docx", "report_docx", "dashboard_png",
     }
+    result_path = app.config["SETTINGS"].export_dir / "result-1.csv"
+    result_path.write_text("checked\n1\n", encoding="utf-8")
+    store.db.patch("query_results", "result-1", {"path": str(result_path)}, workspace_id="default")
+    more_artifacts = client.post(f"/api/analyses/{run['id']}/artifacts", json={
+        "kinds": ["data_xlsx", "report_pptx"],
+    })
+    assert more_artifacts.status_code == 201, more_artifacts.get_json()
+    from openpyxl import load_workbook
+    from pptx import Presentation
+
+    created = {item["kind"]: item for item in more_artifacts.get_json()["items"]}
+    workbook = load_workbook(store.db.get("artifacts", created["data_xlsx"]["id"])["path"], read_only=True)
+    assert workbook["验证数据"]["A2"].value == 1
+    presentation = Presentation(store.db.get("artifacts", created["report_pptx"]["id"])["path"])
+    assert len(presentation.slides) >= 3
     email = client.post(f"/api/analyses/{run['id']}/email/eml", json={
         "recipients": "reviewer@example.com", "kinds": ["summary_docx", "report_docx"],
     })

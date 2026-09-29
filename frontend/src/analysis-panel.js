@@ -28,17 +28,19 @@ export const AnalysisPanel = {
     activeEvidence: null, evidenceLoading: false, evidenceError: '', showEventDetails: false,
     details: [], detailColumns: [], detailCursor: 0, activeTab: 'summary', pollingTimer: null,
     artifacts: [], attachments: [], sourcePickerOpen: false, knowledgePickerOpen: false,
+    agents: [], selectedAgentId: '',
     knowledgeDocuments: [], selectedKnowledgeIds: [], pendingFiles: [], drafting: false,
     emailOpen: false, emailBusy: false, emailConnectors: [],
     emailForm: { recipients: '', subject: '', body: '', connectorId: '', kinds: ['summary_docx', 'report_docx', 'dashboard_png'] },
     clarificationAnswer: '', feedbackSent: '', feedbackItem: null,
     contractForm: { objective: '', coverage: '', dimensions: '', deliverables: '' },
-    artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png'],
+    artifactKinds: ['summary_docx', 'report_docx', 'dashboard_png', 'data_xlsx', 'report_pptx'],
   }),
   computed: {
     state() { return this.ctx.state; },
     session() { return this.ctx.activeSession(); },
     selectedSources() { return this.ctx.selectedSources(); },
+    selectedAgent() { return this.agents.find(item => item.id === this.selectedAgentId) || null; },
     availableSources() { return this.state.sources.filter(item => item.status === 'ready'); },
     demoMode() { return this.selectedSources.some(item => item.sample_seed?.id === 'instant_retail_city_pack'); },
     contract() { return this.current?.contract || null; },
@@ -58,17 +60,38 @@ export const AnalysisPanel = {
       if (value?.id !== previous?.id) this.load();
     },
     'state.workspaceId'(value, previous) {
-      if (value !== previous) this.loadKnowledge();
+      if (value !== previous) { this.selectedAgentId = ''; this.loadKnowledge(); this.loadAgents(); }
     },
   },
   mounted() {
     if (this.state.pendingPrompt) { this.prompt = this.state.pendingPrompt; this.state.pendingPrompt = ''; }
     this.loadKnowledge();
+    this.loadAgents();
     this.load();
   },
   beforeUnmount() { clearTimeout(this.pollingTimer); },
   methods: {
     md: renderMarkdown,
+    async loadAgents() {
+      try {
+        const response = await api(withWorkspace('/api/agents', this.state.workspaceId));
+        this.agents = (response.items || []).filter(item => item.status === 'published');
+        if (!this.agents.some(item => item.id === this.selectedAgentId)) this.selectedAgentId = '';
+      } catch (error) { this.ctx.fail(error); }
+    },
+    async chooseAgent() {
+      const agent = this.selectedAgent;
+      const session = this.session;
+      if (!agent || !session) return;
+      try {
+        const response = await api(`/api/sessions/${session.id}`, {
+          method: 'PATCH', body: { source_ids: agent.source_ids || [] },
+        });
+        Object.assign(session, response.item);
+        this.selectedKnowledgeIds = [...(agent.knowledge_document_ids || [])];
+        this.ctx.toast(`已载入“${agent.name}”的数据与知识范围`, '智能体已选择');
+      } catch (error) { this.ctx.fail(error); this.selectedAgentId = ''; }
+    },
     async loadKnowledge() {
       try {
         const response = await api(withWorkspace('/api/knowledge/documents', this.state.workspaceId));
@@ -201,8 +224,8 @@ export const AnalysisPanel = {
           headers: { 'Idempotency-Key': idempotencyKey() },
           body: {
             session_id: this.session.id, objective,
-            source_ids: this.session.source_ids || [],
-            knowledge_document_ids: this.selectedKnowledgeIds,
+            source_ids: this.session.source_ids || [], agent_id: this.selectedAgentId || null,
+            knowledge_document_ids: this.selectedAgent ? this.selectedAgent.knowledge_document_ids : this.selectedKnowledgeIds,
             provider_id: this.session.provider_id || null,
             execution_mode: 'auto', confirm_required: true,
           },
@@ -561,6 +584,7 @@ export const AnalysisPanel = {
             <p>用业务语言描述问题，我会拆解目标、查询数据、核对证据，并生成可被审计的结论。</p>
           </section>
           <div class="home-readiness">
+            <label v-if="agents.length" class="dialog-field"><span>分析智能体</span><select v-model="selectedAgentId" @change="chooseAgent"><option value="">基础分析 Agent</option><option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }} · v{{ agent.version }}</option></select></label>
             <div class="source-picker-wrap">
               <button class="empty-data-action" @click="sourcePickerOpen=!sourcePickerOpen"><Icon name="database"/><span><b>{{ selectedSources.length ? '已选择 '+selectedSources.length+' 个数据源' : '选择分析数据' }}</b><small>{{ selectedSources.length ? selectedSources.map(item=>item.name).join('、') : '发起分析前需要先确定数据范围' }}</small></span><Icon name="chevron"/></button>
               <section v-if="sourcePickerOpen" class="source-picker">
@@ -697,6 +721,8 @@ export const AnalysisPanel = {
               <button class="button" @click="generateArtifacts('summary_docx')"><Icon name="download"/>结论 Word</button>
               <button class="button" @click="generateArtifacts('report_docx')"><Icon name="download"/>报告 Word</button>
               <button class="button" @click="generateArtifacts('dashboard_png')"><Icon name="download"/>看板 PNG</button>
+              <button class="button" @click="generateArtifacts('data_xlsx')"><Icon name="download"/>验证数据 Excel</button>
+              <button class="button" @click="generateArtifacts('report_pptx')"><Icon name="download"/>报告 PPT</button>
               <button class="button" @click="openEmail">邮件分享</button>
               <a v-for="item in artifacts" :key="item.id" class="button button--small" :href="item.download_url">{{ item.filename }}</a>
             </footer>
@@ -726,6 +752,6 @@ export const AnalysisPanel = {
           <button type="submit" class="composer__send" :disabled="!canSend" :title="canSend?'核对需求':'请先完成输入与数据源选择'" aria-label="发起分析"><Icon name="play" :size="16"/></button>
         </div>
       </form>
-      <div v-if="emailOpen" class="modal-backdrop" @mousedown.self="emailOpen=false"><section class="modal" role="dialog" aria-modal="true" aria-label="邮件分享分析成果"><header class="modal__header"><h2>邮件分享分析成果</h2><button class="icon-button" @click="emailOpen=false" aria-label="关闭">×</button></header><div class="modal__body dialog-form"><label class="dialog-field"><span>收件人邮箱，多个用逗号分隔</span><input v-model.trim="emailForm.recipients" type="text" autocomplete="email"></label><label class="dialog-field"><span>主题</span><input v-model.trim="emailForm.subject"></label><label class="dialog-field"><span>正文</span><textarea v-model="emailForm.body"></textarea></label><fieldset class="email-attachments"><legend>附件</legend><label><input v-model="emailForm.kinds" type="checkbox" value="summary_docx">极简结论 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_docx">完整报告 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="dashboard_png">看板 PNG</label></fieldset><label v-if="emailConnectors.length" class="dialog-field"><span>邮件服务</span><select v-model="emailForm.connectorId"><option v-for="item in emailConnectors" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><p v-else>尚未配置 SMTP 邮件服务。可下载包含附件的 .eml 文件，用本地邮件客户端发送。</p></div><footer class="modal__footer"><button class="button" @click="emailOpen=false">取消</button><button class="button" :disabled="emailBusy" @click="deliverEmail(false)">下载邮件文件</button><button v-if="emailConnectors.length" class="button button--primary" :disabled="emailBusy" @click="deliverEmail(true)">发送邮件</button></footer></section></div>
+      <div v-if="emailOpen" class="modal-backdrop" @mousedown.self="emailOpen=false"><section class="modal" role="dialog" aria-modal="true" aria-label="邮件分享分析成果"><header class="modal__header"><h2>邮件分享分析成果</h2><button class="icon-button" @click="emailOpen=false" aria-label="关闭">×</button></header><div class="modal__body dialog-form"><label class="dialog-field"><span>收件人邮箱，多个用逗号分隔</span><input v-model.trim="emailForm.recipients" type="text" autocomplete="email"></label><label class="dialog-field"><span>主题</span><input v-model.trim="emailForm.subject"></label><label class="dialog-field"><span>正文</span><textarea v-model="emailForm.body"></textarea></label><fieldset class="email-attachments"><legend>附件</legend><label><input v-model="emailForm.kinds" type="checkbox" value="summary_docx">极简结论 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_docx">完整报告 Word</label><label><input v-model="emailForm.kinds" type="checkbox" value="dashboard_png">看板 PNG</label><label><input v-model="emailForm.kinds" type="checkbox" value="data_xlsx">验证数据 Excel</label><label><input v-model="emailForm.kinds" type="checkbox" value="report_pptx">分析报告 PPT</label></fieldset><label v-if="emailConnectors.length" class="dialog-field"><span>邮件服务</span><select v-model="emailForm.connectorId"><option v-for="item in emailConnectors" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><p v-else>尚未配置 SMTP 邮件服务。可下载包含附件的 .eml 文件，用本地邮件客户端发送。</p></div><footer class="modal__footer"><button class="button" @click="emailOpen=false">取消</button><button class="button" :disabled="emailBusy" @click="deliverEmail(false)">下载邮件文件</button><button v-if="emailConnectors.length" class="button button--primary" :disabled="emailBusy" @click="deliverEmail(true)">发送邮件</button></footer></section></div>
     </section>`,
 };

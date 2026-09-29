@@ -6,7 +6,8 @@ export const SettingsPanel = {
   props: { ctx: Object },
   data: () => ({
     tab: localStorage.getItem('meridian-settings-tab') || 'members',
-    members: [], providers: [], tools: [], connectors: [], feedback: [], audit: [], inviteResult: null, providerTests: {},
+    members: [], providers: [], tools: [], connectors: [], feedback: [], audit: [], agents: [], agentKnowledge: [], agentSkills: [], inviteResult: null, providerTests: {},
+    agentForm: { id: '', name: '', description: '', instruction: '', source_ids: [], knowledge_document_ids: [], provider_id: '', skill_id: '' },
     memberForm: { email: '', role: 'analyst' },
     providerForm: {
       name: 'OpenAI Compatible', base_url: 'https://api.openai.com/v1',
@@ -19,17 +20,19 @@ export const SettingsPanel = {
     mailForm: { name: '企业邮件', host: '', port: 587, username: '', password: '', sender: '', recipient: '', use_tls: true },
   }),
   mounted() {
-    if (!['members', 'models', 'tools', 'delivery', 'feedback', 'audit'].includes(this.tab)) this.tab = 'members';
+    if (!['members', 'models', 'agents', 'tools', 'delivery', 'feedback', 'audit'].includes(this.tab)) this.tab = 'members';
     this.load();
   },
   watch: { tab(value) { localStorage.setItem('meridian-settings-tab', value); } },
   methods: {
     async load() {
       const wid = this.ctx.state.workspaceId;
-      const [members, providers, tools, connectors, feedback, audit] = await Promise.all([
+      const [members, providers, tools, connectors, feedback, audit, agents, knowledge, skills] = await Promise.all([
         api(`/api/workspaces/${wid}/members`), api('/api/providers'),
         api(withWorkspace('/api/mcp/servers', wid)), api(withWorkspace('/api/connectors', wid)),
         api(withWorkspace('/api/feedback', wid)), api(withWorkspace('/api/audit?limit=100', wid)),
+        api(withWorkspace('/api/agents', wid)), api(withWorkspace('/api/knowledge/documents', wid)),
+        api(withWorkspace('/api/skills', wid)),
       ]);
       this.members = members.items || [];
       this.providers = providers.items || [];
@@ -37,6 +40,53 @@ export const SettingsPanel = {
       this.connectors = (connectors.items || []).filter(item => item.type === 'email');
       this.feedback = feedback.items || [];
       this.audit = audit.items || [];
+      this.agents = agents.items || [];
+      this.agentKnowledge = (knowledge.items || []).filter(item => item.enabled !== false);
+      this.agentSkills = (skills.items || []).filter(item => !item.status || item.status === 'published');
+    },
+    editAgent(item) {
+      this.agentForm = {
+        id: item.id, name: item.name || '', description: item.description || '',
+        instruction: item.instruction || '', source_ids: [...(item.source_ids || [])],
+        knowledge_document_ids: [...(item.knowledge_document_ids || [])],
+        provider_id: item.provider_id || '', skill_id: item.skill_id || '',
+      };
+    },
+    resetAgent() {
+      this.agentForm = { id: '', name: '', description: '', instruction: '', source_ids: [], knowledge_document_ids: [], provider_id: '', skill_id: '' };
+    },
+    async saveAgent() {
+      if (!this.agentForm.name.trim() || !this.agentForm.source_ids.length) {
+        return this.ctx.fail(new Error('请填写智能体名称并选择至少一个数据源'));
+      }
+      try {
+        await this.ctx.run('正在保存智能体草稿', async () => {
+          const path = this.agentForm.id ? `/api/agents/${this.agentForm.id}` : '/api/agents';
+          await api(path, { method: this.agentForm.id ? 'PATCH' : 'POST', body: this.agentForm });
+          this.resetAgent();
+          await this.load();
+        });
+      } catch (error) { this.ctx.fail(error); }
+    },
+    async publishAgent(item) {
+      try {
+        await this.ctx.run('正在发布智能体', async () => {
+          await api(`/api/agents/${item.id}/publish`, { method: 'POST' });
+          await this.load();
+        });
+      } catch (error) { this.ctx.fail(error); }
+    },
+    async rollbackAgent(item) {
+      const answer = await this.ctx.askForm({
+        title: '从历史版本恢复草稿',
+        fields: [{ key: 'version', label: '历史版本号', required: true }],
+        submitLabel: '恢复为新草稿',
+      });
+      if (!answer) return;
+      try {
+        await api(`/api/agents/${item.id}/rollback`, { method: 'POST', body: { version: Number(answer.version) } });
+        await this.load();
+      } catch (error) { this.ctx.fail(error); }
     },
     async addMember() {
       if (!this.memberForm.email.trim()) return;
@@ -115,6 +165,28 @@ export const SettingsPanel = {
         await this.load();
       });
     },
+    async approveMcpTool(item, tool, enabled) {
+      const selected = new Set(item.formal_read_tools || []);
+      enabled ? selected.add(tool.name) : selected.delete(tool.name);
+      try {
+        const response = await api(`/api/mcp/servers/${item.id}`, {
+          method: 'PATCH', body: { formal_read_tools: [...selected] },
+        });
+        item.formal_read_tools = response.item.formal_read_tools || [];
+        this.ctx.toast('正式 Agent 工具授权已更新');
+      } catch (error) { this.ctx.fail(error); }
+    },
+    async toggleSessionMcp(enabled) {
+      const session = this.ctx.activeSession();
+      if (!session) return;
+      try {
+        const response = await api(`/api/sessions/${session.id}`, {
+          method: 'PATCH', body: { agent_allow_mcp: enabled },
+        });
+        Object.assign(session, response.item);
+        this.ctx.toast(enabled ? '当前会话已启用已批准的 MCP 工具' : '当前会话已停用 MCP 工具');
+      } catch (error) { this.ctx.fail(error); }
+    },
     async saveMail() {
       if (!this.mailForm.host.trim() || !this.mailForm.sender.trim() || !this.mailForm.recipient.trim()) {
         return this.ctx.fail(new Error('请填写 SMTP 主机、发件人和默认收件人'));
@@ -157,6 +229,7 @@ export const SettingsPanel = {
         <nav class="settings-nav">
           <button :class="{active:tab==='members'}" @click="tab='members'"><Icon name="users"/>成员与权限</button>
           <button :class="{active:tab==='models'}" @click="tab='models'"><Icon name="brain"/>模型服务</button>
+          <button :class="{active:tab==='agents'}" @click="tab='agents'"><Icon name="workflow"/>分析智能体</button>
           <button :class="{active:tab==='tools'}" @click="tab='tools'"><Icon name="bolt"/>工具连接</button>
           <button :class="{active:tab==='delivery'}" @click="tab='delivery'"><Icon name="chat"/>成果交付</button>
           <button :class="{active:tab==='feedback'}" @click="tab='feedback'"><Icon name="check"/>质量反馈</button>
@@ -176,9 +249,15 @@ export const SettingsPanel = {
             <div class="setting-list"><article v-for="item in providers" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.model || '继承环境变量' }} · {{ item.base_url || '环境默认地址' }}</small><small v-if="providerTests[item.id]" class="provider-test" :class="'provider-test--'+providerTests[item.id].status">{{ providerTests[item.id].text }}</small></div><StatusPill :status="item.has_api_key?'ready':'configured'" :label="item.has_api_key?'密钥就绪':'待配置密钥'"/><button class="button button--small" :disabled="providerTests[item.id]?.status==='running'" @click="testProvider(item)">{{ providerTests[item.id]?.status==='running'?'测试中…':'测试' }}</button><button v-if="item.id!=='environment-default'" class="icon-button danger" title="删除模型服务" @click="removeProvider(item)"><Icon name="close"/></button></article></div>
             <div class="settings-card"><h3>添加模型</h3><div class="form-grid"><label><span>名称</span><input v-model="providerForm.name"></label><label><span>模型 ID</span><input v-model="providerForm.model"></label><label class="span-2"><span>Base URL</span><input v-model="providerForm.base_url"></label><label><span>API Key</span><input type="password" v-model="providerForm.api_key"></label><label><span>Temperature</span><input type="number" min="0" max="2" step="0.1" v-model.number="providerForm.temperature"></label></div><button class="button button--primary" @click="saveProvider">保存模型</button></div>
           </section>
+          <section v-if="tab==='agents'">
+            <div class="section-heading"><h2>分析智能体</h2><p>把数据范围、知识、技能、模型和分析指令打包为可发布版本。</p></div>
+            <div class="setting-list"><article v-for="item in agents" :key="item.id"><div><b>{{ item.name }} · v{{ item.version }}</b><small>{{ item.description || '未填写说明' }}</small><small>{{ item.source_ids?.length||0 }} 个数据源 · {{ item.status==='published'?'已发布':'草稿' }}</small></div><StatusPill :status="item.status"/><button class="button button--small" @click="editAgent(item)">编辑</button><button v-if="ctx.state.workspaceRole==='owner' && item.status!=='published'" class="button button--small" @click="publishAgent(item)">发布</button><button v-if="ctx.state.workspaceRole==='owner' && item.version>1" class="button button--small" @click="rollbackAgent(item)">恢复版本</button></article><EmptyState v-if="!agents.length" icon="workflow" title="尚无分析智能体" text="创建草稿并发布后，业务人员即可在分析页选择。"/></div>
+            <div class="settings-card"><h3>{{ agentForm.id ? '编辑智能体草稿' : '创建分析智能体' }}</h3><div class="form-grid"><label><span>名称</span><input v-model.trim="agentForm.name" placeholder="例如 城市经营分析师"></label><label><span>模型服务</span><select v-model="agentForm.provider_id"><option value="">使用会话默认模型</option><option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option></select></label><label class="span-2"><span>使用说明</span><input v-model.trim="agentForm.description" placeholder="向业务人员说明适用问题"></label><label class="span-2"><span>分析指令</span><textarea v-model.trim="agentForm.instruction" placeholder="说明分析口径与输出要求；权限和验证规则始终由系统执行"></textarea></label><label><span>分析技能</span><select v-model="agentForm.skill_id"><option value="">使用基础分析能力</option><option v-for="skill in agentSkills" :key="skill.id" :value="skill.id">{{ skill.name }}</option></select></label></div><h4>可用数据源</h4><div class="option-grid"><label v-for="source in ctx.state.sources" :key="source.id" class="check-control"><input v-model="agentForm.source_ids" type="checkbox" :value="source.id">{{ source.name }}</label></div><h4>业务知识</h4><div class="option-grid"><label v-for="document in agentKnowledge" :key="document.id" class="check-control"><input v-model="agentForm.knowledge_document_ids" type="checkbox" :value="document.id">{{ document.name || document.filename }}</label></div><button class="button button--primary" @click="saveAgent">保存草稿</button><button v-if="agentForm.id" class="button" @click="resetAgent">取消编辑</button></div>
+          </section>
           <section v-if="tab==='tools'">
             <div class="section-heading"><h2>工具连接</h2><p>连接 Agent 在分析时可以调用的受控 MCP 工具。</p></div>
-            <div class="setting-list"><article v-for="item in tools" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.transport }} · {{ item.url || item.command }} · {{ item.tools?.length||0 }} 个工具</small></div><StatusPill :status="item.status"/><button class="button button--small" @click="testTool(item)">测试</button></article></div>
+            <div v-if="ctx.state.workspaceRole==='owner' && ctx.activeSession()" class="settings-card"><h3>当前分析会话</h3><label class="check-control"><input type="checkbox" :checked="!!ctx.activeSession().agent_allow_mcp" @change="toggleSessionMcp($event.target.checked)">允许本会话的正式 Agent 使用下方已批准的 MCP 工具</label><p>工具结果会标记为外部未验证信息，不能直接成为数据结论。</p></div>
+            <div class="setting-list"><article v-for="item in tools" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.transport }} · {{ item.url || item.command }} · {{ item.tools?.length||0 }} 个工具</small><div v-if="ctx.state.workspaceRole==='owner' && item.tools?.length" class="option-grid"><label v-for="tool in item.tools" :key="tool.name" class="check-control"><input type="checkbox" :checked="(item.formal_read_tools||[]).includes(tool.name)" @change="approveMcpTool(item,tool,$event.target.checked)">{{ tool.name }}<small>批准用于正式分析；请确认外部工具实际行为</small></label></div></div><StatusPill :status="item.status"/><button class="button button--small" @click="testTool(item)">测试</button></article></div>
             <div class="settings-card"><h3>添加工具服务</h3><div class="form-grid"><label><span>名称</span><input v-model="toolForm.name"></label><label><span>传输方式</span><select v-model="toolForm.transport"><option value="streamable-http">Streamable HTTP</option><option value="sse">SSE</option><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><template v-if="toolForm.transport==='stdio'"><label><span>命令</span><input v-model="toolForm.command"></label><label><span>参数 JSON</span><input v-model="toolForm.argsText"></label><label class="span-2"><span>环境变量 JSON</span><input v-model="toolForm.envText"></label></template><template v-else><label class="span-2"><span>服务 URL</span><input v-model="toolForm.url"></label><label class="span-2"><span>请求头 JSON</span><input v-model="toolForm.headersText"></label></template></div><button class="button button--primary" @click="saveTool">保存连接</button></div>
           </section>
           <section v-if="tab==='delivery'"><div class="section-heading"><h2>成果交付</h2><p>为通过校验的分析成果配置真实 SMTP 邮件发送；用户也可下载带附件的邮件文件。</p></div><div class="setting-list"><article v-for="item in connectors" :key="item.id"><div><b>{{ item.name }}</b><small>SMTP · {{ item.configured ? '已配置' : '待配置' }}</small></div><StatusPill :status="item.enabled?'ready':'disabled'"/><button class="icon-button danger" :aria-label="'移除 '+item.name" @click="removeMail(item)"><Icon name="close"/></button></article></div><div class="settings-card"><h3>添加邮件服务</h3><div class="form-grid"><label><span>名称</span><input v-model.trim="mailForm.name"></label><label><span>SMTP 主机</span><input v-model.trim="mailForm.host"></label><label><span>端口</span><input v-model.number="mailForm.port" type="number" min="1" max="65535"></label><label><span>发件人</span><input v-model.trim="mailForm.sender" type="email"></label><label><span>登录用户名</span><input v-model.trim="mailForm.username"></label><label><span>登录密码</span><input v-model="mailForm.password" type="password"></label><label><span>默认收件人</span><input v-model.trim="mailForm.recipient" type="email"></label><label><span>传输加密</span><select v-model="mailForm.use_tls"><option :value="true">STARTTLS</option><option :value="false">由本地受控 SMTP 保证</option></select></label></div><button class="button button--primary" @click="saveMail">保存邮件服务</button></div></section>

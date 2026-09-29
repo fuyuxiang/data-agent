@@ -10,7 +10,7 @@ from flask import Blueprint, Response, current_app, request, stream_with_context
 from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
 from ..core.database import utcnow
-from ..services.advanced_agent import available_formal_tools
+from ..services.advanced_agent import _source_authorized, available_formal_tools
 from ..services.authorization import require_sources_access
 from ..services.jobs import get_job_manager
 from ..services.intent import suggest_contract
@@ -41,6 +41,8 @@ def _require_run(run_id: str, *, write: bool = False) -> dict[str, Any]:
         db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
         actor_id=current_user_id(), action="analyze" if write else "read",
     )
+    if not _source_authorized(db(), run):
+        raise PermissionError("数据权限已变更，请重新发起分析")
     if write and run["execution_status"] in {"finished", "cancelled"}:
         raise ValueError("已结束任务不可就地修改，请发起追问、刷新或重新分析")
     return run
@@ -50,9 +52,12 @@ def _snapshot(run: dict[str, Any]) -> dict[str, Any]:
     service = ResultService(db())
     publication = service.publication(run["id"], workspace_id=run["workspace_id"])
     manifest = service.manifest(publication["manifest_id"], workspace_id=run["workspace_id"]) if publication else None
+    analysis_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     return {
         **run, "contract": _store().latest_contract(run["id"]),
         "plan": _store().latest_plan(run["id"]), "publication": publication, "manifest": manifest,
+        "agent_id": (analysis_context.get("agent_snapshot") or {}).get("id"),
+        "agent_version": (analysis_context.get("agent_snapshot") or {}).get("version"),
     }
 
 
@@ -174,7 +179,26 @@ def create_analysis():
     assert_agent_run_limit(db(), wid)
     session = _session(payload, wid)
     source_ids, business_space_id = _analysis_scope(payload, session, wid)
+    agent_id = str(payload.get("agent_id") or "")
+    agent = require_workspace_record("agent_definitions", agent_id, wid) if agent_id else None
+    if agent:
+        if agent.get("status") != "published":
+            raise PermissionError("只能使用已发布的智能体")
+        agent_source_list = list(dict.fromkeys(str(value) for value in agent.get("source_ids") or []))
+        agent_source_ids = set(agent_source_list)
+        if not source_ids:
+            source_ids = agent_source_list
+            for source_id in source_ids:
+                require_source_access(source_id, wid, action="analyze")
+        if not set(source_ids).issubset(agent_source_ids):
+            raise PermissionError("所选数据源超出智能体已发布范围")
     selected_knowledge = payload.get("knowledge_document_ids")
+    if agent:
+        permitted_knowledge = {str(value) for value in agent.get("knowledge_document_ids") or []}
+        if selected_knowledge is None:
+            selected_knowledge = list(permitted_knowledge)
+        elif not set(str(value) for value in selected_knowledge).issubset(permitted_knowledge):
+            raise PermissionError("所选知识超出智能体已发布范围")
     if selected_knowledge is not None and not isinstance(selected_knowledge, list):
         raise ValueError("knowledge_document_ids 必须是数组")
     knowledge_ids = list(dict.fromkeys(str(value) for value in selected_knowledge or []))
@@ -184,10 +208,10 @@ def create_analysis():
         document = db().get("knowledge_documents", document_id, workspace_id=wid)
         if not document or not document.get("enabled", True) or document.get("visibility") == "analysis_attachment":
             raise ValueError("所选知识文档不存在或已停用")
-    provider_id = str(payload.get("provider_id") or "") or None
+    provider_id = str((agent or {}).get("provider_id") or payload.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id, wid)
-    skill_id = str(payload.get("skill_id") or "") or None
+    skill_id = str((agent or {}).get("skill_id") or payload.get("skill_id") or "") or None
     if skill_id:
         from ..services.skills import get_skill
 
@@ -214,6 +238,10 @@ def create_analysis():
             "id": run["id"], "workspace_id": wid,
             "knowledge_document_ids": knowledge_ids,
             "knowledge_selection_explicit": selected_knowledge is not None,
+            "agent_snapshot": {
+                "id": agent["id"], "version": agent["version"],
+                "name": agent["name"], "instruction": agent.get("instruction") or "",
+            } if agent else None,
         }, workspace_id=wid)
         db().patch("sessions", session["id"], {
             "source_ids": source_ids, "provider_id": provider_id or session.get("provider_id"),
@@ -278,7 +306,7 @@ def list_analyses():
         _snapshot(item) for item in _store().list_runs(
             workspace_id(), session_id=str(request.args.get("session_id") or "") or None,
             limit=int(request.args.get("limit", 100)),
-        ) if item.get("actor_id") == current_user_id()
+        ) if item.get("actor_id") == current_user_id() and _source_authorized(db(), item)
     ]
     return ok(items=items)
 
@@ -649,14 +677,18 @@ def branch_analysis(run_id: str):
     child, _ = _store().create_run(
         workspace_id=run["workspace_id"], session_id=run["session_id"], actor_id=current_user_id(),
         source_scope=source_ids,
-        allowed_tool_ids=available_formal_tools(db(), run["workspace_id"], run["session_id"], source_ids),
+        allowed_tool_ids=sorted(set(run.get("allowed_tool_ids") or []) & set(available_formal_tools(
+            db(), run["workspace_id"], run["session_id"], source_ids,
+        ))),
         provider_id=run.get("provider_id"), parent_run_id=run["id"], run_kind=mode,
+        skill_id=run.get("skill_id"),
     )
     parent_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     db().put("analysis_context", {
         "id": child["id"], "workspace_id": run["workspace_id"],
         "knowledge_document_ids": parent_context.get("knowledge_document_ids") or [],
         "knowledge_selection_explicit": bool(parent_context.get("knowledge_selection_explicit")),
+        "agent_snapshot": parent_context.get("agent_snapshot"),
     }, workspace_id=run["workspace_id"])
     _store().add_contract(child["id"], contract, expected_version=0)
     db().add_message(run["session_id"], "user", contract.objective, {"run_id": child["id"], "parent_run_id": run["id"]})

@@ -28,7 +28,8 @@ from werkzeug.utils import secure_filename
 
 from ..core.database import Database, utcnow
 from .security import SecretVault, safe_http_request, validate_outbound_host, validate_outbound_url
-from .authorization import require_sources_access
+from .authorization import actor_role, require_sources_access
+from .data_policy import effective_policy, filter_frame, policy_fingerprint, reject_denied_columns, rewrite_database_sql
 from .sql_security import bounded_read_only_sql, validate_query_tables, validate_read_only_sql
 
 
@@ -888,10 +889,18 @@ def register_lark_table(config: dict, workspace_id: str) -> dict:
     return public_source(record)
 
 
-def public_source(source: dict) -> dict:
+def public_source(source: dict, *, include_policy: bool = False) -> dict:
     value = dict(source)
     value.pop("credential", None)
     value.pop("path", None)
+    if not include_policy:
+        value.pop("row_policy", None)
+        value.pop("column_policies", None)
+        if source.get("row_policy") or source.get("column_policies"):
+            value["tables"] = [
+                {"name": table.get("name"), "source_name": table.get("source_name")}
+                for table in source.get("tables") or []
+            ]
     return value
 
 
@@ -935,8 +944,16 @@ def register_derived_tables(
             "id": source_id, "workspace_id": workspace_id, "name": str(name)[:120],
             "kind": "derived", "format": "xlsx", "path": str(path), "tables": tables,
             "status": "ready", "last_refreshed_at": utcnow(),
-            "lineage": {"operation": "derived_analysis", "source_ids": parent_ids},
+            "lineage": {
+                "operation": "derived_analysis", "source_ids": parent_ids,
+                "policy_fingerprint": policy_fingerprint(
+                    parents, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id),
+                ),
+            },
             **inherited_sources_policy(parents),
+            **({"authorized_user_ids": [actor_id]} if any(
+                parent.get("row_policy") or parent.get("column_policies") for parent in parents
+            ) else {}),
         },
         workspace_id=workspace_id,
     )
@@ -1019,20 +1036,27 @@ def delete_derived_tables(
     }
 
 
-def source_frames(source: dict) -> dict[str, pd.DataFrame]:
+def source_frames(source: dict, *, actor_id: str | None = None) -> dict[str, pd.DataFrame]:
     if source["kind"] in {
         "file", "http", "derived", "workspace", "google_sheet", "lark_table", "lark_table_snapshot",
     }:
-        return _read_tabular_file(Path(source["path"]))
+        frames = _read_tabular_file(Path(source["path"]))
+        if actor_id is None:
+            return frames
+        role = actor_role(db(), str(source.get("workspace_id") or "default"), actor_id)
+        return {
+            name: filter_frame(frame, source, _sanitize_table_name(name), actor_id, role)
+            for name, frame in frames.items()
+        }
     if source["kind"] in {"database", "warehouse"}:
         raise ValueError("远程数据源不允许经 source_frames 隐式拉取；请通过只读 SQL 下推并使用受控结果引用")
     raise ValueError("未知数据源类型")
 
 
-def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.DataFrame]:
+def source_table(source: dict, table_name: str | None = None, *, actor_id: str | None = None) -> tuple[str, pd.DataFrame]:
     if source.get("kind") in {"database", "warehouse"}:
         raise ValueError("远程数据源不允许经 source_table 转为 DataFrame；请先执行有范围的只读查询")
-    frames = source_frames(source)
+    frames = source_frames(source, actor_id=actor_id)
     if not frames:
         raise ValueError("数据源中没有可分析的数据表")
     if table_name:
@@ -1044,7 +1068,8 @@ def source_table(source: dict, table_name: str | None = None) -> tuple[str, pd.D
     return _sanitize_table_name(name), frame
 
 
-def schema_for_source(source: dict) -> dict:
+def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
+    role = actor_role(db(), str(source.get("workspace_id") or "default"), actor_id) if actor_id else ""
     if source.get("kind") == "warehouse":
         return {
             "source_id": source["id"], "engine_id": source.get("engine_id"),
@@ -1058,20 +1083,23 @@ def schema_for_source(source: dict) -> dict:
             "tables": [
                 {
                     "name": table["name"], "source_name": table.get("source_name", table["name"]),
-                    "rows": table.get("rows"),
+                    "rows": None if actor_id and source.get("row_policy") else table.get("rows"),
                     "columns": [
                         {
                             "name": column["name"], "type": column.get("type", "unknown"),
                             "nullable": bool(column.get("nullable", True)), "distinct": None, "sample": [],
                         }
                         for column in table.get("schema", [])
+                        if not actor_id or column["name"] not in effective_policy(
+                            source, str(table.get("name") or table.get("source_name")), actor_id, role,
+                        )[1]
                     ],
                 }
                 for table in source.get("tables", [])
             ],
         }
     tables = []
-    for name, frame in source_frames(source).items():
+    for name, frame in source_frames(source, actor_id=actor_id).items():
         columns = []
         for column in frame.columns:
             series = frame[column]
@@ -1091,7 +1119,7 @@ def schema_for_source(source: dict) -> dict:
     return {"source_id": source["id"], "tables": tables}
 
 
-def _database_preview(source: dict, table_name: str | None, limit: int) -> dict:
+def _database_preview(source: dict, table_name: str | None, limit: int, actor_id: str | None = None) -> dict:
     tables = list(source.get("tables") or [])
     if not tables:
         raise ValueError("数据库中没有可预览的数据表或视图")
@@ -1118,9 +1146,14 @@ def _database_preview(source: dict, table_name: str | None, limit: int) -> dict:
         with engine.connect() as connection:
             _configure_read_only(connection, settings().query_timeout_seconds)
             qualified = _qualified_table(engine, selected)
-            statement = bounded_read_only_sql(
-                f"SELECT * FROM {qualified}", bounded_limit + 1, _dialect_name(engine),
-            )
+            statement = f"SELECT * FROM {qualified}"
+            if actor_id:
+                statement = rewrite_database_sql(
+                    statement, source, actor_id=actor_id,
+                    role=actor_role(db(), str(source.get("workspace_id") or "default"), actor_id),
+                    dialect=_dialect_name(engine),
+                )
+            statement = bounded_read_only_sql(statement, bounded_limit + 1, _dialect_name(engine))
             frame = pd.read_sql(text(statement), connection)
     except DBAPIError as exc:
         raise ValueError(_database_connection_error(exc, backend)) from exc
@@ -1141,10 +1174,10 @@ def _database_preview(source: dict, table_name: str | None, limit: int) -> dict:
     }
 
 
-def preview_source(source: dict, table_name: str | None = None, limit: int = 100) -> dict:
+def preview_source(source: dict, table_name: str | None = None, limit: int = 100, *, actor_id: str | None = None) -> dict:
     if source.get("kind") == "database":
-        return _database_preview(source, table_name, limit)
-    name, frame = source_table(source, table_name)
+        return _database_preview(source, table_name, limit, actor_id)
+    name, frame = source_table(source, table_name, actor_id=actor_id)
     return {
         "source_id": source["id"],
         "table": name,
@@ -1154,7 +1187,7 @@ def preview_source(source: dict, table_name: str | None = None, limit: int = 100
     }
 
 
-def _query_table_scope(sources: list[dict]) -> set[str]:
+def _query_table_scope(sources: list[dict], *, actor_id: str | None = None) -> set[str]:
     allowed: set[str] = set()
     if len(sources) == 1 and sources[0].get("kind") == "database":
         source = sources[0]
@@ -1175,7 +1208,7 @@ def _query_table_scope(sources: list[dict]) -> set[str]:
         return allowed
     used: set[str] = set()
     for source in sources:
-        for table_name, frame in source_frames(source).items():
+        for table_name, frame in source_frames(source, actor_id=actor_id).items():
             # Spreadsheet files often retain placeholder sheets with zero
             # columns. DuckDB cannot register those frames and they are not
             # queryable tables, so keep them visible in asset metadata but out
@@ -1223,7 +1256,10 @@ def execute_query(
         dialect = _dialect_name(engine)
     try:
         statement = validate_read_only_sql(sql, dialect)
-        referenced_tables = validate_query_tables(statement, _query_table_scope(sources), dialect)
+        referenced_tables = validate_query_tables(statement, _query_table_scope(sources, actor_id=actor_id), dialect)
+        reject_denied_columns(
+            statement, sources, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id), dialect=dialect,
+        )
     except Exception:
         if engine is not None:
             engine.dispose()
@@ -1245,7 +1281,11 @@ def execute_query(
         try:
             with engine.connect() as connection:
                 _configure_read_only(connection, settings().query_timeout_seconds)
-                bounded = bounded_read_only_sql(statement, probe_limit, _dialect_name(engine))
+                secured_statement = rewrite_database_sql(
+                    statement, source, actor_id=actor_id,
+                    role=actor_role(db(), workspace_id, actor_id), dialect=_dialect_name(engine),
+                )
+                bounded = bounded_read_only_sql(secured_statement, probe_limit, _dialect_name(engine))
                 frame = pd.read_sql(text(bounded), connection)
         finally:
             engine.dispose()
@@ -1257,7 +1297,7 @@ def execute_query(
             connection.execute("SET threads=2")
             used: set[str] = set()
             for source in sources:
-                for table_name, frame in source_frames(source).items():
+                for table_name, frame in source_frames(source, actor_id=actor_id).items():
                     if not len(frame.columns):
                         continue
                     base = _sanitize_table_name(table_name)
@@ -1299,6 +1339,9 @@ def execute_query(
             "workspace_id": workspace_id,
             "source_ids": source_ids,
             "actor_id": actor_id,
+            "policy_fingerprint": policy_fingerprint(
+                sources, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id),
+            ),
             "sql": statement,
             "referenced_tables": referenced_tables,
             "encoded_bytes": result_path.stat().st_size,

@@ -16,12 +16,24 @@ export const SourcesPanel = {
     cleanOps: { drop_duplicates: true, trim_text: true, fill_missing: false, winsorize: false },
     sourceSets: [], selectedSet: '',
     members: [], governance: { name: '', description: '', classification: 'internal', sensitivity: 'internal', retention_policy: '', restricted: false, authorized_user_ids: [] },
+    finePolicy: { table: '', rowColumn: '', everyoneValues: '', memberValues: {}, hiddenColumns: '' }, finePolicyDirty: false,
   }),
   computed: {
     state() { return this.ctx.state; },
     active() { return this.state.sources.find(item => item.id === this.activeId) || null; },
     hasDemoSource() { return this.state.sources.some(item => item.sample_seed?.id === 'instant_retail_city_pack'); },
     isWorkspaceOwner() { return !this.state.user || this.state.workspaceRole === 'owner'; },
+    policyMembers() { return this.members.length ? this.members : [{ user_id: 'local-default', name: '本地所有者' }]; },
+    advancedPolicy() {
+      const rows = this.active?.row_policy?.rules || [];
+      const columns = this.active?.column_policies?.rules || [];
+      const row = rows[0], column = columns[0];
+      const visiblePrincipals = new Set(['*', ...this.policyMembers.map(member => `user:${member.user_id}`)]);
+      return rows.length > 1 || columns.length > 1
+        || (row && column && row.table !== column.table)
+        || !!Object.keys(row?.allow || {}).find(key => !visiblePrincipals.has(key))
+        || !!Object.keys(column?.deny || {}).find(key => key !== '*');
+    },
     selectedCleanOpsCount() { return Object.values(this.cleanOps).filter(Boolean).length; },
   },
   watch: { 'state.sources': { handler(items) { if (!this.activeId && items.length) this.select(items[0].id); }, immediate: true } },
@@ -122,6 +134,16 @@ export const SourcesPanel = {
           this.previewTable = this.selectedTables[0] || allTables[0] || '';
         }
         this.governance = { name: source.name || '', description: source.description || '', classification: source.classification || 'internal', sensitivity: source.sensitivity || source.classification || 'internal', retention_policy: source.retention_policy || '', restricted: Array.isArray(source.authorized_user_ids), authorized_user_ids: [...(source.authorized_user_ids || [])] };
+        const row = source.row_policy?.rules?.[0] || {};
+        const column = source.column_policies?.rules?.[0] || {};
+        this.finePolicy = {
+          table: row.table !== '*' ? row.table || '' : column.table !== '*' ? column.table || '' : '',
+          rowColumn: row.column || '',
+          everyoneValues: (row.allow?.['*'] || []).join('，'),
+          memberValues: Object.fromEntries(this.policyMembers.map(member => [member.user_id, (row.allow?.[`user:${member.user_id}`] || []).join('，')])),
+          hiddenColumns: (column.deny?.['*'] || []).join('，'),
+        };
+        this.finePolicyDirty = false;
         await this.loadPreview(this.previewTable);
       }, false);
     },
@@ -168,8 +190,24 @@ export const SourcesPanel = {
     async saveGovernance() {
       const payload = { name: this.governance.name, description: this.governance.description, classification: this.governance.classification, sensitivity: this.governance.sensitivity, retention_policy: this.governance.retention_policy };
       if (this.isWorkspaceOwner) payload.authorized_user_ids = this.governance.restricted ? this.governance.authorized_user_ids : null;
+      if (this.isWorkspaceOwner && this.finePolicyDirty && this.active?.kind !== 'warehouse') {
+        if (this.advancedPolicy) return this.ctx.fail(new Error('当前数据源使用多规则或角色级策略，请通过高级配置 API 编辑，避免覆盖现有规则'));
+        const table = this.finePolicy.table || '*';
+        const values = value => String(value || '').split(/[，,\n]/).map(item => item.trim()).filter(Boolean);
+        const allow = {};
+        if (values(this.finePolicy.everyoneValues).length) allow['*'] = values(this.finePolicy.everyoneValues);
+        for (const [id, text] of Object.entries(this.finePolicy.memberValues)) {
+          if (values(text).length) allow[`user:${id}`] = values(text);
+        }
+        if (this.finePolicy.rowColumn && !Object.keys(allow).length) return this.ctx.fail(new Error('启用行范围时，请为至少一位成员填写可见值'));
+        payload.row_policy = this.finePolicy.rowColumn ? { table, column: this.finePolicy.rowColumn, allow } : null;
+        const hidden = values(this.finePolicy.hiddenColumns);
+        payload.column_policies = hidden.length ? { table, deny: { '*': hidden } } : null;
+      }
       const result = await api(`/api/sources/${this.activeId}`, { method: 'PATCH', body: payload });
       const index = this.state.sources.findIndex(item => item.id === this.activeId); if (index >= 0) this.state.sources[index] = result.item;
+      this.finePolicyDirty = false;
+      await this.loadPreview(this.previewTable);
       this.ctx.toast('权限变更会立即作用于查询、Agent、结果和导出','治理策略已保存');
     },
     async remove(source) {
@@ -202,7 +240,12 @@ export const SourcesPanel = {
           <div v-if="detailTab==='preview' && preview" class="panel-stack"><div class="metric-strip"><div><small>{{ preview.sampled ? '预览行数' : '记录数' }}</small><b>{{ ctx.number(preview.rows) }}</b></div><div><small>字段数</small><b>{{ preview.columns.length }}</b></div><div><small>数据表</small><b>{{ preview.table }}</b></div></div><p v-if="preview.sampled" class="form-hint">远程数据库仅执行有上限的只读预览，不会将整张表加载到应用内存。</p><DataTable :rows="preview.data" :columns="preview.columns"/></div>
           <div v-if="detailTab==='profile'" class="panel-stack"><div v-if="profile" class="metric-strip"><div class="score"><small>质量评分</small><b>{{ profile.quality_score }}</b><em>/100</em></div><div><small>缺失单元格</small><b>{{ ctx.number(profile.missing_cells) }}</b></div><div><small>重复记录</small><b>{{ ctx.number(profile.duplicate_rows) }}</b></div><div><small>数值字段</small><b>{{ profile.numeric_columns.length }}</b></div></div><DataTable v-if="profile" :rows="profile.columns"/><EmptyState v-else icon="chart" title="尚未生成画像" text="点击“质量画像”即可检查缺失、重复、分布和异常值。"/></div>
           <div v-if="detailTab==='clean'" class="panel-stack"><section class="clean-workbench"><div class="clean-hero"><span class="clean-hero__icon"><Icon name="workflow" :size="24"/></span><div class="clean-hero__copy"><span class="eyebrow">CLEANING WORKFLOW</span><h3>生成标准化派生数据集</h3><p>把常用清洗动作组织为可审计的数据处理流；原始文件不被覆盖，生成后的派生数据集会自动加入当前分析。</p></div><div class="clean-hero__status"><StatusPill status="ready" label="非破坏处理"/><b>{{ selectedCleanOpsCount }}</b><small>已选策略</small></div></div><div class="clean-process-strip"><article><small>输入资产</small><b>{{ active.name }}</b><span>{{ active.filename || preview?.table || '当前数据源' }}</span></article><article><small>处理方式</small><b>派生生成</b><span>保留原始数据与处理痕迹</span></article><article><small>输出范围</small><b>当前会话</b><span>完成后自动加入分析上下文</span></article></div><div class="clean-section-title"><div><b>处理策略</b><span>按业务场景选择需要执行的质量修正动作</span></div><small>建议先做轻量清洗，再查看数据质量画像</small></div><div class="clean-option-grid"><label class="clean-option-card" :class="{active:cleanOps.drop_duplicates}"><input v-model="cleanOps.drop_duplicates" type="checkbox"><span class="clean-option-card__mark"><Icon name="check" :size="18"/></span><span><b>删除重复记录</b><small>按完整行识别重复样本，保留首条有效记录。</small></span></label><label class="clean-option-card" :class="{active:cleanOps.trim_text}"><input v-model="cleanOps.trim_text" type="checkbox"><span class="clean-option-card__mark"><Icon name="edit" :size="18"/></span><span><b>清理文本空白</b><small>去除字段前后空格，减少同名项与分组误差。</small></span></label><label class="clean-option-card" :class="{active:cleanOps.fill_missing}"><input v-model="cleanOps.fill_missing" type="checkbox"><span class="clean-option-card__mark"><Icon name="table" :size="18"/></span><span><b>填补缺失值</b><small>数值字段使用中位数，文本字段使用众数补齐。</small></span></label><label class="clean-option-card" :class="{active:cleanOps.winsorize}"><input v-model="cleanOps.winsorize" type="checkbox"><span class="clean-option-card__mark"><Icon name="chart" :size="18"/></span><span><b>异常缩尾处理</b><small>对数值列执行 1%–99% 分位缩尾，降低极端值干扰。</small></span></label></div><footer class="clean-footer"><p><b>输出规则</b><span>生成新数据集，不覆盖原始数据；可继续用于预览、指标和智能分析。</span></p><button class="button button--primary" :disabled="!selectedCleanOpsCount" @click="applyClean"><Icon name="workflow"/>生成派生数据集</button></footer></section></div>
-          <div v-if="detailTab==='governance'" class="panel-stack"><div class="settings-card"><h3>数据资产信息</h3><p>这些策略会贯穿预览、查询、Agent、派生表、看板与导出。</p><div class="form-grid"><label><span>名称</span><input v-model.trim="governance.name"></label><label><span>分类</span><select v-model="governance.classification"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>敏感级别</span><select v-model="governance.sensitivity"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>保留策略</span><input v-model="governance.retention_policy" placeholder="例如：financial-7y"></label><label class="span-2"><span>资产说明</span><textarea v-model="governance.description"></textarea></label></div></div><div class="settings-card"><h3>细粒度访问范围</h3><p v-if="isWorkspaceOwner">留空表示工作空间成员按角色访问；开启后只有勾选成员可看到并使用。当前所有者必须保留访问权。</p><p v-else>仅工作空间所有者可修改成员白名单；你仍可维护非权限类资产信息。</p><label class="check-control"><input type="checkbox" v-model="governance.restricted" :disabled="!isWorkspaceOwner">启用数据源成员白名单</label><div v-if="governance.restricted" class="option-grid governance-members"><label v-for="member in members" :key="member.user_id"><input type="checkbox" :value="member.user_id" v-model="governance.authorized_user_ids" :disabled="!isWorkspaceOwner">{{ member.name || member.email }} <small>{{ member.role }}</small></label></div><button class="button button--primary" @click="saveGovernance">保存治理策略</button></div></div>
+          <div v-if="detailTab==='governance'" class="panel-stack">
+            <div class="settings-card"><h3>数据资产信息</h3><p>这些策略会贯穿预览、查询、Agent、派生表、看板与导出。</p><div class="form-grid"><label><span>名称</span><input v-model.trim="governance.name"></label><label><span>分类</span><select v-model="governance.classification"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>敏感级别</span><select v-model="governance.sensitivity"><option value="public">公开</option><option value="internal">内部</option><option value="confidential">机密</option><option value="restricted">严格受限</option></select></label><label><span>保留策略</span><input v-model="governance.retention_policy" placeholder="例如：financial-7y"></label><label class="span-2"><span>资产说明</span><textarea v-model="governance.description"></textarea></label></div></div>
+            <div class="settings-card"><h3>数据源成员范围</h3><p v-if="isWorkspaceOwner">开启后只有勾选成员可使用该数据源。</p><p v-else>仅工作空间所有者可修改成员白名单。</p><label class="check-control"><input type="checkbox" v-model="governance.restricted" :disabled="!isWorkspaceOwner">启用成员白名单</label><div v-if="governance.restricted" class="option-grid governance-members"><label v-for="member in policyMembers" :key="member.user_id"><input type="checkbox" :value="member.user_id" v-model="governance.authorized_user_ids" :disabled="!isWorkspaceOwner">{{ member.name || member.email || member.user_id }} <small>{{ member.role }}</small></label></div></div>
+            <div v-if="isWorkspaceOwner && active.kind!=='warehouse'" class="settings-card"><h3>行与字段权限</h3><p v-if="advancedPolicy">当前数据源使用多规则或角色级策略。此页面可查看资产信息；行列规则请通过高级配置 API 维护，以免覆盖已有规则。</p><template v-else><p>行范围先于统计计算生效；隐藏字段不会进入查询、预览和分析。留空即可取消对应限制。</p><div class="form-grid"><label><span>数据表</span><select v-model="finePolicy.table" @change="finePolicyDirty=true"><option value="">全部表</option><option v-for="table in active.tables||[]" :key="table.name" :value="table.name">{{ table.name }}</option></select></label><label><span>行范围字段</span><input v-model.trim="finePolicy.rowColumn" @input="finePolicyDirty=true" placeholder="例如 region"></label><label class="span-2"><span>所有成员可见值（逗号分隔）</span><input v-model.trim="finePolicy.everyoneValues" @input="finePolicyDirty=true" placeholder="例如 公共区域"></label><label v-for="member in policyMembers" :key="member.user_id"><span>{{ member.name || member.email || member.user_id }} 可见值</span><input v-model.trim="finePolicy.memberValues[member.user_id]" @input="finePolicyDirty=true" placeholder="例如 华东，华南"></label><label class="span-2"><span>隐藏字段（逗号分隔）</span><input v-model.trim="finePolicy.hiddenColumns" @input="finePolicyDirty=true" placeholder="例如 customer_phone，cost"></label></div></template></div>
+            <button class="button button--primary" @click="saveGovernance">保存治理策略</button>
+          </div>
         </main>
         <main v-else class="detail-pane detail-pane--empty"><EmptyState icon="database" title="选择一个数据源" text="查看结构、执行只读查询、维护治理策略。"><button class="button button--primary" @click="openConnect()">新建连接</button></EmptyState></main>
       </div>

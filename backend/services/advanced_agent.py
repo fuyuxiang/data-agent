@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import sqlglot
+from sqlglot import exp as sql_exp
 from flask import Flask, current_app
 
 from ..agent.contracts import ToolSpec
@@ -18,7 +20,8 @@ from ..agent.store import RunStore
 from ..agent.tools import ToolExecutor, ToolRegistry
 from ..core.database import Database, utcnow
 from .agent_tools import AgentToolContext, execute_tool, tool_schemas
-from .authorization import require_sources_access
+from .authorization import actor_role, require_sources_access
+from .data_policy import policy_fingerprint
 from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefStore
 from .data_plane.factory import livy_adapter, sandbox_client, trino_adapter
 from .datasets import frame_records
@@ -26,6 +29,7 @@ from .jobs import register_job_handler
 from .hooks import dispatch_hooks
 from .models import resolve_provider
 from .results.manifests import ResultService
+from .sql_security import validate_read_only_sql
 from .skills import get_skill, public_skill
 from .usage import ensure_quota, record_usage
 from .validation.engine import Rule, ValidationEngine, outcome
@@ -36,17 +40,26 @@ FORMAL_AGENT_TOOLS = frozenset({
     "query_metric", "query_data", "profile_data",
     "run_analysis", "select_chart", "generate_chart", "memory_read", "ask_user",
     "structured_output", "load_analysis_skill", "read_tool_result", "validate_result",
-    "update_plan",
+    "update_plan", "search_mcp_tools",
     "warehouse_catalog", "warehouse_explain", "warehouse_query", "warehouse_spark_submit",
 })
 
 
 def _source_authorized(database: Database, run: dict[str, Any]) -> bool:
     try:
-        require_sources_access(
+        sources = require_sources_access(
             database, run["source_scope"], workspace_id=run["workspace_id"],
             actor_id=run["actor_id"], action="analyze",
         )
+        current = policy_fingerprint(
+            sources, actor_id=run["actor_id"],
+            role=actor_role(database, run["workspace_id"], run["actor_id"]),
+        )
+        recorded = run.get("policy_version")
+        if recorded != current and (recorded != "agent-policy-v1" or any(
+            source.get("row_policy") or source.get("column_policies") for source in sources
+        )):
+            return False
     except (FileNotFoundError, PermissionError):
         return False
     return True
@@ -71,6 +84,15 @@ def _dataset_ref(database: Database, run: dict[str, Any], result: dict[str, Any]
         sample_metadata={}, row_count=result.get("rows"), encoded_bytes=encoded_bytes,
         preview_ref=result["id"], provenance_ref=f"query:{result['id']}", retention_until=None,
         owner_id=run["actor_id"], acl={"workspace_id": run["workspace_id"], "actor_ids": [run["actor_id"]]},
+    )
+
+
+def _result_policy_fingerprint(database: Database, run: dict[str, Any], source_ids: list[str]) -> str:
+    sources = require_sources_access(
+        database, source_ids, workspace_id=run["workspace_id"], actor_id=run["actor_id"], action="read",
+    )
+    return policy_fingerprint(
+        sources, actor_id=run["actor_id"], role=actor_role(database, run["workspace_id"], run["actor_id"]),
     )
 
 
@@ -133,6 +155,24 @@ def _warehouse_engine(database: Database, run: dict[str, Any], engine_id: str):
     return source, trino_adapter(database, run["workspace_id"], str(source["engine_id"]))
 
 
+def _scoped_warehouse_sql(sql: str, *, catalog: str, schema: str) -> str:
+    """Bind every base relation to the selected warehouse namespace."""
+    statement = sqlglot.parse_one(validate_read_only_sql(sql, "trino"), read="trino")
+    cte_names = {cte.alias_or_name.lower() for cte in statement.find_all(sql_exp.CTE)}
+    for table in statement.find_all(sql_exp.Table):
+        if not table.name:
+            raise PermissionError("数仓查询包含无法确认范围的数据表")
+        if table.name.lower() in cte_names and not table.db and not table.catalog:
+            continue
+        if table.catalog and table.catalog.lower() != catalog.lower():
+            raise PermissionError("数仓查询超出已选目录")
+        if table.db and table.db.lower() != schema.lower():
+            raise PermissionError("数仓查询超出已选模式")
+        table.set("catalog", sql_exp.to_identifier(catalog))
+        table.set("db", sql_exp.to_identifier(schema))
+    return statement.sql(dialect="trino")
+
+
 def materialize_trino_preview(
     database: Database, run: dict[str, Any], query: dict[str, Any], *, source_ids: list[str],
 ) -> tuple[dict[str, Any] | None, DatasetRef | None]:
@@ -152,6 +192,8 @@ def materialize_trino_preview(
     frame.to_csv(path, index=False)
     result = database.put("query_results", {
         "id": result_id, "workspace_id": run["workspace_id"], "source_ids": source_ids,
+        "actor_id": run["actor_id"],
+        "policy_fingerprint": _result_policy_fingerprint(database, run, source_ids),
         "sql": "", "rows": len(frame), "returned_rows": len(frame), "total_rows": len(frame),
         "completeness": "complete", "accuracy": "exact", "columns": [str(value) for value in frame.columns],
         "data": frame.where(pd.notna(frame), None).to_dict(orient="records"), "path": str(path),
@@ -164,12 +206,23 @@ def materialize_trino_preview(
 
 def _warehouse_tool(database: Database, run: dict[str, Any], name: str, args: dict[str, Any]) -> dict[str, Any]:
     source, adapter = _warehouse_engine(database, run, str(args.get("engine_id") or ""))
+    allowed_catalog = str(source.get("catalog") or "")
+    allowed_schema = str(source.get("schema") or "")
+    if not allowed_catalog or not allowed_schema:
+        raise PermissionError("数仓来源未限定目录与模式")
     if name == "warehouse_catalog":
+        if args.get("catalog") and str(args["catalog"]).lower() != allowed_catalog.lower():
+            raise PermissionError("数仓目录超出已选数据源")
+        if args.get("schema") and str(args["schema"]).lower() != allowed_schema.lower():
+            raise PermissionError("数仓模式超出已选数据源")
         return adapter.discover(
-            catalog=args.get("catalog"), schema=args.get("schema"),
+            catalog=allowed_catalog, schema=allowed_schema,
             limit=int(args.get("limit") or 100), cursor=str(args.get("cursor") or ""),
         )
-    estimate = adapter.estimate(str(args.get("sql") or ""))
+    scoped_sql = _scoped_warehouse_sql(
+        str(args.get("sql") or ""), catalog=allowed_catalog, schema=allowed_schema,
+    )
+    estimate = adapter.estimate(scoped_sql)
     if name == "warehouse_explain":
         return estimate
     engine = database.get("warehouse_engines", source["engine_id"], workspace_id=run["workspace_id"]) or {}
@@ -181,7 +234,7 @@ def _warehouse_tool(database: Database, run: dict[str, Any], name: str, args: di
     if estimated_bytes is None and not engine.get("native_limits_confirmed"):
         raise RuntimeError("扫描成本未知且未确认 Trino 资源组原生硬限制，拒绝提交")
     submitted = adapter.submit(
-        str(args.get("sql") or ""), run_id=run["id"], action_id=database.new_id("external"),
+        scoped_sql, run_id=run["id"], action_id=database.new_id("external"),
         result_mode=str(args.get("result_mode") or "preview"),
         source_refs=[source["id"]],
     )
@@ -301,6 +354,8 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     derived_id = database.new_id("qry")
     derived_result = database.put("query_results", {
         "id": derived_id, "workspace_id": run["workspace_id"],
+        "actor_id": run["actor_id"],
+        "policy_fingerprint": _result_policy_fingerprint(database, run, list(ref.source_refs)),
         "source_ids": list(ref.source_refs), "sql": "", "rows": len(frame),
         "returned_rows": len(frame), "total_rows": len(frame), "completeness": "complete",
         "accuracy": "exact", "columns": [str(value) for value in frame.columns],
@@ -402,15 +457,24 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         actor_id=run["actor_id"],
     )
     registry = ToolRegistry()
+    approved_mcp = {
+        (str(server["id"]), str(name))
+        for server in database.list("mcp_servers", workspace_id=run["workspace_id"], limit=5000)
+        if server.get("enabled", True) and server.get("status") == "connected"
+        for name in server.get("formal_read_tools") or []
+    }
     for raw in tool_schemas(context):
         function = raw.get("function") or {}
         name = str(function.get("name") or "")
-        if name not in FORMAL_AGENT_TOOLS or name in {"run_analysis", "validate_result"}:
+        mcp_identity = context.mcp_names.get(name)
+        if (name not in FORMAL_AGENT_TOOLS and mcp_identity not in approved_mcp) or name in {"run_analysis", "validate_result"}:
             continue
         spec = ToolSpec(
             id=name, description=str(function.get("description") or name),
             input_schema=function.get("parameters") or {"type": "object", "properties": {}},
-            mutability="read", timeout_seconds=120, cancellable=name in {"query_data", "run_analysis"},
+            mutability="external" if mcp_identity else "read",
+            idempotency="unknown" if mcp_identity else "idempotent",
+            timeout_seconds=120, cancellable=name in {"query_data", "run_analysis"},
         )
 
         def handler(arguments: dict[str, Any], tool_name: str = name):
@@ -426,6 +490,14 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
                 reason = next((item.get("output") for item in before if item.get("rejected")), "策略拒绝")
                 raise PermissionError(str(reason or "Hook 策略拒绝本次工具调用"))
             value, events = execute_tool(tool_name, arguments, context)
+            if tool_name in context.mcp_names:
+                encoded = json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+                if len(encoded) > 64 * 1024:
+                    raise ValueError("MCP 工具结果超过正式分析上下文上限")
+                value = {
+                    "content": value, "completeness": "unknown", "external_unverified": True,
+                    "provenance_ref": f"mcp:{context.mcp_names[tool_name][0]}:{context.mcp_names[tool_name][1]}",
+                }
             if tool_name in {"query_data", "query_metric"}:
                 result_id = (
                     value.get("id") if tool_name == "query_data"
@@ -464,7 +536,10 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         input_schema={
             "type": "object", "properties": {
                 "dataset_ref_id": {"type": "string"},
-                "method": {"type": "string", "enum": ["describe", "correlation", "grouped_summary"]},
+                "method": {"type": "string", "enum": [
+                    "describe", "correlation", "grouped_summary", "decile", "ab_test",
+                    "linear_regression", "kmeans", "anomaly", "trend_forecast",
+                ]},
                 "code": {"type": "string"}, "params": {"type": "object"},
             }, "required": ["dataset_ref_id"],
         }, mutability="read", timeout_seconds=120, cancellable=True,
@@ -575,7 +650,15 @@ def available_formal_tools(database: Database, workspace_id: str, session_id: st
         for item in database.list("warehouse_engines", workspace_id=workspace_id, limit=5000)
     ):
         remote.add("warehouse_spark_submit")
-    return sorted((discovered & FORMAL_AGENT_TOOLS) | {"validate_result", "update_plan"} | remote)
+    approved_mcp = {
+        exposed for exposed, identity in context.mcp_names.items()
+        if (server := database.get("mcp_servers", identity[0], workspace_id=workspace_id))
+        and identity[1] in set(server.get("formal_read_tools") or [])
+    }
+    available = (discovered & FORMAL_AGENT_TOOLS) | {"validate_result", "update_plan"} | remote
+    if not approved_mcp:
+        available.discard("search_mcp_tools")
+    return sorted(available | approved_mcp)
 
 
 def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) -> dict:
@@ -660,6 +743,14 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         if skill:
             selected_skills.append(skill)
     governed_skills = [public_skill(skill, include_prompt=True) for skill in selected_skills]
+    analysis_context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    agent_snapshot = analysis_context.get("agent_snapshot") or {}
+    if str(agent_snapshot.get("instruction") or "").strip():
+        governed_skills.insert(0, {
+            "id": f"agent:{agent_snapshot['id']}:{agent_snapshot['version']}",
+            "source": "published_agent", "description": str(agent_snapshot.get("name") or "分析智能体"),
+            "instruction": str(agent_snapshot["instruction"]),
+        })
     from .memory import render_memory_context, schedule_memory_extraction
 
     question = str((store.latest_contract(run_id) or {}).get("payload", {}).get("objective") or "")

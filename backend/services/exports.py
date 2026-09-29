@@ -11,7 +11,8 @@ from pptx.dml.color import RGBColor
 from pptx.util import Inches as PptInches, Pt
 
 from ..core.database import Database, utcnow
-from .authorization import require_result_access, require_sources_access
+from .authorization import actor_role, require_result_access, require_sources_access
+from .data_policy import policy_fingerprint
 
 
 def _db() -> Database:
@@ -169,8 +170,12 @@ def _render_ppt_outline(payload: dict, path: Path) -> int:
     return len(slides)
 
 
-def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: dict | None = None) -> dict:
+def _artifact(path: Path, kind: str, workspace_id: str, title: str, actor_id: str, metadata: dict | None = None) -> dict:
     metadata = metadata or {}
+    source_ids = [str(value) for value in metadata.get("source_ids") or []]
+    sources = require_sources_access(
+        _db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="export",
+    )
     return _db().put(
         "artifacts",
         {
@@ -182,7 +187,11 @@ def _artifact(path: Path, kind: str, workspace_id: str, title: str, metadata: di
             "path": str(path),
             "size": path.stat().st_size,
             "metadata": metadata,
-            "source_ids": [str(value) for value in metadata.get("source_ids") or []],
+            "source_ids": source_ids,
+            "actor_id": actor_id,
+            "policy_fingerprint": policy_fingerprint(
+                sources, actor_id=actor_id, role=actor_role(_db(), workspace_id, actor_id),
+            ) if sources else None,
             "verification_status": "unverified",
             "status": "ready",
             "created_at": utcnow(),
@@ -259,7 +268,7 @@ def export_data(payload: dict, workspace_id: str, actor_id: str = "local-default
                 meta.column_dimensions["B"].width = 100
     else:
         raise ValueError("数据导出格式必须是 csv 或 xlsx")
-    return _artifact(path, kind, workspace_id, title, {
+    return _artifact(path, kind, workspace_id, title, actor_id, {
         "rows": sum(len(value) for value in normalized_frames.values()),
         "tables": list(normalized_frames), "columns": list(frame.columns), "sql": sql,
         "source_ids": source_ids,
@@ -326,7 +335,7 @@ def export_report(payload: dict, workspace_id: str, actor_id: str = "local-defau
         if payload.get("slides"):
             slide_count = _render_ppt_outline(payload, path)
             _mark_draft_ppt(path)
-            return _artifact(path, kind, workspace_id, title, {
+            return _artifact(path, kind, workspace_id, title, actor_id, {
                 "rows": len(frame), "sql": sql, "slides": slide_count,
                 "color_scheme": payload.get("color_scheme") or "mckinsey",
                 "source_ids": source_ids,
@@ -365,6 +374,6 @@ def export_report(payload: dict, workspace_id: str, actor_id: str = "local-defau
         _mark_draft_ppt(path)
     else:
         raise ValueError("报告格式必须是 docx 或 pptx")
-    return _artifact(path, kind, workspace_id, title, {
+    return _artifact(path, kind, workspace_id, title, actor_id, {
         "rows": len(frame), "sql": sql, "sections": len(sections), "source_ids": source_ids,
     })

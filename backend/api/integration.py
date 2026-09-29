@@ -149,6 +149,15 @@ def update_mcp_server(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
     assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     payload = body()
+    if "formal_read_tools" in payload:
+        require_workspace_access(server["workspace_id"], owner=True)
+        names = payload["formal_read_tools"]
+        if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+            raise ValueError("正式 Agent 工具授权必须是工具名称数组")
+        discovered = {str(tool.get("name") or "") for tool in server.get("tools") or []}
+        if set(names) - discovered:
+            raise ValueError("只能授权当前服务已发现的工具")
+        payload["formal_read_tools"] = list(dict.fromkeys(names))
     resulting_transport = str(payload.get("transport") or server.get("transport") or "streamable-http")
     if resulting_transport == "stdio":
         require_system_owner()
@@ -162,9 +171,16 @@ def update_mcp_server(server_id: str):
             "headers": headers if headers is not None else current_secret.get("headers", {}),
             "env": environment if environment is not None else current_secret.get("env", {}),
         })
-    server.update({key: value for key, value in payload.items() if key in {"name", "url", "transport", "command", "args", "enabled", "credential"}})
+    server.update({key: value for key, value in payload.items() if key in {"name", "url", "transport", "command", "args", "enabled", "credential", "formal_read_tools"}})
     item = db().put("mcp_servers", server, workspace_id=server["workspace_id"])
-    get_mcp_manager().remove_server(server_id)
+    if "formal_read_tools" in payload:
+        db().audit(
+            "mcp.formal_tools_updated", workspace_id=server["workspace_id"], actor=current_user_id(),
+            object_type="mcp_server", object_id=server_id,
+            detail={"formal_read_tools": server["formal_read_tools"]},
+        )
+    if any(key in payload for key in {"url", "transport", "command", "args", "enabled", "credential"}):
+        get_mcp_manager().remove_server(server_id)
     return ok(item=_public_mcp(item))
 
 

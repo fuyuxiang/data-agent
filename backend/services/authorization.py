@@ -31,6 +31,13 @@ def _workspace_membership(database: Database, workspace_id: str, actor_id: str) 
     )
 
 
+def actor_role(database: Database, workspace_id: str, actor_id: str) -> str:
+    member = _workspace_membership(database, workspace_id, actor_id)
+    if not member:
+        raise PermissionError("用户不属于当前工作空间")
+    return str(member.get("role") or "viewer")
+
+
 def decide_source_access(
     database: Database,
     source: dict | None,
@@ -38,6 +45,7 @@ def decide_source_access(
     workspace_id: str,
     actor_id: str,
     action: str = "read",
+    _depth: int = 0,
 ) -> SourceAccessDecision:
     source_id = str((source or {}).get("id") or "")
     actor_id = str(actor_id or "")
@@ -57,6 +65,24 @@ def decide_source_access(
     allowed_users = source.get("authorized_user_ids")
     if isinstance(allowed_users, list) and actor_id not in {str(value) for value in allowed_users}:
         return SourceAccessDecision(False, "source_acl", workspace_id, source_id, actor_id, action)
+    lineage = source.get("lineage") or {}
+    parent_ids = lineage.get("source_ids") or []
+    if parent_ids:
+        if _depth >= 8:
+            return SourceAccessDecision(False, "lineage_depth", workspace_id, source_id, actor_id, action)
+        parents = [database.get("sources", str(parent_id), workspace_id=workspace_id) for parent_id in parent_ids]
+        if any(not decide_source_access(
+            database, parent, workspace_id=workspace_id, actor_id=actor_id,
+            action="read", _depth=_depth + 1,
+        ).allowed for parent in parents):
+            return SourceAccessDecision(False, "parent_source_denied", workspace_id, source_id, actor_id, action)
+        from .data_policy import policy_fingerprint
+
+        recorded = lineage.get("policy_fingerprint")
+        if recorded and recorded != policy_fingerprint(parents, actor_id=actor_id, role=role):
+            return SourceAccessDecision(False, "parent_policy_changed", workspace_id, source_id, actor_id, action)
+        if not recorded and any(parent.get("row_policy") or parent.get("column_policies") for parent in parents):
+            return SourceAccessDecision(False, "parent_policy_unknown", workspace_id, source_id, actor_id, action)
     return SourceAccessDecision(True, "allowed", workspace_id, source_id, actor_id, action)
 
 
@@ -161,10 +187,19 @@ def require_result_access(
 ) -> dict:
     if not result or str(result.get("workspace_id") or "default") != workspace_id:
         raise FileNotFoundError("查询结果不存在")
-    require_sources_access(
+    sources = require_sources_access(
         database, result.get("source_ids") or [], workspace_id=workspace_id,
         actor_id=actor_id, action=action,
     )
+    from .data_policy import policy_fingerprint
+
+    if sources:
+        current = policy_fingerprint(sources, actor_id=actor_id, role=actor_role(database, workspace_id, actor_id))
+        recorded = result.get("policy_fingerprint")
+        if recorded and recorded != current:
+            raise PermissionError("数据权限已变更，请重新运行查询")
+        if not recorded and any(source.get("row_policy") or source.get("column_policies") for source in sources):
+            raise PermissionError("旧结果缺少细粒度权限快照，请重新运行查询")
     return result
 
 

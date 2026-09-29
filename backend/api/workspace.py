@@ -122,6 +122,13 @@ def _public_source(item: dict) -> dict:
     value = dict(item)
     value.pop("path", None)
     value.pop("credential", None)
+    value.pop("row_policy", None)
+    value.pop("column_policies", None)
+    if item.get("row_policy") or item.get("column_policies"):
+        value["tables"] = [
+            {"name": table.get("name"), "source_name": table.get("source_name")}
+            for table in item.get("tables") or []
+        ]
     return value
 
 

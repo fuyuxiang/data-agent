@@ -12,14 +12,18 @@ from typing import Any
 
 from docx import Document
 from docx.shared import Inches
+from pptx import Presentation
+from pptx.util import Inches as PptInches, Pt
 from flask import current_app
 
+from ...agent.store import RunStore
 from ...core.database import Database, utcnow
 from ..security import SecretVault
 from .manifests import ResultService
 
 
-ARTIFACT_KINDS = ("summary_docx", "report_docx", "dashboard_png")
+ARTIFACT_KINDS = ("summary_docx", "report_docx", "dashboard_png", "data_xlsx", "report_pptx")
+DEFAULT_ARTIFACT_KINDS = ARTIFACT_KINDS[:3]
 
 
 def _sha256(path: Path) -> str:
@@ -46,12 +50,17 @@ def _record_artifact(
     run_id: str, publication: dict, manifest: dict,
 ) -> dict[str, Any]:
     digest = _sha256(path)
+    run = RunStore(database).get_run(run_id, workspace_id=workspace_id)
+    if not run:
+        raise FileNotFoundError("分析任务不存在")
+    source_scope = run.get("source_scope") or []
     return database.put("artifacts", {
         "id": database.new_id("art"), "workspace_id": workspace_id,
         "run_id": run_id, "publication_id": publication["id"], "manifest_id": manifest["id"],
         "manifest_version": manifest["version"], "title": path.stem, "kind": kind,
         "filename": path.name, "path": str(path), "size": path.stat().st_size,
         "sha256": digest, "status": "ready", "immutable": True,
+        "source_ids": list(source_scope),
     }, workspace_id=workspace_id)
 
 
@@ -154,7 +163,7 @@ def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
 
 def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: str) -> dict[str, Any]:
     if kind not in ARTIFACT_KINDS:
-        raise ValueError("成果类型必须是 summary_docx、report_docx 或 dashboard_png")
+        raise ValueError("成果类型无效")
     publication, manifest = _published(database, run_id, workspace_id)
     existing = next((
         item for item in database.list("artifacts", workspace_id=workspace_id, limit=5000)
@@ -169,6 +178,63 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
     if kind == "dashboard_png":
         path = export_dir / f"{base}_dashboard.png"
         _render_png(path, payload.get("charts") or [])
+    elif kind == "data_xlsx":
+        import pandas as pd
+
+        path = export_dir / f"{base}_data.xlsx"
+        table = next((item for item in payload.get("tables") or [] if item.get("result_id")), None)
+        if not table or table.get("completeness") != "complete":
+            raise ValueError("已发布成果缺少完整的可导出明细")
+        result = database.get("query_results", str(table["result_id"]), workspace_id=workspace_id)
+        if not result or result.get("completeness") != "complete":
+            raise ValueError("成果明细不可用")
+        result_path = Path(str(result.get("path") or "")).resolve()
+        if export_dir.resolve() not in result_path.parents or not result_path.is_file() or result_path.is_symlink():
+            raise PermissionError("成果明细路径无效")
+        if int(result.get("rows") or 0) > 1_048_575:
+            raise ValueError("明细行数超过 Excel 上限")
+        frame = pd.read_csv(result_path)
+        # Uploaded/source text is untrusted. Prevent spreadsheet clients from
+        # interpreting a data cell as a formula when the workbook is opened.
+        for column in frame.select_dtypes(include=["object", "string"]).columns:
+            frame[column] = frame[column].map(
+                lambda value: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value,
+            )
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            pd.DataFrame([
+                {"项目": "成果版本", "内容": str(manifest["version"])},
+                {"项目": "结论", "内容": str(payload.get("summary") or "")},
+                {"项目": "证据引用", "内容": ", ".join(payload.get("evidence_refs") or [])},
+            ]).to_excel(writer, sheet_name="成果说明", index=False)
+            frame.to_excel(writer, sheet_name="验证数据", index=False)
+    elif kind == "report_pptx":
+        path = export_dir / f"{base}_report.pptx"
+        slides = Presentation()
+        cover = slides.slides.add_slide(slides.slide_layouts[0])
+        cover.shapes.title.text = "数据分析报告"
+        cover.placeholders[1].text = f"成果版本 {manifest['version']} · {manifest['created_at']}"
+        summary = slides.slides.add_slide(slides.slide_layouts[1])
+        summary.shapes.title.text = "经验证结论"
+        summary.placeholders[1].text = str(payload.get("summary") or "")[:3000]
+        png_path = export_dir / f"{base}_dashboard_embed.png"
+        _render_png(png_path, payload.get("charts") or [])
+        chart_slide = slides.slides.add_slide(slides.slide_layouts[5])
+        chart_slide.shapes.title.text = "数据看板"
+        chart_slide.shapes.add_picture(str(png_path), PptInches(0.7), PptInches(1.2), width=PptInches(8.5))
+        evidence = slides.slides.add_slide(slides.slide_layouts[1])
+        evidence.shapes.title.text = "证据与限制"
+        lines = [
+            "数据引用：" + ", ".join(payload.get("evidence_refs") or []),
+            *(str(item) for item in payload.get("limitations") or []),
+        ]
+        evidence.placeholders[1].text = "\n".join(lines)[:3000]
+        for slide in slides.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.size = Pt(20) if shape == slide.shapes.title else Pt(14)
+        slides.save(path)
     else:
         path = export_dir / f"{base}_{'summary' if kind == 'summary_docx' else 'report'}.docx"
         document = Document()
@@ -212,7 +278,7 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
 
 
 def generate_artifacts(database: Database, run_id: str, workspace_id: str, kinds: list[str] | None = None) -> list[dict]:
-    requested = list(dict.fromkeys(kinds or ARTIFACT_KINDS))
+    requested = list(dict.fromkeys(kinds or DEFAULT_ARTIFACT_KINDS))
     return [generate_artifact(database, run_id, workspace_id, kind) for kind in requested]
 
 

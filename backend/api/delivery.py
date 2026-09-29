@@ -7,7 +7,8 @@ from flask import Blueprint, current_app, request, send_file
 
 from ..agent.store import RunStore
 from ..services.exports import export_data, export_report
-from ..services.authorization import require_sources_access
+from ..services.authorization import actor_role, require_sources_access
+from ..services.data_policy import policy_fingerprint
 from ..services.results.delivery import ARTIFACT_KINDS, generate_artifacts, prepare_eml, send_email
 from ..services.results.manifests import ResultService
 from ..services.saas import assert_feature_enabled
@@ -44,8 +45,32 @@ def create_report_export():
 def _public_artifact(item: dict) -> dict:
     value = dict(item)
     value.pop("path", None)
+    value.pop("policy_fingerprint", None)
     value["download_url"] = f"/api/artifacts/{item['id']}/download"
     return value
+
+
+def _artifact_policy_access(item: dict, *, action: str = "read", source_ids: list[str] | None = None) -> None:
+    wid = item["workspace_id"]
+    actor = current_user_id()
+    owner = str(item.get("actor_id") or "")
+    if not item.get("run_id") and (
+        owner and owner != actor or not owner and actor_role(db(), wid, actor) != "owner"
+    ):
+        raise FileNotFoundError("成果不存在")
+    sources = require_sources_access(
+        db(), source_ids if source_ids is not None else item.get("source_ids") or [],
+        workspace_id=wid, actor_id=actor, action=action,
+    )
+    if not item.get("run_id") and sources:
+        current = policy_fingerprint(
+            sources, actor_id=actor, role=actor_role(db(), wid, actor),
+        )
+        recorded = item.get("policy_fingerprint")
+        if (recorded and recorded != current) or (not recorded and any(
+            source.get("row_policy") or source.get("column_policies") for source in sources
+        )):
+            raise PermissionError("数据权限已变更，请重新导出成果")
 
 
 def _actor_artifacts(items: list[dict]) -> list[dict]:
@@ -62,12 +87,15 @@ def _actor_artifacts(items: list[dict]) -> list[dict]:
         if item.get("run_id") and str(item["run_id"]) not in owned:
             continue
         try:
-            require_sources_access(
-                db(), item.get("source_ids") or [],
-                workspace_id=item.get("workspace_id", workspace_id()), actor_id=actor_id,
-            )
+            _artifact_policy_access(item)
         except (FileNotFoundError, PermissionError):
             continue
+        if item.get("run_id"):
+            from ..services.advanced_agent import _source_authorized
+
+            run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"])
+            if not run or not _source_authorized(db(), run):
+                continue
         visible.append(item)
     return visible
 
@@ -82,14 +110,20 @@ def list_artifacts():
 @api_errors
 def download_artifact(artifact_id: str):
     item = require_workspace_record("artifacts", artifact_id)
-    require_sources_access(
-        db(), item.get("source_ids") or [], workspace_id=item["workspace_id"],
-        actor_id=current_user_id(), action="export",
-    )
+    source_ids = item.get("source_ids") or []
     if item.get("run_id"):
         run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"])
         if not run or run.get("actor_id") != current_user_id():
             raise FileNotFoundError("成果不存在")
+        # Older artifacts did not persist source_ids. Always use the run's
+        # current source scope so revocation also covers existing files.
+        source_ids = run.get("source_scope") or []
+    _artifact_policy_access(item, action="export", source_ids=source_ids)
+    if item.get("run_id"):
+        from ..services.advanced_agent import _source_authorized
+
+        if not _source_authorized(db(), run):
+            raise PermissionError("数据权限已变更，请重新运行分析")
     path = safe_child(current_app.config["SETTINGS"].export_dir, Path(item["path"]))
     if not path.exists():
         raise FileNotFoundError("成果文件已不存在")
@@ -104,6 +138,10 @@ def _analysis_run(run_id: str) -> dict:
         db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
         actor_id=current_user_id(), action="read",
     )
+    from ..services.advanced_agent import _source_authorized
+
+    if not _source_authorized(db(), run):
+        raise PermissionError("数据权限已变更，请重新发起分析")
     return run
 
 
@@ -207,12 +245,11 @@ def send_analysis_email(run_id: str):
 @api_errors
 def archive_artifact(artifact_id: str):
     item = require_workspace_record("artifacts", artifact_id)
-    require_sources_access(
-        db(), item.get("source_ids") or [], workspace_id=item["workspace_id"],
-        actor_id=current_user_id(), action="delete",
-    )
     if item.get("run_id"):
-        _analysis_run(str(item["run_id"]))
+        run = _analysis_run(str(item["run_id"]))
+        _artifact_policy_access(item, action="delete", source_ids=run.get("source_scope") or [])
+    else:
+        _artifact_policy_access(item, action="delete")
     if not db().archive("artifacts", artifact_id):
         raise FileNotFoundError("成果不存在")
     return ok(archived=True)
