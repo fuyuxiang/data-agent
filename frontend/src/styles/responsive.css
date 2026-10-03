@@ -1,0 +1,73 @@
+/* 响应式：只在断点处改变布局，不重复定义基础样式
+ *
+ * V1 的响应式文件在同一个断点里重复定义了同一个选择器，最终生效值取决于
+ * 书写顺序；V2 保证每个选择器在一个断点里只出现一次。
+ */
+
+@media (max-width: 1400px) {
+  .admin { grid-template-columns: 184px minmax(0, 1fr); gap: 22px; }
+  .builder { grid-template-columns: 200px minmax(0, 1fr) 300px; }
+  .metric-layout { grid-template-columns: minmax(0, 1fr) 340px; }
+}
+
+@media (max-width: 1200px) {
+  :root { --page-gutter: 24px; }
+
+  .builder { grid-template-columns: 190px minmax(0, 1fr); }
+  .builder__test { grid-column: 1 / -1; position: static; }
+  .metric-layout,
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .workbench__capabilities { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1024px) {
+  .app { grid-template-columns: var(--sidebar-collapsed) minmax(0, 1fr); }
+
+  .sidebar__name,
+  .nav-item span,
+  .nav-group__label,
+  .sidebar__recent,
+  .sidebar__user-meta,
+  .sidebar__new span { display: none; }
+
+  .sidebar__brand { justify-content: center; padding: 0; }
+  .nav-item { justify-content: center; padding: 0; }
+  .sidebar__new { justify-content: center; padding: 0; }
+  .sidebar__user { justify-content: center; }
+
+  .admin { grid-template-columns: minmax(0, 1fr); }
+  .admin__nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
+  .admin__nav-group { display: flex; gap: 4px; }
+  .admin__nav-group + .admin__nav-group { margin-top: 0; }
+  .admin__nav-label { display: none; }
+  .admin__nav-item { white-space: nowrap; }
+}
+
+@media (max-width: 860px) {
+  .workbench { padding: 32px 16px 28px; }
+  .workbench__capabilities { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .suggest-list { grid-template-columns: minmax(0, 1fr); }
+  .topbar__search { width: auto; }
+  .topbar__search span { display: none; }
+  .builder { grid-template-columns: minmax(0, 1fr); }
+  .builder__rail { position: static; }
+  .kpi__value { font-size: 26px; }
+  .definition { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .definition dd { margin-bottom: 10px; }
+  .drawer { width: 100%; }
+}
+
+@media (max-width: 640px) {
+  :root { --page-gutter: 16px; --header-height: 54px; }
+
+  .view--page { padding: var(--page-gutter) 16px; }
+  .grid--2, .grid--3, .file-grid { grid-template-columns: minmax(0, 1fr); }
+  .page-head { flex-direction: column; align-items: stretch; }
+  .modal { max-height: 92vh; }
+  .modal__body { padding: 16px; }
+  .turn__bubble { max-width: 94%; }
+  .toast-stack { right: 12px; left: 12px; bottom: 12px; }
+  .toast { width: auto; }
+  .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .result-actions .btn { flex: 1; }
+}

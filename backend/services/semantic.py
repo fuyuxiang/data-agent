@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import date, timedelta
 from typing import Any
 
 import sqlglot
@@ -363,7 +364,9 @@ def visible_metrics(database: Database, workspace_id: str, actor_id: str) -> lis
     return output
 
 
-def _resolve_metric(database: Database, workspace_id: str, actor_id: str, value: str) -> tuple[dict, dict]:
+def _resolve_metric(
+    database: Database, workspace_id: str, actor_id: str, value: str, *, allow_draft: bool = False,
+) -> tuple[dict, dict]:
     target = str(value or "").strip().lower()
     candidates = []
     for metric in visible_metrics(database, workspace_id, actor_id):
@@ -376,7 +379,7 @@ def _resolve_metric(database: Database, workspace_id: str, actor_id: str, value:
     if len(candidates) > 1:
         raise ValueError(f"指标名称存在歧义，请使用指标 ID：{value}")
     metric = candidates[0]
-    if metric.get("status") != "approved":
+    if metric.get("status") != "approved" and not (allow_draft and metric.get("status") == "draft"):
         raise PermissionError("仅已审批指标可用于正式问数")
     model = database.get("semantic_models", metric["model_id"], workspace_id=workspace_id)
     return metric, model
@@ -479,9 +482,11 @@ def _compiled_metric_expression(
 
 def compile_metric_query(
     database: Database, request: dict, workspace_id: str, actor_id: str,
+    *, allow_draft: bool = False,
 ) -> dict:
     metric, model = _resolve_metric(
         database, workspace_id, actor_id, str(request.get("metric") or request.get("metric_id") or ""),
+        allow_draft=allow_draft,
     )
     source = require_source_access(
         database, model["source_id"], workspace_id=workspace_id, actor_id=actor_id, action="query",
@@ -538,7 +543,13 @@ def compile_metric_query(
         if time_range.get("start") is not None:
             predicates.append(f"{_column(time_dimension['column'])} >= {_literal(time_range['start'])}")
         if time_range.get("end") is not None:
-            predicates.append(f"{_column(time_dimension['column'])} < {_literal(time_range['end'])}")
+            end = time_range["end"]
+            if isinstance(end, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+                try:
+                    end = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
+                except ValueError as exc:
+                    raise ValueError("结束日期格式无效") from exc
+            predicates.append(f"{_column(time_dimension['column'])} < {_literal(end)}")
     # Every identifier is schema-validated and quoted; every value is emitted
     # by sqlglot's literal serializer above.
     sql = f"SELECT {', '.join(selections)} FROM {table_sql}"  # noqa: S608
@@ -591,8 +602,9 @@ def compile_metric_query(
 def execute_metric_query(
     database: Database, request: dict, workspace_id: str, actor_id: str, *,
     allowed_source_ids: list[str] | None = None,
+    allow_draft: bool = False,
 ) -> dict:
-    plan = compile_metric_query(database, request, workspace_id, actor_id)
+    plan = compile_metric_query(database, request, workspace_id, actor_id, allow_draft=allow_draft)
     if allowed_source_ids is not None and plan["source_id"] not in {str(value) for value in allowed_source_ids}:
         raise PermissionError("指标不属于任务已确认的数据源范围")
     result = execute_query(

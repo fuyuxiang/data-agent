@@ -43,8 +43,10 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert invited.status_code == 201
     assert member.post(f"/api/workspaces/{workspace['id']}/activate").status_code == 200
     assert member.get(f"/api/sources/{source['id']}").status_code == 200
+    assert member.get("/api/admin/runs").status_code == 403
+    assert member.post("/api/analyses", json={"objective": "只看上传文件", "source_ids": []}).status_code == 403
     readonly = member.post(
-        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
+        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM private"},
     )
     assert readonly.status_code == 403
 
@@ -54,16 +56,29 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     )
     assert promoted.status_code == 200
     analyst_query = member.post(
-        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
+        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM private"},
     )
     assert analyst_query.status_code == 200
+    private_agent = owner.post(
+        "/api/agents",
+        json={"workspace_id": workspace["id"], "name": "仅所有者可见", "visibility": "private",
+              "source_ids": [source["id"]], "skill_ids": []},
+    )
+    assert private_agent.status_code == 201, private_agent.get_json()
+    private_id = private_agent.get_json()["item"]["id"]
+    assert owner.post(f"/api/agents/{private_id}/publish", json={"workspace_id": workspace["id"]}).status_code == 200
+    assert private_id not in {item["id"] for item in member.get("/api/agents").get_json()["items"]}
+    denied_agent_run = member.post("/api/analyses", json={
+        "objective": "查看私有智能体", "source_ids": [source["id"]], "agent_id": private_id,
+    })
+    assert denied_agent_run.status_code in {403, 404}
     assert member.post(
         "/api/connectors", json={"name": "unauthorized", "type": "webhook", "url": "https://example.com/hook"},
     ).status_code == 403
     assert member.post(
         "/api/semantic/models",
         json={
-            "name": "analyst_cannot_model", "source_id": source["id"], "table": "data",
+            "name": "analyst_cannot_model", "source_id": source["id"], "table": "private",
             "dimensions": [{"name": "name", "column": "name", "type": "categorical"}],
             "measures": [{"name": "value", "column": "value", "aggregation": "sum"}],
         },
@@ -82,14 +97,25 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
         f"/api/workspaces/{workspace['id']}/members/{user_id}", json={"role": "editor"},
     )
     assert promoted.status_code == 200
+    editor_private = member.post("/api/agents", json={
+        "name": "编辑者私有助手", "visibility": "private", "source_ids": [source["id"]],
+    })
+    assert editor_private.status_code == 201, editor_private.get_json()
+    editor_private_id = editor_private.get_json()["item"]["id"]
+    assert member.post(f"/api/agents/{editor_private_id}/publish").status_code == 200
+    assert editor_private_id not in {
+        item["id"] for item in owner.get(
+            "/api/agents", headers={"X-Workspace-Id": workspace["id"]},
+        ).get_json()["items"]
+    }
     query = member.post(
-        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
+        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM private"},
     )
     assert query.status_code == 200
     model_response = member.post(
         "/api/semantic/models",
         json={
-            "name": "private_source_model", "source_id": source["id"], "table": "data",
+            "name": "private_source_model", "source_id": source["id"], "table": "private",
             "dimensions": [{"name": "name", "column": "name", "type": "categorical"}],
             "measures": [{"name": "value", "column": "value", "aggregation": "sum"}],
         },
@@ -132,7 +158,7 @@ def test_authenticated_workspaces_enforce_membership_and_roles(app):
     assert member.get(f"/api/sources/{source['id']}/preview").status_code == 403
     assert member.get(f"/api/sources/{source['id']}/profile").status_code == 403
     assert member.post(
-        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM data"},
+        "/api/query", json={"source_ids": [source["id"]], "sql": "SELECT * FROM private"},
     ).status_code == 403
     assert member.post(
         "/api/analyses", json={"objective": "核对受限来源", "source_ids": [source["id"]]},
@@ -160,7 +186,7 @@ def test_query_gateway_enforces_catalog_table_scope(client, source):
         "/api/query",
         json={
             "source_ids": [source["id"]],
-            "sql": "WITH totals AS (SELECT SUM(sales) AS amount FROM data) SELECT amount FROM totals",
+            "sql": "WITH totals AS (SELECT SUM(sales) AS amount FROM sales) SELECT amount FROM totals",
         },
     )
     assert cte.status_code == 200

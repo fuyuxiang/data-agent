@@ -1,0 +1,49 @@
+id: data-analysis
+name: 数据分析
+category: 数据分析
+version: 1.0.0
+description: 对业务数据做结构化分析，涵盖趋势、同比环比、分布、排名、分组对比与异常识别。
+usage: 用户想"看懂"一批数据——趋势如何、结构怎样、谁高谁低、哪里反常——时使用。
+notes: 同比环比、排序、趋势都是本技能内部能力，不需要拆成独立技能。
+triggers:
+  - 趋势
+  - 走势
+  - 同比
+  - 环比
+  - 增长
+  - 下降
+  - 分布
+  - 结构
+  - 排名
+  - 对比
+  - 占比
+  - 波动
+  - 表现
+example_questions:
+  - 华东销售同比怎么样？
+  - 今年各月销售额趋势如何？
+  - 哪些商品表现异常？
+  - 各品类的销售额占比分布
+allowed_tools:
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - profile_data
+  - run_analysis
+  - select_chart
+  - generate_chart
+  - validate_result
+metric_names:
+  - sales_amount
+  - order_count
+  - average_order_value
+inputs:
+  - 业务问题
+  - 分析时间范围
+  - 对比维度
+outputs:
+  - 关键结论
+  - 趋势与结构图表
+  - 分组对比明细
+  - 异常点提示

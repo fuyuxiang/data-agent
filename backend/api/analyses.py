@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, Response, current_app, request, stream_with_context
+from werkzeug.datastructures import FileStorage
 
 from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
 from ..core.database import utcnow
 from ..services.advanced_agent import _source_authorized, available_formal_tools
 from ..services.authorization import require_sources_access
+from ..services.authorization import actor_role
 from ..services.jobs import get_job_manager
 from ..services.intent import suggest_contract
 from ..services.knowledge import add_document
@@ -32,6 +34,11 @@ def _store() -> RunStore:
     return RunStore(db())
 
 
+def _require_analyzer(wid: str) -> None:
+    if actor_role(db(), wid, current_user_id()) not in {"owner", "editor", "analyst"}:
+        raise PermissionError("当前成员只有只读权限")
+
+
 def _require_run(run_id: str, *, write: bool = False) -> dict[str, Any]:
     run = _store().get_run(run_id, workspace_id=workspace_id())
     if not run or run.get("actor_id") != current_user_id():
@@ -43,6 +50,8 @@ def _require_run(run_id: str, *, write: bool = False) -> dict[str, Any]:
     )
     if not _source_authorized(db(), run):
         raise PermissionError("数据权限已变更，请重新发起分析")
+    if write:
+        _require_analyzer(run["workspace_id"])
     if write and run["execution_status"] in {"finished", "cancelled"}:
         raise ValueError("已结束任务不可就地修改，请发起追问、刷新或重新分析")
     return run
@@ -72,6 +81,62 @@ def _session(payload: dict[str, Any], wid: str) -> dict[str, Any]:
         "owner_id": current_user_id(), "analysis_mode": "intelligent",
     }, workspace_id=wid)
     return session
+
+
+def _resolved_skill_ids(
+    wid: str, agent: dict[str, Any] | None, payload: dict[str, Any], source_ids: list[str],
+) -> list[str]:
+    """Work out which skills a run should use.
+
+    An Agent's published skill binding bounds invocation. For a general run,
+    an explicit mention wins over caller hints and automatic resolution.
+    """
+    from ..skills.models import FORMAL_AGENT_TOOLS
+    from ..skills.registry import SkillRegistry
+    from ..skills.resolver import SkillResolver, extract_explicit, match_known
+    from ..skills.permissions import available_resources, filter_visible, unavailable_reason
+
+    registry = SkillRegistry(db(), wid)
+    available = available_resources(db(), wid, current_user_id(), source_ids=source_ids)
+    if payload.get("skill_ids") is not None and not isinstance(payload["skill_ids"], list):
+        raise ValueError("skill_ids 必须是数组")
+    known = registry.definitions()
+    mentions = [
+        match for match in (
+            match_known(token, known)
+            for token in extract_explicit(
+                str(payload.get("objective") or payload.get("message") or "")
+            )
+        ) if match
+    ]
+    bound = list(agent.get("skill_ids") or ([agent["skill_id"]] if agent.get("skill_id") else [])) if agent else []
+    if bound:
+        if set(mentions) - set(bound):
+            raise PermissionError("显式指定的技能不在智能体已发布的能力范围内")
+        explicit = mentions or bound
+    else:
+        explicit = mentions or payload.get("skill_ids") or []
+        if not explicit and payload.get("skill_id"):
+            explicit = [str(payload["skill_id"])]
+    if not explicit:
+        visible = filter_visible(registry.published(), available)
+        question = str(payload.get("objective") or payload.get("message") or "")
+        explicit = [item.id for item in SkillResolver(visible).resolve(question).selected]
+
+    resolved: list[str] = []
+    for skill_id in dict.fromkeys(str(value) for value in explicit if value):
+        definition = registry.get(skill_id)
+        if definition is None:
+            raise ValueError(f"技能不存在：{skill_id}")
+        if definition.status != "published":
+            raise ValueError("只能使用已发布的 Skill")
+        if reason := unavailable_reason(definition, available):
+            raise PermissionError(reason)
+        unsupported = sorted(set(definition.allowed_tools) - FORMAL_AGENT_TOOLS)
+        if unsupported:
+            raise ValueError(f"Skill 使用了正式分析不支持的工具：{', '.join(unsupported)}")
+        resolved.append(definition.id)
+    return resolved
 
 
 def _draft_contract(payload: dict[str, Any], source_ids: list[str]) -> TaskContract:
@@ -165,14 +230,33 @@ def _confirm_and_enqueue(run: dict[str, Any], contract: TaskContract, expected_v
 def create_analysis():
     payload, wid = body(), workspace_id()
     require_workspace_access(wid)
+    _require_analyzer(wid)
     assert_feature_enabled(db(), wid, "governed_agent")
-    session = _session(payload, wid)
+    # Validate the request before creating a new session, so denied Agent or
+    # source selections do not leave empty conversations in the sidebar.
+    session = _session(payload, wid) if payload.get("session_id") else {
+        "source_ids": [], "provider_id": payload.get("provider_id"),
+    }
     source_ids, business_space_id = _analysis_scope(payload, session, wid)
     agent_id = str(payload.get("agent_id") or "")
     agent = require_workspace_record("agent_definitions", agent_id, wid) if agent_id else None
+    preview = payload.get("agent_preview")
+    if preview is not None:
+        if agent_id or not isinstance(preview, dict):
+            raise ValueError("智能体测试配置无效")
+        if actor_role(db(), wid, current_user_id()) not in {"owner", "editor"}:
+            raise PermissionError("只有管理员可以测试未发布的智能体")
+        from .agents import _validated
+
+        agent = {
+            **_validated(preview), "id": "preview", "version": 0,
+            "status": "preview", "created_by": current_user_id(),
+        }
     if agent:
-        if agent.get("status") != "published":
+        if agent.get("status") not in {"published", "preview"}:
             raise PermissionError("只能使用已发布的智能体")
+        if agent.get("visibility") == "private" and agent.get("created_by") != current_user_id():
+            raise FileNotFoundError("智能体不存在")
         agent_source_list = list(dict.fromkeys(str(value) for value in agent.get("source_ids") or []))
         agent_source_ids = set(agent_source_list)
         if not source_ids and "source_ids" not in payload:
@@ -200,15 +284,11 @@ def create_analysis():
     provider_id = str((agent or {}).get("provider_id") or payload.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id, wid)
-    skill_id = str((agent or {}).get("skill_id") or payload.get("skill_id") or "") or None
-    if skill_id:
-        from ..services.skills import get_skill, require_formal_skill
-
-        skill = get_skill(skill_id, wid)
-        if not skill or (skill.get("status") and skill.get("status") != "published"):
-            raise ValueError("只能使用当前已发布的 Skill")
-        require_formal_skill(skill)
+    skill_ids = _resolved_skill_ids(wid, agent, payload, source_ids)
+    skill_id = skill_ids[0] if skill_ids else None
     contract = _draft_contract(payload, source_ids)
+    if not payload.get("session_id"):
+        session = _session(payload, wid)
     allowed_tools = available_formal_tools(db(), wid, session["id"], source_ids)
     idempotency_key = str(request.headers.get("Idempotency-Key") or payload.get("idempotency_key") or "") or None
     run, created = _store().create_run(
@@ -220,13 +300,25 @@ def create_analysis():
         idempotency_key=idempotency_key,
     )
     if created:
+        # 技能解析先记一笔：即使运行因为没有模型而提前结束，运行详情也说得清
+        # 用户当时请求了什么，而不是一片空白。
+        db().put("skill_resolutions", {
+            "id": f"skr_{run['id']}", "workspace_id": wid, "run_id": run["id"],
+            "session_id": session["id"], "actor_id": current_user_id(),
+            "skill_ids": [], "requested_skill_ids": skill_ids,
+            "allowed_tools": [], "warnings": [],
+        }, workspace_id=wid)
         db().put("analysis_context", {
             "id": run["id"], "workspace_id": wid,
             "knowledge_document_ids": knowledge_ids,
             "knowledge_selection_explicit": selected_knowledge is not None,
+            "skill_ids": skill_ids,
+            "requested_skill_ids": skill_ids,
             "agent_snapshot": {
                 "id": agent["id"], "version": agent["version"],
                 "name": agent["name"], "instruction": agent.get("instruction") or "",
+                "metric_ids": list(agent.get("metric_ids") or []),
+                "mcp_server_ids": list(agent.get("mcp_server_ids") or []),
             } if agent else None,
         }, workspace_id=wid)
         db().patch("sessions", session["id"], {
@@ -303,6 +395,26 @@ def get_analysis(run_id: str):
     return ok(item=_snapshot(_require_run(run_id)))
 
 
+@bp.get("/api/analyses/<run_id>/execution")
+@api_errors
+def get_analysis_execution(run_id: str):
+    """A bounded, owner-only explanation of an analysis run."""
+    run = _require_run(run_id)
+    store = _store()
+    resolution = db().get("skill_resolutions", f"skr_{run_id}", workspace_id=run["workspace_id"]) or {}
+    return ok(item={
+        "skills": list(resolution.get("skill_ids") or resolution.get("requested_skill_ids") or []),
+        "actions": [{
+            "tool_id": item.get("tool_id"), "status": item.get("status"),
+            "error_code": item.get("error_code"), "arguments": item.get("arguments") or {},
+        } for item in store.actions(run_id)[-200:]],
+        "decisions": [{
+            "sequence": item.get("sequence"), "model": item.get("model_name"),
+            "tool_call_count": len(item.get("tool_calls") or []),
+        } for item in store.decisions(run_id)[-200:]],
+    })
+
+
 @bp.post("/api/analyses/<run_id>/attachments")
 @api_errors
 def add_analysis_attachments(run_id: str):
@@ -360,6 +472,51 @@ def add_analysis_attachments(run_id: str):
         "items": [{"id": item["id"], "filename": item["filename"], "tags": item["tags"]} for item in items],
     })
     return ok(items=items), 201
+
+
+@bp.post("/api/analyses/<run_id>/attachments/library")
+@api_errors
+def add_library_attachment(run_id: str):
+    """Reuse an owned library document as evidence before contract confirmation."""
+    run = _require_run(run_id, write=True)
+    latest = _store().latest_contract(run_id)
+    if latest and latest.get("confirmed_at"):
+        raise ValueError("已确认任务的证据范围已锁定")
+    from .library import _resolve
+    from .common import safe_child
+
+    record_id = str(body().get("record_id") or "")
+    record, _collection = _resolve(record_id)
+    suffix = Path(str(record.get("filename") or "")).suffix.lower()
+    if suffix not in {".docx", ".xlsx", ".pdf", ".md", ".txt"}:
+        raise ValueError("该资料格式不能直接分析，请选择 Word、Excel、PDF 或文本文件")
+    path = safe_child(current_app.config["SETTINGS"].export_dir, Path(str(record.get("path") or "")))
+    if not path.is_file() or path.stat().st_size > 50 * 1024 * 1024:
+        raise ValueError("资料不存在或超过 50MB")
+    with path.open("rb") as stream:
+        document = add_document(FileStorage(stream=stream, filename=record["filename"]), run["workspace_id"])
+    try:
+        db().patch("knowledge_documents", document["id"], {
+            "visibility": "analysis_attachment", "owner_id": current_user_id(), "run_id": run_id,
+        }, workspace_id=run["workspace_id"])
+        item = db().put("analysis_attachments", {
+            "id": db().new_id("attachment"), "workspace_id": run["workspace_id"],
+            "run_id": run_id, "owner_id": current_user_id(), "document_id": document["id"],
+            "filename": document["filename"], "format": document["format"],
+            "size": path.stat().st_size, "tags": [],
+            "evidence_locations": document.get("evidence_locations", False),
+            "visual_only_pages": document.get("visual_only_pages") or [],
+        }, workspace_id=run["workspace_id"])
+    except Exception:
+        stored = db().get("knowledge_documents", document["id"], workspace_id=run["workspace_id"])
+        if stored:
+            Path(stored["path"]).unlink(missing_ok=True)
+            db().archive("knowledge_documents", document["id"], workspace_id=run["workspace_id"])
+        raise
+    _store().append_event(run_id, "attachments.added", {
+        "items": [{"id": item["id"], "filename": item["filename"], "tags": []}],
+    })
+    return ok(item=item), 201
 
 
 @bp.get("/api/analyses/<run_id>/attachments")
@@ -545,6 +702,7 @@ def _active_job(run_id: str) -> dict[str, Any] | None:
 @api_errors
 def control_analysis(run_id: str):
     run = _require_run(run_id)
+    _require_analyzer(run["workspace_id"])
     payload = body()
     action = str(payload.get("action") or "")
     expected = payload.get("expected_version")
@@ -579,6 +737,7 @@ def control_analysis(run_id: str):
 @api_errors
 def answer_clarification(run_id: str):
     run = _require_run(run_id)
+    _require_analyzer(run["workspace_id"])
     if run["execution_status"] != "waiting_input" or run.get("stop_reason") != "clarification_required":
         raise ValueError("当前任务没有等待澄清")
     answer = str(body().get("answer") or "").strip()
@@ -648,6 +807,7 @@ def _branch(run: dict[str, Any], mode: str, prompt: str) -> dict[str, Any]:
 @api_errors
 def branch_analysis(run_id: str):
     run = _require_run(run_id)
+    _require_analyzer(run["workspace_id"])
     assert_feature_enabled(db(), run["workspace_id"], "governed_agent")
     payload = body()
     mode = str(payload.get("mode") or "followup")
@@ -673,6 +833,8 @@ def branch_analysis(run_id: str):
         "id": child["id"], "workspace_id": run["workspace_id"],
         "knowledge_document_ids": parent_context.get("knowledge_document_ids") or [],
         "knowledge_selection_explicit": bool(parent_context.get("knowledge_selection_explicit")),
+        "skill_ids": parent_context.get("skill_ids") or ([run["skill_id"]] if run.get("skill_id") else []),
+        "requested_skill_ids": parent_context.get("requested_skill_ids") or [],
         "agent_snapshot": parent_context.get("agent_snapshot"),
     }, workspace_id=run["workspace_id"])
     _store().add_contract(child["id"], contract, expected_version=0)

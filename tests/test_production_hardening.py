@@ -103,11 +103,11 @@ def test_provider_resolution_and_bootstrap_are_workspace_scoped(app, client):
 
 
 def test_query_limit_is_rewritten_and_enforced(client, source):
-    bounded = bounded_read_only_sql("SELECT * FROM data LIMIT 999", 5, "duckdb")
+    bounded = bounded_read_only_sql("SELECT * FROM sales LIMIT 999", 5, "duckdb")
     assert "LIMIT 5" in bounded.upper()
     result = client.post(
         "/api/query",
-        json={"source_ids": [source["id"]], "sql": "SELECT * FROM data LIMIT 999", "limit": 3},
+        json={"source_ids": [source["id"]], "sql": "SELECT * FROM sales LIMIT 999", "limit": 3},
     )
     assert result.status_code == 200
     assert result.get_json()["result"]["rows"] == 3

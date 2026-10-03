@@ -1,0 +1,33 @@
+id: visualization
+name: 数据可视化
+category: 可视化
+version: 1.0.0
+description: 根据数据形态选择合适的图表类型并生成图表，让结论一眼可见。
+usage: 用户想看图、要看趋势、想直观比较时使用；生成报告时也会被自动调用。
+notes: 图表服务于结论——没有要说清的事情就不要画图。
+triggers:
+  - 图表
+  - 画图
+  - 可视化
+  - 趋势图
+  - 柱状图
+  - 饼图
+  - 折线图
+  - 看图
+example_questions:
+  - 把各城市销售额画成柱状图
+  - 给我一张月度趋势图
+  - 用图展示各品类占比
+allowed_tools:
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - select_chart
+  - generate_chart
+inputs:
+  - 已查询的结果数据
+  - 想表达的关系
+outputs:
+  - 图表
+  - 一句话图注

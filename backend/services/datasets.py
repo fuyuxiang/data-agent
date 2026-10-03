@@ -128,24 +128,32 @@ def _sanitize_table_name(value: str, fallback: str = "data") -> str:
     return value[:80]
 
 
-def _read_tabular_file(path: Path) -> dict[str, pd.DataFrame]:
+def _read_tabular_file(path: Path, original_name: str = "") -> dict[str, pd.DataFrame]:
     suffix = path.suffix.lower()
+    # Single-table formats take their table name from the uploaded file name, so
+    # the model writes `SELECT ... FROM orders` instead of guessing a generic
+    # one.  The stored path carries a generated id, so the caller passes the
+    # original name through.
+    table = _sanitize_table_name(Path(original_name or path.name).stem)
     if suffix == ".csv":
         try:
-            return {"data": pd.read_csv(path)}
+            return {table: pd.read_csv(path)}
         except UnicodeDecodeError:
-            return {"data": pd.read_csv(path, encoding="gb18030")}
+            return {table: pd.read_csv(path, encoding="gb18030")}
     if suffix == ".tsv":
-        return {"data": pd.read_csv(path, sep="\t")}
+        return {table: pd.read_csv(path, sep="\t")}
     if suffix in {".xlsx", ".xls"}:
-        return {str(name): frame for name, frame in pd.read_excel(path, sheet_name=None).items()}
+        return {
+            _sanitize_table_name(str(name)): frame
+            for name, frame in pd.read_excel(path, sheet_name=None).items()
+        }
     if suffix == ".json":
         try:
-            return {"data": pd.read_json(path)}
+            return {table: pd.read_json(path)}
         except ValueError:
-            return {"data": pd.read_json(path, lines=True)}
+            return {table: pd.read_json(path, lines=True)}
     if suffix == ".parquet":
-        return {"data": pd.read_parquet(path)}
+        return {table: pd.read_parquet(path)}
     raise ValueError(f"不支持的文件格式：{suffix}")
 
 
@@ -193,13 +201,14 @@ def register_upload(file: FileStorage, workspace_id: str) -> dict:
     file.save(target)
     try:
         _validate_compressed_size(target)
-        frames = _read_tabular_file(target)
+        frames = _read_tabular_file(target, original)
         _validate_frame_limits(frames)
         tables = []
-        for name, frame in frames.items():
+        for raw_name, frame in frames.items():
+            name = _sanitize_table_name(raw_name)
             tables.append({
                 "name": _sanitize_table_name(name),
-                "source_name": str(name),
+                "source_name": str(raw_name),
                 "rows": int(len(frame)),
                 "columns": int(len(frame.columns)),
             })
@@ -1040,7 +1049,7 @@ def source_frames(source: dict, *, actor_id: str | None = None) -> dict[str, pd.
     if source["kind"] in {
         "file", "http", "derived", "workspace", "google_sheet", "lark_table", "lark_table_snapshot",
     }:
-        frames = _read_tabular_file(Path(source["path"]))
+        frames = _read_tabular_file(Path(source["path"]), str(source.get("filename") or ""))
         if actor_id is None:
             return frames
         role = actor_role(db(), str(source.get("workspace_id") or "default"), actor_id)

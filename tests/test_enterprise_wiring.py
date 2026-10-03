@@ -24,7 +24,7 @@ def _source(client):
 def test_row_and_column_policy_applies_before_aggregate_and_invalidates_old_result(client):
     source = _source(client)
     old = client.post("/api/query", json={
-        "source_ids": [source["id"]], "sql": "SELECT SUM(sales) AS total FROM data",
+        "source_ids": [source["id"]], "sql": "SELECT SUM(sales) AS total FROM sales",
     })
     assert old.status_code == 200
     old_id = old.get_json()["result"]["id"]
@@ -40,12 +40,12 @@ def test_row_and_column_policy_applies_before_aggregate_and_invalidates_old_resu
     assert "cost" not in [column["name"] for column in schema["tables"][0]["columns"]]
     assert client.get(f"/api/query-results/{old_id}").status_code == 403
     current = client.post("/api/query", json={
-        "source_ids": [source["id"]], "sql": "SELECT SUM(sales) AS total FROM data",
+        "source_ids": [source["id"]], "sql": "SELECT SUM(sales) AS total FROM sales",
     })
     assert current.status_code == 200, current.get_json()
     assert current.get_json()["result"]["data"] == [{"total": 120.0}]
     denied = client.post("/api/query", json={
-        "source_ids": [source["id"]], "sql": "SELECT cost FROM data",
+        "source_ids": [source["id"]], "sql": "SELECT cost FROM sales",
     })
     assert denied.status_code == 403
 

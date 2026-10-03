@@ -1,8 +1,12 @@
-const defaultHeaders = () => {
-  const workspaceId = localStorage.getItem('meridian-workspace') || 'default';
-  const csrfToken = sessionStorage.getItem('meridian-csrf') || '';
-  return { 'X-Workspace-Id': workspaceId, ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) };
-};
+/**
+ * 后端通信层。
+ *
+ * V1 在这里留了一个从未被调用的 stream()：真正的实时更新走的是轮询。
+ * V2 直接删掉它——死代码比没有代码更贵。
+ */
+
+const CSRF_KEY = 'shuqing-csrf';
+const WORKSPACE_KEY = 'shuqing-workspace';
 
 export class ApiError extends Error {
   constructor(message, status = 0, payload = null) {
@@ -13,11 +17,27 @@ export class ApiError extends Error {
   }
 }
 
+export function workspaceId() {
+  return localStorage.getItem(WORKSPACE_KEY) || 'default';
+}
+
+export function rememberWorkspace(value) {
+  if (value) localStorage.setItem(WORKSPACE_KEY, value);
+}
+
+function headers(extra = {}) {
+  const csrf = sessionStorage.getItem(CSRF_KEY) || '';
+  return {
+    'X-Workspace-Id': workspaceId(),
+    ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+    ...extra,
+  };
+}
+
 export async function api(path, options = {}) {
-  const headers = { ...defaultHeaders(), ...(options.headers || {}) };
-  const init = { ...options, headers };
+  const init = { ...options, headers: headers(options.headers || {}) };
   if (options.body && !(options.body instanceof FormData) && typeof options.body !== 'string') {
-    headers['Content-Type'] = 'application/json';
+    init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(options.body);
   }
   const response = await fetch(path, init);
@@ -26,49 +46,43 @@ export async function api(path, options = {}) {
   if (!response.ok || (payload && payload.ok === false)) {
     throw new ApiError(payload?.error || `请求失败 (${response.status})`, response.status, payload);
   }
-  if (payload?.csrf_token) sessionStorage.setItem('meridian-csrf', payload.csrf_token);
+  if (payload?.csrf_token) sessionStorage.setItem(CSRF_KEY, payload.csrf_token);
   return payload;
 }
 
-export async function stream(path, payload, onEvent, signal) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: { ...defaultHeaders(), 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  if (!response.ok || !response.body) {
-    let message = `请求失败 (${response.status})`;
-    try { message = (await response.json()).error || message; } catch { /* no-op */ }
-    throw new ApiError(message, response.status);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const blocks = buffer.split('\n\n');
-    buffer = blocks.pop() || '';
-    for (const block of blocks) {
-      let event = 'message';
-      const data = [];
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event:')) event = line.slice(6).trim();
-        if (line.startsWith('data:')) data.push(line.slice(5).trim());
-      }
-      if (data.length) {
-        let parsed;
-        try { parsed = JSON.parse(data.join('\n')); } catch { parsed = { content: data.join('\n') }; }
-        await onEvent(event, parsed);
-      }
-    }
-    if (done) break;
-  }
+export const get = (path) => api(path);
+export const post = (path, body) => api(path, { method: 'POST', body });
+export const patch = (path, body) => api(path, { method: 'PATCH', body });
+export const remove = (path) => api(path, { method: 'DELETE' });
+
+export function upload(path, file, extra = {}) {
+  const form = new FormData();
+  form.append('file', file);
+  Object.entries(extra).forEach(([key, value]) => form.append(key, value));
+  return api(path, { method: 'POST', body: form });
 }
 
-export function withWorkspace(path, workspaceId) {
+/** 把 workspace_id 附到查询串上，避免每个调用点都写一遍。 */
+export function withWorkspace(path, id = workspaceId()) {
   const url = new URL(path, location.origin);
-  url.searchParams.set('workspace_id', workspaceId || localStorage.getItem('meridian-workspace') || 'default');
+  url.searchParams.set('workspace_id', id);
   return `${url.pathname}${url.search}`;
+}
+
+/** 触发浏览器下载，并保持同源凭据与 CSRF 头。 */
+export async function download(path, filename) {
+  const response = await fetch(path, { headers: headers() });
+  if (!response.ok) {
+    const message = (await response.json().catch(() => ({}))).error || '下载失败';
+    throw new ApiError(message, response.status);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename || path.split('/').pop() || 'download';
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }

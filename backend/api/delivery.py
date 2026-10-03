@@ -29,12 +29,17 @@ def _public_artifact(item: dict) -> dict:
     value.pop("path", None)
     value.pop("policy_fingerprint", None)
     value["download_url"] = f"/api/artifacts/{item['id']}/download"
+    value["previewable"] = Path(str(item.get("filename") or "")).suffix.lower() in {
+        ".png", ".jpg", ".jpeg", ".webp", ".html", ".htm", ".csv", ".pdf", ".json", ".md", ".txt",
+    }
     return value
 
 
 def _artifact_policy_access(item: dict, *, action: str = "read", source_ids: list[str] | None = None) -> None:
     wid = item["workspace_id"]
     actor = current_user_id()
+    if action in {"export", "delete"} and actor_role(db(), wid, actor) not in {"owner", "editor", "analyst"}:
+        raise PermissionError("当前成员只有只读权限")
     owner = str(item.get("actor_id") or "")
     if not item.get("run_id") and (
         owner and owner != actor or not owner and actor_role(db(), wid, actor) != "owner"
@@ -42,7 +47,7 @@ def _artifact_policy_access(item: dict, *, action: str = "read", source_ids: lis
         raise FileNotFoundError("成果不存在")
     sources = require_sources_access(
         db(), source_ids if source_ids is not None else item.get("source_ids") or [],
-        workspace_id=wid, actor_id=actor, action=action,
+        workspace_id=wid, actor_id=actor, action="read" if action == "delete" else action,
     )
     if not item.get("run_id") and sources:
         current = policy_fingerprint(
@@ -112,10 +117,12 @@ def download_artifact(artifact_id: str):
     return send_file(path, as_attachment=True, download_name=item["filename"])
 
 
-def _analysis_run(run_id: str) -> dict:
+def _analysis_run(run_id: str, *, write: bool = False) -> dict:
     run = RunStore(db()).get_run(run_id, workspace_id=workspace_id())
     if not run or run.get("actor_id") != current_user_id():
         raise FileNotFoundError("分析任务不存在")
+    if write and actor_role(db(), run["workspace_id"], current_user_id()) not in {"owner", "editor", "analyst"}:
+        raise PermissionError("当前成员只有只读权限")
     require_sources_access(
         db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
         actor_id=current_user_id(), action="read",
@@ -172,7 +179,7 @@ def analysis_details(run_id: str):
 @bp.post("/api/analyses/<run_id>/artifacts")
 @api_errors
 def create_analysis_artifacts(run_id: str):
-    run = _analysis_run(run_id)
+    run = _analysis_run(run_id, write=True)
     kinds = body().get("kinds")
     if kinds is not None and (not isinstance(kinds, list) or any(str(item) not in ARTIFACT_KINDS for item in kinds)):
         raise ValueError("成果 kinds 无效")
@@ -197,7 +204,7 @@ def _email_payload(run: dict) -> tuple[dict, str, str, list[str] | None]:
 @bp.post("/api/analyses/<run_id>/email/eml")
 @api_errors
 def create_analysis_eml(run_id: str):
-    run = _analysis_run(run_id)
+    run = _analysis_run(run_id, write=True)
     payload, subject, text, kinds = _email_payload(run)
     eml, artifacts = prepare_eml(
         db(), run_id, run["workspace_id"], recipients=payload.get("recipients") or "",
@@ -212,7 +219,7 @@ def create_analysis_eml(run_id: str):
 @bp.post("/api/analyses/<run_id>/email/send")
 @api_errors
 def send_analysis_email(run_id: str):
-    run = _analysis_run(run_id)
+    run = _analysis_run(run_id, write=True)
     payload, subject, text, kinds = _email_payload(run)
     connector = require_workspace_record("connectors", str(payload.get("connector_id") or ""), run["workspace_id"])
     delivery = send_email(

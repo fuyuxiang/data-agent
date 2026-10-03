@@ -439,14 +439,3 @@ def _local_compute() -> dict:
     elif platform.system() == "Darwin" and platform.machine() == "arm64":
         gpu = {"available": True, "backend": "metal", "devices": ["Apple Silicon"]}
     return {"cpu_count": cpu, "platform": platform.platform(), "python": platform.python_version(), "memory_limit": memory, "gpu": gpu}
-
-
-@bp.get("/api/compute/status")
-def compute_status():
-    try:
-        from ..services.data_plane.factory import sandbox_client
-
-        sandbox = sandbox_client().capability()
-    except Exception as exc:
-        sandbox = {"available": False, "host_fallback": False, "error": str(exc)}
-    return ok(local=_local_compute(), sandbox=sandbox, nodes=[])

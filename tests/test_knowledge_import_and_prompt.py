@@ -77,14 +77,21 @@ class _PromptCompletions:
         return iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)])
 
 
-def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(client, monkeypatch):
-    session = client.post("/api/sessions", json={"name": "临时指令"}).get_json()["item"]
-    saved = client.post(
-        f"/api/sessions/{session['id']}/temp-prompt",
-        json={"text": "<think>不应注入的思考</think>\n所有金额使用万元。", "raw": True},
-    ).get_json()
-    assert saved["enabled"] is True
-    assert saved["temp_prompt"] == "所有金额使用万元。"
+def test_agent_instruction_strips_reasoning_and_reaches_the_system_prompt(client, source, monkeypatch):
+    """An operator instruction reaches the model, its private reasoning does not.
+
+    The V1 session-level temporary instruction is gone; the same guarantee now
+    belongs to the Agent role instruction, which is the only operator-authored
+    text that reaches the system prompt.
+    """
+    agent = client.post("/api/agents", json={
+        "name": "万元口径智能体",
+        "source_ids": [source["id"]],
+        "instruction": "<think>不应注入的思考</think>\n所有金额使用万元。",
+    }).get_json()["item"]
+    assert "不应注入的思考" not in agent["instruction"]
+    assert agent["instruction"] == "所有金额使用万元。"
+    assert client.post(f"/api/agents/{agent['id']}/publish").status_code == 200
 
     completions = _PromptCompletions()
     fake = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -94,37 +101,37 @@ def test_temp_prompt_strips_reasoning_toggles_and_controls_agent_injection(clien
             {"model": "fake", "temperature": 0, "protocol": "chat_completions"}, fake,
         ),
     )
-    created = client.post("/api/analyses", json={"session_id": session["id"], "objective": "汇报"}).get_json()["item"]
-    confirmed = client.post(
-        f"/api/analyses/{created['id']}/contract/confirm", json={"expected_version": 1},
-    ).get_json()
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        job = client.get(f"/api/jobs/{confirmed['job']['id']}").get_json()["item"]
-        if job["status"] in {"completed", "failed"}:
-            break
-        time.sleep(0.02)
+    created = client.post("/api/analyses", json={
+        "session_id": "welcome", "objective": "汇报", "agent_id": agent["id"],
+        "source_ids": [source["id"]],
+    }).get_json()["item"]
+    _confirm_and_wait(client, created["id"])
     system_prompt = completions.calls[-1]["messages"][0]["content"]
     assert "所有金额使用万元" in system_prompt
     assert "不应注入的思考" not in system_prompt
 
-    disabled = client.post(f"/api/sessions/{session['id']}/temp-prompt/toggle").get_json()
-    assert disabled["enabled"] is False
-    created = client.post("/api/analyses", json={"session_id": session["id"], "objective": "再次汇报"}).get_json()["item"]
-    confirmed = client.post(
-        f"/api/analyses/{created['id']}/contract/confirm", json={"expected_version": 1},
-    ).get_json()
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        job = client.get(f"/api/jobs/{confirmed['job']['id']}").get_json()["item"]
-        if job["status"] in {"completed", "failed"}:
-            break
-        time.sleep(0.02)
-    assert "所有金额使用万元" not in completions.calls[-1]["messages"][0]["content"]
+    # Editing an agent returns it to draft, and a draft agent may not run.
+    client.patch(f"/api/agents/{agent['id']}", json={"instruction": "所有金额使用万元。"})
+    draft = client.post("/api/analyses", json={
+        "session_id": "welcome", "objective": "再次汇报", "agent_id": agent["id"],
+        "source_ids": [source["id"]],
+    })
+    assert draft.status_code == 403, draft.get_json()
+    assert "已发布" in draft.get_json()["error"]
 
-    cleared = client.post(
-        f"/api/sessions/{session['id']}/temp-prompt", json={"text": "", "raw": True},
+
+def _wait_for_job(client, job_id: str) -> dict:
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").get_json()["item"]
+        if job["status"] in {"completed", "failed"}:
+            return job
+        time.sleep(0.02)
+    raise AssertionError("分析任务未在预期时间内结束")
+
+
+def _confirm_and_wait(client, run_id: str) -> dict:
+    confirmed = client.post(
+        f"/api/analyses/{run_id}/contract/confirm", json={"expected_version": 1},
     ).get_json()
-    assert cleared["temp_prompt"] == ""
-    assert cleared["enabled"] is False
-    assert client.post(f"/api/sessions/{session['id']}/temp-prompt/toggle").get_json()["warning"]
+    return _wait_for_job(client, confirmed["job"]["id"])

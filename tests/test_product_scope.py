@@ -24,14 +24,15 @@ def test_retired_product_surfaces_are_not_exposed(client):
         "/api/commands/compact",
         "/api/memories",
         "/api/lifecycle/memory-trash",
-        "/api/skills/reload",
         "/api/exports/data",
         "/api/exports/report",
     ):
         assert client.get(path).status_code == 404
     assert client.post("/api/analysis/run", json={"rows": [{"value": 1}]}).status_code == 404
     assert client.post("/api/charts/spec", json={"rows": [{"value": 1}]}).status_code == 404
-    assert client.post("/api/skills", json={"name": "新技能"}).status_code == 405
+    # Skill creation is a real V2 capability; what must stay retired is the
+    # V1 pseudo-skill surface, not the Skill runtime itself.
+    assert client.post("/api/skills/reload").status_code == 405
 
 
 def test_agent_tool_surface_matches_focused_product(app):
@@ -73,19 +74,38 @@ def test_agent_tool_surface_matches_focused_product(app):
 
 
 def test_demo_seed_populates_the_focused_analysis_flow(client):
+    from backend.services.demo_sales import SAMPLE_SEED_ID, sample_questions
+
     first = client.post("/api/demo/seed", json={"workspace_id": "default"})
     assert first.status_code == 200, first.get_json()
     payload = first.get_json()
-    assert payload["source"]["sample_seed"]["id"] == "instant_retail_city_pack"
-    assert len(payload["recommended_questions"]) == 4
+    assert payload["source"]["sample_seed"]["id"] == SAMPLE_SEED_ID
+    assert payload["recommended_questions"] == sample_questions()[:4]
+
+    # The demo must be a real multi-dimensional fact table, not a lookup sheet:
+    # year-over-year, attribution and forecasting are impossible without one.
+    summary = payload["summary"]
+    assert summary["months"] >= 24
+    assert summary["rows"] > 1000
+    assert len(summary["regions"]) >= 3
+    assert len(summary["categories"]) >= 3
+    assert payload["source"]["tables"][0]["name"] == "sales_monthly"
 
     bootstrap = client.get("/api/bootstrap").get_json()
     assert payload["source"]["id"] in bootstrap["active_session"]["source_ids"]
-    assert any(item.get("sample_seed", {}).get("id") == "instant_retail_city_pack" for item in bootstrap["sources"])
-    assert client.get("/api/semantic/metrics").get_json()["items"]
+    assert any(
+        item.get("sample_seed", {}).get("id") == SAMPLE_SEED_ID for item in bootstrap["sources"]
+    )
+    metrics = client.get("/api/semantic/metrics").get_json()["items"]
+    approved = {item["name"] for item in metrics if item.get("status") == "approved"}
+    assert {"sales_amount", "order_count", "average_order_value"} <= approved
     knowledge = client.get("/api/knowledge/entries").get_json()["items"]
     assert knowledge
-    assert any("Data Agent 核心主路径" in item.get("content", "") for item in knowledge)
+    assert any(item.get("type") == "business_rule" for item in knowledge)
+    assert any(
+        item.get("id") == "agent-superskill"
+        for item in client.get("/api/agents").get_json()["items"]
+    )
 
     repeated = client.post("/api/demo/seed", json={"workspace_id": "default"})
     assert repeated.status_code == 200

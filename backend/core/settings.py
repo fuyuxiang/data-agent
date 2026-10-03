@@ -12,6 +12,7 @@ class Settings:
     root: Path
     storage_dir: Path
     frontend_dir: Path
+    skill_dir: Path
     database_path: Path
     upload_dir: Path
     export_dir: Path
@@ -66,6 +67,7 @@ class Settings:
             root=root,
             storage_dir=storage,
             frontend_dir=Path(os.getenv("MERIDIAN_FRONTEND_DIR", root / "frontend")).resolve(),
+            skill_dir=Path(os.getenv("MERIDIAN_SKILL_DIR", root / "skills")).resolve(),
             database_path=storage / "meridian.sqlite3",
             upload_dir=storage / "uploads",
             export_dir=storage / "exports",

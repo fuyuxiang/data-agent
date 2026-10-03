@@ -19,6 +19,7 @@ from ..agent.model import build_model_adapter
 from ..agent.store import RunStore
 from ..agent.tools import ToolExecutor, ToolRegistry
 from ..core.database import Database, utcnow
+from ..skills.models import FORMAL_AGENT_TOOLS
 from .agent_tools import AgentToolContext, execute_tool, tool_schemas
 from .authorization import actor_role, require_sources_access
 from .data_policy import policy_fingerprint
@@ -26,10 +27,10 @@ from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefS
 from .data_plane.factory import livy_adapter, sandbox_client, trino_adapter
 from .datasets import frame_records
 from .jobs import register_job_handler
+from .knowledge import strip_reasoning
 from .models import resolve_provider
 from .results.manifests import ResultService
 from .sql_security import validate_read_only_sql
-from .skills import FORMAL_AGENT_TOOLS, get_skill, public_skill
 from .usage import ensure_quota, record_usage
 from .validation.engine import Rule, ValidationEngine, outcome
 
@@ -375,6 +376,38 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     }
 
 
+def _prepare_run_skills(
+    database: Database,
+    run: dict[str, Any],
+    analysis_context: dict[str, Any],
+    allowed_tools: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve this run's skills and hand the loop a narrowed capability set."""
+    from ..skills.context import build_skill_context
+    from ..skills.executor import SkillExecutor
+    from ..skills.registry import SkillRegistry
+
+    requested = list(analysis_context.get("skill_ids") or [])
+    if not requested and run.get("skill_id"):
+        requested = [str(run["skill_id"])]
+    registry = SkillRegistry(database, run["workspace_id"])
+    definitions = registry.get_many(requested)
+    if not definitions:
+        return []
+    context = build_skill_context(database, run)
+    executions = SkillExecutor(context, runtime_tools=allowed_tools).prepare(definitions)
+    database.patch("skill_resolutions", f"skr_{run['id']}", {
+        "skill_ids": [item.skill.id for item in executions],
+        "allowed_tools": sorted(SkillExecutor.combined_tools(executions)),
+        "warnings": [
+            {"skill_id": item.skill.id, "message": message}
+            for item in executions for message in item.warnings
+        ],
+        "resolved_at": utcnow(),
+    }, workspace_id=run["workspace_id"])
+    return SkillExecutor.model_blocks(executions)
+
+
 def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
     selected = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     explicitly_selected = bool(selected.get("knowledge_selection_explicit"))
@@ -415,10 +448,15 @@ def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
 
 
 def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
+    analysis_context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    agent_snapshot = analysis_context.get("agent_snapshot") or {}
+    metric_ids = list(agent_snapshot.get("metric_ids") or [])
     context = AgentToolContext(
         database=database, workspace_id=run["workspace_id"], session_id=run["session_id"],
         source_ids=list(run["source_scope"]),
         knowledge_document_ids=_run_knowledge_ids(database, run),
+        semantic_metric_ids=metric_ids or None,
+        mcp_server_ids=list(agent_snapshot.get("mcp_server_ids") or []) if agent_snapshot else None,
         actor_id=run["actor_id"],
     )
     registry = ToolRegistry()
@@ -426,6 +464,7 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         (str(server["id"]), str(name))
         for server in database.list("mcp_servers", workspace_id=run["workspace_id"], limit=5000)
         if server.get("enabled", True) and server.get("status") == "connected"
+        and (context.mcp_server_ids is None or str(server["id"]) in context.mcp_server_ids)
         for name in server.get("formal_read_tools") or []
     }
     for raw in tool_schemas(context):
@@ -664,27 +703,21 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         if item["role"] in {"system", "user", "assistant"}
     ]
     progress(15, "Agent 已开始动态规划与执行")
-    session = database.get("sessions", run["session_id"], workspace_id=run["workspace_id"]) or {}
-    skill_ids = [str(run.get("skill_id") or "")]
-    selected_skills = []
-    for skill_id in dict.fromkeys(value for value in skill_ids if value):
-        skill = get_skill(skill_id, run["workspace_id"])
-        if skill:
-            selected_skills.append(skill)
-    governed_skills = [public_skill(skill, include_prompt=True) for skill in selected_skills]
     analysis_context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+
+    # Skills are resolved through the Skill runtime: the workspace registry,
+    # permission-checked against the run's own source scope, then narrowed to the
+    # tools this run may actually reach.
+    governed_skills = _prepare_run_skills(
+        database, run, analysis_context, list(run.get("allowed_tool_ids") or []),
+    )
     agent_snapshot = analysis_context.get("agent_snapshot") or {}
-    if str(agent_snapshot.get("instruction") or "").strip():
+    role = strip_reasoning(agent_snapshot.get("instruction"))
+    if role:
         governed_skills.insert(0, {
             "id": f"agent:{agent_snapshot['id']}:{agent_snapshot['version']}",
             "source": "published_agent", "description": str(agent_snapshot.get("name") or "分析智能体"),
-            "instruction": str(agent_snapshot["instruction"]),
-        })
-    if session.get("temp_prompt_enabled") and str(session.get("temporary_instruction") or "").strip():
-        governed_skills.append({
-            "id": "run-temporary-instruction", "source": "session",
-            "description": "仅对当前会话生效、由用户明确设置的临时指令",
-            "instruction": str(session["temporary_instruction"])[:50_000],
+            "instruction": role,
         })
     result = loop.run(
         run_id, runner_id=f"analysis-job:{run_id}", history=history,

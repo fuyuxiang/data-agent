@@ -1,0 +1,157 @@
+/* 数擎设计令牌
+ *
+ * 一处定义，全站消费。V1 曾把令牌、布局和覆盖拆成 legacy.css + styles.css 两层
+ * 靠 @layer 顺序取胜；V2 改成单层：这里只放"是什么"，别的文件只放"长什么样"。
+ */
+
+:root {
+  /* 品牌色 */
+  --brand-primary: #4f6bff;
+  --brand-hover: #4057e8;
+  --brand-soft: #eef1ff;
+  --brand-softer: #f6f7ff;
+  --accent-cyan: #16b8d4;
+  --accent-violet: #8265f5;
+
+  /* 面与线 */
+  --app-bg: #f6f8fc;
+  --surface: #ffffff;
+  --surface-soft: #f8fafd;
+  --surface-sunken: #f1f4f9;
+  --border: #e5e9f0;
+  --border-strong: #d3dae6;
+
+  /* 侧栏（深色） */
+  --sidebar: #0c1222;
+  --sidebar-hover: #151e33;
+  --sidebar-active: #1b2743;
+  --sidebar-text: #b7c0d4;
+  --sidebar-text-strong: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+
+  /* 文字 */
+  --text-primary: #161b26;
+  --text-secondary: #5f697b;
+  --text-tertiary: #8d96a8;
+  --text-inverse: #ffffff;
+
+  /* 状态 */
+  --success: #18a36b;
+  --success-soft: #e6f6ef;
+  --warning: #e7a23b;
+  --warning-soft: #fdf3e3;
+  --danger: #e25757;
+  --danger-soft: #fdeded;
+  --info: #4f6bff;
+  --info-soft: #eef1ff;
+
+  /* 图表色板（固定五色，不做彩虹） */
+  --chart-1: #4f6bff;
+  --chart-2: #16b8d4;
+  --chart-3: #8265f5;
+  --chart-4: #18a36b;
+  --chart-5: #e7a23b;
+  --chart-6: #e25757;
+
+  /* 圆角 */
+  --radius-button: 8px;
+  --radius-input: 10px;
+  --radius-card: 12px;
+  --radius-dialog: 14px;
+  --radius-composer: 16px;
+  --radius-full: 999px;
+
+  /* 阴影（极轻，层次主要靠背景/边框/间距建立） */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-2: 0 2px 8px rgba(16, 24, 40, 0.06);
+  --shadow-3: 0 12px 32px rgba(16, 24, 40, 0.1);
+  --shadow-overlay: 0 24px 64px rgba(12, 18, 34, 0.18);
+  --focus-ring: 0 0 0 3px rgba(79, 107, 255, 0.18);
+  /* 遮罩与光晕：唯一允许出现字面量的地方，仍然由令牌统一管理 */
+  --overlay-modal: rgba(7, 16, 29, 0.5);
+  --overlay-busy: rgba(7, 16, 29, 0.28);
+  --overlay-command: rgba(7, 16, 29, 0.45);
+  --halo-brand: 0 6px 18px rgba(79, 107, 255, 0.28);
+  --pulse-brand: rgba(79, 107, 255, 0.35);
+  --sidebar-muted: rgba(255, 255, 255, 0.34);
+
+  /* 字体 */
+  --font-sans: Inter, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-body: 14px;
+  --text-md: 15px;
+  --text-subtitle: 18px;
+  --text-title: 24px;
+  --text-display: 28px;
+  --text-kpi: 32px;
+
+  /* 布局 */
+  --sidebar-width: 240px;
+  --sidebar-collapsed: 68px;
+  --page-gutter: 28px;
+  --page-max: 1320px;
+  --reading-max: 1080px;
+  --header-height: 60px;
+
+  /* 动效 */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --duration-fast: 120ms;
+  --duration: 180ms;
+  --duration-slow: 220ms;
+
+  /* 渐变：只用于 AI Logo、运行状态、小面积主按钮和 Halo */
+  --gradient-brand: linear-gradient(135deg, #4f6bff 0%, #8265f5 52%, #16b8d4 100%);
+}
+
+:root[data-theme="dark"] {
+  --brand-primary: #7b91ff;
+  --brand-hover: #93a4ff;
+  --brand-soft: rgba(123, 145, 255, 0.16);
+  --brand-softer: rgba(123, 145, 255, 0.08);
+
+  --app-bg: #0d1220;
+  --surface: #141a29;
+  --surface-soft: #1a2133;
+  --surface-sunken: #0f1421;
+  --border: #232c40;
+  --border-strong: #33405c;
+
+  --sidebar: #080c16;
+  --sidebar-hover: #141c2e;
+  --sidebar-active: #1d2740;
+  --sidebar-text: #97a3bb;
+  --sidebar-border: rgba(255, 255, 255, 0.07);
+
+  --text-primary: #e8ecf4;
+  --text-secondary: #9aa5ba;
+  --text-tertiary: #6d7789;
+
+  --success: #2fbf85;
+  --success-soft: rgba(47, 191, 133, 0.14);
+  --warning: #efb45c;
+  --warning-soft: rgba(239, 180, 92, 0.14);
+  --danger: #f07474;
+  --danger-soft: rgba(240, 116, 116, 0.14);
+  --info: #7b91ff;
+  --info-soft: rgba(123, 145, 255, 0.14);
+
+  --chart-1: #7b91ff;
+  --chart-2: #2fc4dd;
+  --chart-3: #a68bff;
+  --chart-4: #35c98d;
+  --chart-5: #efb45c;
+  --chart-6: #f07474;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.6);
+  --focus-ring: 0 0 0 3px rgba(123, 145, 255, 0.28);
+  --overlay-modal: rgba(0, 0, 0, 0.62);
+  --overlay-busy: rgba(0, 0, 0, 0.4);
+  --overlay-command: rgba(0, 0, 0, 0.58);
+  --halo-brand: 0 6px 18px rgba(123, 145, 255, 0.3);
+  --pulse-brand: rgba(123, 145, 255, 0.32);
+}

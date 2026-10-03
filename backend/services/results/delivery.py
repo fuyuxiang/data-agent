@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import math
 import re
 import smtplib
@@ -22,7 +23,10 @@ from ..security import SecretVault
 from .manifests import ResultService
 
 
-ARTIFACT_KINDS = ("summary_docx", "report_docx", "dashboard_png", "data_xlsx", "report_pptx")
+ARTIFACT_KINDS = (
+    "summary_docx", "report_docx", "report_html",
+    "dashboard_png", "data_xlsx", "report_pptx",
+)
 DEFAULT_ARTIFACT_KINDS = ARTIFACT_KINDS[:3]
 
 
@@ -181,7 +185,10 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
     export_dir = current_app.config["SETTINGS"].export_dir
     base = f"{manifest['id']}_{manifest['version']}"
     payload = manifest["payload"]
-    if kind == "dashboard_png":
+    if kind == "report_html":
+        path = export_dir / f"{base}_report.html"
+        path.write_text(_render_html(payload, manifest), encoding="utf-8")
+    elif kind == "dashboard_png":
         path = export_dir / f"{base}_dashboard.png"
         _render_png(path, payload.get("charts") or [])
     elif kind == "data_xlsx":
@@ -280,6 +287,91 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
             document.add_paragraph(str(value), style="List Bullet")
         document.save(path)
     return _record_artifact(database, path, kind, workspace_id, run_id, publication, manifest)
+
+
+def _escape(value: object) -> str:
+    """Escape untrusted text for HTML output.
+
+    Source data, metric labels and model prose all end up in this document, so
+    every interpolation goes through the same escaper.
+    """
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
+    current = payload.get("current") or payload
+    parts: list[str] = [
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+        f"<title>{_escape(payload.get('title') or '数据分析报告')}</title>",
+        "<style>",
+        "body{margin:0;padding:40px 24px;font:15px/1.7 -apple-system,'PingFang SC','Microsoft YaHei',sans-serif;",
+        "color:#161B26;background:#F6F8FC}",
+        "main{max-width:860px;margin:0 auto;background:#fff;border:1px solid #E5E9F0;border-radius:12px;padding:40px}",
+        "h1{font-size:26px;margin:0 0 8px}h2{font-size:18px;margin:32px 0 12px}",
+        "h3{font-size:15px;margin:20px 0 8px}",
+        ".meta{color:#5F697B;font-size:13px;margin-bottom:24px}",
+        ".kpis{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}",
+        ".kpi{flex:1 1 180px;border:1px solid #E5E9F0;border-radius:10px;padding:14px 16px}",
+        ".kpi b{display:block;font-size:24px;margin-top:4px}",
+        ".kpi span{color:#8D96A8;font-size:12px}",
+        "table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}",
+        "th,td{border:1px solid #E5E9F0;padding:8px 10px;text-align:left}",
+        "th{background:#F8FAFD;font-weight:600}",
+        "ul{padding-left:20px}.note{color:#5F697B;font-size:13px;background:#F8FAFD;",
+        "border-left:3px solid #4F6BFF;padding:12px 16px;border-radius:0 8px 8px 0}",
+        "</style></head><body><main>",
+        f"<h1>{_escape(payload.get('title') or '数据分析报告')}</h1>",
+        f"<p class=\"meta\">成果版本 {_escape(manifest.get('version'))} · "
+        f"生成时间 {_escape(manifest.get('created_at'))}</p>",
+    ]
+    contract = payload.get("contract") or {}
+    if contract.get("objective"):
+        parts.append(f"<h2>分析目标</h2><p>{_escape(contract['objective'])}</p>")
+    if contract.get("coverage"):
+        parts.append(f"<p class=\"note\">统计范围：{_escape(contract['coverage'])}</p>")
+
+    kpis = current.get("kpis") or []
+    if kpis:
+        cells = "".join(
+            f"<div class=\"kpi\"><span>{_escape(item.get('label') or item.get('name') or '指标')}</span>"
+            f"<b>{_escape(item.get('display') or item.get('value'))}</b></div>"
+            for item in kpis
+        )
+        parts.append(f"<h2>核心指标</h2><div class=\"kpis\">{cells}</div>")
+
+    summary = current.get("summary") or payload.get("summary")
+    if summary:
+        parts.append(f"<h2>结论</h2><p>{_escape(summary)}</p>")
+
+    for table in payload.get("tables") or []:
+        if not table.get("columns") or not table.get("rows"):
+            continue
+        header = "".join(f"<th>{_escape(column)}</th>" for column in table["columns"])
+        body = "".join(
+            "<tr>" + "".join(
+                f"<td>{_escape(cell)}</td>" for cell in (
+                    row.get(column) if isinstance(row, dict) else row[index]
+                    for index, column in enumerate(table["columns"])
+                )
+            ) + "</tr>"
+            for row in table["rows"][:200]
+        )
+        parts.append(
+            f"<h3>{_escape(table.get('title') or '数据明细')}</h3>"
+            f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+        )
+
+    limitations = current.get("limitations") or payload.get("limitations") or []
+    if limitations:
+        items = "".join(f"<li>{_escape(value)}</li>" for value in limitations)
+        parts.append(f"<h2>限制与待核对事项</h2><ul>{items}</ul>")
+    parts.append(
+        "<h2>数据引用</h2><p class=\"meta\">"
+        + _escape(", ".join(str(item) for item in (payload.get("evidence_refs") or [])) or "无")
+        + "</p></main></body></html>"
+    )
+    return "".join(parts)
 
 
 def generate_artifacts(database: Database, run_id: str, workspace_id: str, kinds: list[str] | None = None) -> list[dict]:

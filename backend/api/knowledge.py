@@ -10,11 +10,9 @@ from ..services.knowledge import (
     parse_knowledge_path,
     save_entry,
     search,
-    strip_temp_prompt_thinking,
 )
-from ..services.models import resolve_provider
 from .common import (
-    api_errors, body, db, ok, require_session_access, require_workspace_record, workspace_id,
+    api_errors, body, db, ok, require_workspace_record, workspace_id,
 )
 
 
@@ -297,74 +295,3 @@ def category_delete(category_id: str):
         raise ValueError("该分类下仍有知识条目，不能删除")
     db().archive("knowledge_categories", category_id)
     return ok()
-
-
-def _temp_state(session: dict) -> dict:
-    text = strip_temp_prompt_thinking(session.get("temporary_instruction"))
-    if text != session.get("temporary_instruction", ""):
-        session = db().patch("sessions", session["id"], {"temporary_instruction": text}) or session
-    return {"temp_prompt": text, "enabled": bool(text and session.get("temp_prompt_enabled", bool(text))), "max_chars": TEMP_PROMPT_MAX_CHARS}
-
-
-@bp.get("/api/sessions/<session_id>/temp-prompt")
-@api_errors
-def temp_prompt_get(session_id: str):
-    return jsonify(_temp_state(require_session_access(session_id)))
-
-
-@bp.post("/api/sessions/<session_id>/temp-prompt")
-@api_errors
-def temp_prompt_set(session_id: str):
-    session = require_session_access(session_id)
-    payload = body()
-    raw_text = strip_temp_prompt_thinking(payload.get("text"))
-    if len(raw_text) > TEMP_PROMPT_MAX_CHARS:
-        raise ValueError(f"内容过长（超过 {TEMP_PROMPT_MAX_CHARS} 字），请精简后再保存。")
-    warning = ""
-    final_text = raw_text
-    if raw_text and not bool(payload.get("raw", True)):
-        provider, client = resolve_provider(str(payload.get("provider") or "") or None, session["workspace_id"])
-        if not provider or not client:
-            warning = "未能调用模型整理（已按原文保存）：没有可用模型"
-        else:
-            try:
-                from ..services.usage import ensure_quota, record_usage, response_usage
-
-                quota = ensure_quota(db(), session["workspace_id"])
-                response = client.chat.completions.create(
-                    model=provider["model"], temperature=0,
-                    max_tokens=max(1, min(1024, quota["remaining"])),
-                    messages=[
-                        {"role": "system", "content": "将用户的临时分析指令整理为精炼中文祈使句；不新增意图，不输出标题、解释或思考标签。"},
-                        {"role": "user", "content": raw_text},
-                    ],
-                )
-                record_usage(
-                    db(), session["workspace_id"], response_usage(response, provider["model"]),
-                    session_id=session_id, operation="prompt_refinement",
-                )
-                refined = strip_temp_prompt_thinking(response.choices[0].message.content)
-                if refined:
-                    final_text = refined
-                else:
-                    warning = "模型未返回可用正文，已按原文保存。"
-            except Exception as exc:
-                log.warning("Temporary prompt refinement failed: %s", type(exc).__name__)
-                warning = "整理失败，已按原文保存。"
-    session = db().patch(
-        "sessions", session_id,
-        {"temporary_instruction": final_text, "temp_prompt_enabled": bool(final_text)},
-    )
-    return jsonify({**_temp_state(session), "warning": warning})
-
-
-@bp.post("/api/sessions/<session_id>/temp-prompt/toggle")
-@api_errors
-def temp_prompt_toggle(session_id: str):
-    session = require_session_access(session_id)
-    text = strip_temp_prompt_thinking(session.get("temporary_instruction"))
-    if not text:
-        session = db().patch("sessions", session_id, {"temp_prompt_enabled": False})
-        return jsonify({**_temp_state(session), "warning": "临时指令为空，无法启用。"})
-    session = db().patch("sessions", session_id, {"temp_prompt_enabled": not session.get("temp_prompt_enabled", True)})
-    return jsonify(_temp_state(session))

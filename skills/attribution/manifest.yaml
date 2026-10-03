@@ -1,0 +1,43 @@
+id: attribution
+name: 归因分析
+category: 数据分析
+version: 1.0.0
+description: 解释指标为什么变化，拆解到可行动的维度与贡献度，给出证据支撑的原因排序。
+usage: 用户问"为什么涨了/跌了""什么原因导致""是什么影响"时使用。
+notes: 归因结论必须有数据证据支撑；无法用数据证实的推测必须显式标记。
+triggers:
+  - 为什么
+  - 原因
+  - 归因
+  - 导致
+  - 造成
+  - 是什么影响
+  - 下降原因
+  - 增长原因
+  - 影响因素
+example_questions:
+  - 为什么华东销售下降？
+  - 本月销售额增长的主要驱动因素是什么？
+  - 客单价下滑是哪些城市造成的？
+allowed_tools:
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - run_analysis
+  - select_chart
+  - generate_chart
+  - validate_result
+metric_names:
+  - sales_amount
+  - order_count
+  - average_order_value
+inputs:
+  - 待解释的指标
+  - 分析时间范围
+  - 对比基期
+outputs:
+  - 原因排序
+  - 各因素贡献度
+  - 支撑证据
+  - 可行动建议

@@ -1,0 +1,30 @@
+id: excel-export
+name: Excel 导出
+category: 报告
+version: 1.0.0
+description: 把分析结果与明细数据导出为可继续加工的 Excel 文件。
+usage: 用户要"导出 Excel""下载数据""给我一份明细表"时使用。
+notes: 导出的数字必须与当前分析一致；不要为了导出去重新计算。
+triggers:
+  - 导出
+  - excel
+  - 下载数据
+  - 明细表
+  - 导出数据
+  - 明细
+  - 下载
+  - 存成表格
+example_questions:
+  - 把这次分析的明细导出成 Excel
+  - 导出一份各城市销售数据
+  - 下载这份明细表
+allowed_tools:
+  - read_tool_result
+  - query_data
+  - query_metric
+inputs:
+  - 已确认的分析结果或明细数据
+  - 导出范围
+outputs:
+  - Excel 文件
+  - 字段说明

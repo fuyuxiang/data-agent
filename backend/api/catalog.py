@@ -24,7 +24,6 @@ from ..services.product import assert_feature_enabled
 from ..services.semantic import (
     compile_metric_query, execute_metric_query, save_metric, save_model, visible_metrics,
 )
-from ..services.skills import DEFAULT_SKILLS, get_skill, public_skill
 from .common import (
     api_errors, body, current_user_id, db, ok, require_workspace_access,
     require_query_result_access, require_session_access, require_source_access,
@@ -378,8 +377,11 @@ def get_query_result(result_id: str):
 @bp.get("/api/semantic/models")
 def list_semantic_models():
     wid = workspace_id()
+    admin = actor_role(db(), wid, current_user_id()) in {"owner", "editor"}
     items = []
     for item in db().list("semantic_models", workspace_id=wid, limit=5000):
+        if not admin and not item.get("enabled", True):
+            continue
         try:
             require_source_access(str(item.get("source_id") or ""), wid)
         except (FileNotFoundError, PermissionError):
@@ -428,7 +430,10 @@ def archive_semantic_model(model_id: str):
 
 @bp.get("/api/semantic/metrics")
 def list_semantic_metrics():
-    return ok(items=visible_metrics(db(), workspace_id(), current_user_id()))
+    wid = workspace_id()
+    admin = actor_role(db(), wid, current_user_id()) in {"owner", "editor"}
+    items = visible_metrics(db(), wid, current_user_id())
+    return ok(items=items if admin else [item for item in items if item.get("status") == "approved"])
 
 
 @bp.post("/api/semantic/metrics")
@@ -588,34 +593,3 @@ def create_knowledge_category():
         workspace_id=wid,
     )
     return ok(item=item), 201
-
-
-@bp.get("/api/skills")
-def list_skills():
-    items = [public_skill(item) for item in DEFAULT_SKILLS]
-    return ok(items=items, skills=items, diagnostics=[])
-
-
-@bp.get("/api/skills/<skill_id>")
-@api_errors
-def get_skill_detail(skill_id: str):
-    skill = get_skill(skill_id, workspace_id())
-    if not skill:
-        raise FileNotFoundError("Skill 不存在")
-    item = public_skill(skill, include_prompt=True)
-    return ok(item=item, skill={**item, "raw": item.get("instruction", "")})
-
-
-@bp.get("/api/commands")
-def commands():
-    return ok(items=[
-        {"name": "data", "description": "打开当前数据源和表预览", "usage": "/data"},
-        {"name": "help", "aliases": ["h", "?"], "description": "查看可用命令", "usage": "/help [命令]"},
-        {"name": "instruction", "aliases": ["i"], "description": "设置当前会话临时指令", "usage": "/instruction [指令]"},
-        {"name": "knowledge", "aliases": ["kb"], "description": "打开业务知识库", "usage": "/knowledge"},
-        {"name": "mcp", "description": "打开 MCP 连接与工具管理", "usage": "/mcp"},
-        {"name": "new", "aliases": ["n"], "description": "新建一个干净分析会话", "usage": "/new [会话名]"},
-        {"name": "sessions", "aliases": ["session"], "description": "管理已保存对话", "usage": "/sessions [new]"},
-        {"name": "status", "aliases": ["s"], "description": "查看模型、数据源和上下文状态", "usage": "/status"},
-        {"name": "workspace", "aliases": ["ws"], "description": "管理工作目录和权限", "usage": "/workspace"},
-    ])

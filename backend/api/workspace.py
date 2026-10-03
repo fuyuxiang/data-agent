@@ -13,6 +13,7 @@ from werkzeug.datastructures import FileStorage
 from ..core.database import utcnow
 from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
+from ..services.demo_sales import sample_questions
 from ..services.product import product_status, seed_demo_workspace
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
@@ -60,6 +61,16 @@ def _validated_session_source_ids(values, wid: str) -> list[str]:
 
 @bp.get("/api/bootstrap")
 def bootstrap():
+    """One aggregate the whole first screen needs, so the UI renders in one round trip.
+
+    Everything here is permission-filtered for the acting user; the admin-only
+    detail views load their own data when the user actually opens them.
+    """
+    from ..services.semantic import visible_metrics
+    from ..skills.models import CATEGORIES
+    from ..skills.permissions import available_resources, filter_visible
+    from ..skills.registry import SkillRegistry
+
     wid = workspace_id()
     product = product_status(db(), wid, current_user_id())
     features = set(product["entitlements"].get("features") or [])
@@ -68,7 +79,42 @@ def bootstrap():
         workspace_id=wid, actor_id=current_user_id(),
     )
     active_session = next((item for item in sessions if item.get("status") == "active"), sessions[0] if sessions else None)
+
+    available = available_resources(db(), wid, current_user_id())
+    skill_registry = SkillRegistry(db(), wid)
+    skills = filter_visible(skill_registry.definitions(include_disabled=False), available)
+    agents = [
+        item for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
+        if item.get("status") == "published"
+        and (item.get("visibility", "workspace") == "workspace"
+             or item.get("created_by") == current_user_id())
+        and all(source_id in available.source_ids for source_id in item.get("source_ids") or [])
+    ]
+    recommended = _recommended_questions(wid, active_session)
     return ok(
+        skills=[item.to_card() for item in skills],
+        skill_categories=list(CATEGORIES),
+        agents=[
+            {
+                "id": item["id"], "name": item.get("name"),
+                "description": item.get("description") or "",
+                "icon": item.get("icon") or "sparkle",
+                "builtin": bool(item.get("builtin")),
+                "source_ids": list(item.get("source_ids") or []),
+                "created_by": item.get("created_by") or "",
+                "tags": list(item.get("tags") or []),
+                "welcome": item.get("welcome") or "",
+                "suggested_questions": list(item.get("suggested_questions") or []),
+            }
+            for item in agents
+        ],
+        recommended_questions=recommended,
+        metrics=[
+            {"id": item["id"], "name": item.get("name"), "label": item.get("label") or item.get("name"),
+             "unit": item.get("unit") or "", "status": item.get("status")}
+            for item in visible_metrics(db(), wid, current_user_id())
+            if item.get("status") == "approved"
+        ],
         workspaces=[item for item in db().list("workspaces") if workspace_membership(item["id"])],
         active_workspace=db().get("workspaces", wid) or db().get("workspaces", "default"),
         active_membership=workspace_membership(wid),
@@ -98,6 +144,33 @@ def bootstrap():
     )
 
 
+def _recommended_questions(wid: str, session: dict | None) -> list[str]:
+    """Questions the workbench should offer *right now*.
+
+    Demo workspaces get the documented sample questions; everyone else gets the
+    questions their own agents declare, so the first screen is never generic.
+    """
+    demo = next(
+        (item for item in db().list("sources", workspace_id=wid, limit=5000)
+         if (item.get("sample_seed") or {}).get("id")), None,
+    )
+    if demo is not None:
+        return sample_questions()[:4]
+    questions: list[str] = []
+    for agent in db().list("agent_definitions", workspace_id=wid, limit=5000):
+        if agent.get("status") != "published":
+            continue
+        if agent.get("visibility") == "private" and agent.get("created_by") != current_user_id():
+            continue
+        try:
+            for source_id in agent.get("source_ids") or []:
+                require_source_access(str(source_id), wid, action="analyze")
+        except (FileNotFoundError, PermissionError):
+            continue
+        questions.extend(str(value) for value in agent.get("suggested_questions") or [])
+    return list(dict.fromkeys(questions))[:6]
+
+
 @bp.post("/api/demo/seed")
 @api_errors
 def seed_demo():
@@ -107,13 +180,9 @@ def seed_demo():
     return ok(
         created=result["created"],
         source=_public_source(result["source"]),
+        summary=result["summary"],
         onboarding=result["onboarding"],
-        recommended_questions=[
-            "活跃合作商家总数是多少，各省份如何分布？",
-            "哪些城市的商家供给存在明显差异？",
-            "结合盈利状态、补贴和履约成本，分析需要优先关注的城市。",
-            "生成一份城市经营简报，包含结论、证据、风险和建议。",
-        ],
+        recommended_questions=sample_questions()[:4],
     )
 
 

@@ -190,6 +190,7 @@ class AgentToolContext:
     tool_result_ids: list[str] = field(default_factory=list)
     knowledge_document_ids: list[str] | None = None
     semantic_metric_ids: list[str] | None = None
+    mcp_server_ids: list[str] | None = None
     actor_id: str = ""
 
     def sources(self) -> list[dict]:
@@ -246,6 +247,8 @@ def tool_schemas(context: AgentToolContext) -> list[dict]:
     for server in context.database.list("mcp_servers", workspace_id=context.workspace_id) if allow_mcp else []:
         if not server.get("enabled", True) or server.get("status") != "connected":
             continue
+        if context.mcp_server_ids is not None and str(server["id"]) not in context.mcp_server_ids:
+            continue
         for tool in server.get("tools", []):
             raw_name = str(tool.get("name") or "").strip()
             if not raw_name:
@@ -289,6 +292,7 @@ def _combined_schema(context: AgentToolContext) -> dict:
             context.database, context.workspace_id, context.actor_id or "local-default",
         )
         if item.get("status") == "approved" and item.get("source_id") in context.source_ids
+        and (context.semantic_metric_ids is None or str(item.get("id")) in context.semantic_metric_ids)
     ]
     file_sources = any(source.get("kind") != "database" for source in sources)
     return {
@@ -799,21 +803,27 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             raise ValueError(f"结构化输出缺少字段：{', '.join(missing)}")
         return {"output": output, "valid": True}, events
     if name == "load_analysis_skill":
-        from .skills import get_skill, public_skill
+        from ..skills.permissions import available_resources, filter_visible
+        from ..skills.registry import SkillRegistry
 
-        requested_name = str(args.get("name") or "").strip()
-        aliases = {
-            "data_quality": "quality-audit",
-            "quality_audit": "quality-audit",
-            "executive_summary": "executive-summary",
-            "trend_diagnosis": "trend-diagnosis",
-        }
-        skill = get_skill(aliases.get(requested_name, requested_name), context.workspace_id)
-        if not skill:
-            raise ValueError(
-                "Skill 不存在；内置 Skill 为 executive-summary、quality-audit、trend-diagnosis"
-            )
-        return public_skill(skill, include_prompt=True), events
+        requested = str(args.get("name") or "").strip()
+        registry = SkillRegistry(context.database, context.workspace_id)
+        actor = context.actor_id or "local-default"
+        available = available_resources(
+            context.database, context.workspace_id, actor, source_ids=context.source_ids,
+        )
+        definition = registry.get(requested)
+        if definition is None:
+            published = sorted(item.id for item in filter_visible(
+                registry.published(), available,
+            ))
+            raise ValueError(f"技能不存在；当前可用技能为：{'、'.join(published)}")
+        if definition.id not in {item.id for item in filter_visible([definition], available)}:
+            raise PermissionError(f"当前无权使用技能：{definition.id}")
+        return {
+            **definition.to_public(),
+            "allowed_tools": list(definition.allowed_tools),
+        }, events
     if name == "task_create":
         item = {
             "id": context.database.new_id("task"), "workspace_id": context.workspace_id,

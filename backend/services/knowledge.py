@@ -334,7 +334,13 @@ def parse_knowledge_path(path: Path, workspace_id: str, provider_id: str = "") -
     raise ValueError("只支持 .xlsx、.xls 和 .docx 知识导入")
 
 
-def strip_temp_prompt_thinking(value: object) -> str:
+def strip_reasoning(value: object) -> str:
+    """Remove private reasoning tags from operator-authored instructions.
+
+    An instruction is operator input that ends up in the model's system prompt.
+    Anything inside ``<think>`` is reasoning scaffolding, not an instruction, and
+    must never be injected.
+    """
     text = str(value or "").strip()
     text = re.sub(r"<think\b[^>]*>[\s\S]*?</think\s*>", "", text, flags=re.IGNORECASE)
     unclosed = re.search(r"<think\b[^>]*>", text, flags=re.IGNORECASE)

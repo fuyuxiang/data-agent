@@ -25,7 +25,6 @@ from backend.services.data_plane.contracts import DatasetRef, DatasetRefStore
 from backend.services.data_plane.sandbox import SandboxUnavailable
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
 from backend.services.results.manifests import ResultService
-from backend.services.skills import get_skill, unsupported_formal_tools
 
 
 def _contract(source_ids=(), objective="按区域核对销售额"):
@@ -83,11 +82,24 @@ def test_analysis_api_requires_versioned_confirmation_and_uses_typed_job(client,
 
 
 def test_formal_analysis_exposes_only_supported_skills(client, source):
+    """A run and an Agent may only bind skills that exist and are formal-safe."""
+    from backend.skills.registry import SkillRegistry
+    from backend.skills.models import FORMAL_AGENT_TOOLS
+
     with client.application.app_context():
-        assert unsupported_formal_tools(get_skill("quality-audit", "default")) == []
+        registry = SkillRegistry(client.application.extensions["meridian_db"], "default")
+        assert {item.id for item in registry.definitions()} >= {
+            "data-query", "data-analysis", "attribution", "forecast", "report",
+        }
+        for definition in registry.definitions():
+            assert not set(definition.allowed_tools) - FORMAL_AGENT_TOOLS
+
     listed = client.get("/api/skills").get_json()["items"]
-    assert {item["id"] for item in listed} == {"executive-summary", "quality-audit", "trend-diagnosis"}
-    assert all(item["formal_compatible"] for item in listed)
+    assert {item["id"] for item in listed} == {
+        "data-query", "data-analysis", "attribution", "forecast", "excel-analysis",
+        "visualization", "deep-research", "report", "ppt", "excel-export",
+    }
+    # Skills that are not published may not be bound.
     rejected = client.post("/api/analyses", json={
         "objective": "评估业务", "source_ids": [source["id"]], "skill_id": "bcg-matrix",
     })
@@ -96,6 +108,11 @@ def test_formal_analysis_exposes_only_supported_skills(client, source):
         "name": "不兼容智能体", "source_ids": [source["id"]], "skill_id": "bcg-matrix",
     })
     assert agent.status_code == 400
+    # A published, formal-safe skill is accepted.
+    bound = client.post("/api/analyses", json={
+        "objective": "为什么下降", "source_ids": [source["id"]], "skill_id": "attribution",
+    })
+    assert bound.status_code == 201, bound.get_json()
 
 
 @pytest.mark.parametrize("mode,expected", [
@@ -406,7 +423,7 @@ def test_query_data_may_narrow_to_one_source_inside_run_scope(app, source):
         queried = executor.execute(
             context=context, decision_id=decision["id"], call_id="query",
             tool_id="query_data", arguments={
-                "source_ids": [source["id"]], "sql": "SELECT COUNT(*) AS rows FROM data",
+                "source_ids": [source["id"]], "sql": "SELECT COUNT(*) AS rows FROM sales",
             },
         )
     assert queried.result.status.value == "SUCCEEDED"
@@ -429,7 +446,7 @@ def test_publication_gate_replays_numeric_claims_against_result_cells(app, sourc
     store, run = _confirmed_run(app, source_ids=(source["id"],))
     with app.app_context():
         result = execute_query(
-            [source["id"]], "SELECT SUM(sales) AS total_sales FROM data", "default",
+            [source["id"]], "SELECT SUM(sales) AS total_sales FROM sales", "default",
             actor_id="local-default",
         )
         evidence = [
@@ -480,7 +497,7 @@ def test_numeric_claim_must_match_the_named_result_row(app, source):
     with app.app_context():
         result = execute_query(
             [source["id"]],
-            "SELECT region, SUM(sales) AS total_sales FROM data GROUP BY region ORDER BY region",
+            "SELECT region, SUM(sales) AS total_sales FROM sales GROUP BY region ORDER BY region",
             "default", actor_id="local-default",
         )
         evidence = [
@@ -504,7 +521,7 @@ def test_publication_gate_accepts_recovered_auxiliary_failure_and_contract_numbe
     with app.app_context():
         result = execute_query(
             [source["id"]],
-            "SELECT SUM(sales) AS total_sales FROM data WHERE sales <= 200", "default",
+            "SELECT SUM(sales) AS total_sales FROM sales WHERE sales <= 200", "default",
             actor_id="local-default",
         )
         dataset_ref_id = store.db.new_id("dref")
@@ -936,7 +953,7 @@ def test_formal_python_analysis_uses_only_bounded_sandbox(app, source, monkeypat
     with app.app_context():
         queried = executor.execute(
             context=context, decision_id=decision["id"], call_id="query",
-            tool_id="query_data", arguments={"sql": "SELECT * FROM data"},
+            tool_id="query_data", arguments={"sql": "SELECT * FROM sales"},
         )
     input_ref = queried.value["dataset_ref_id"]
 
@@ -992,7 +1009,7 @@ def test_formal_python_analysis_fails_closed_without_sandbox(app, source, monkey
     with app.app_context():
         queried = executor.execute(
             context=context, decision_id=decision["id"], call_id="query",
-            tool_id="query_data", arguments={"sql": "SELECT * FROM data"},
+            tool_id="query_data", arguments={"sql": "SELECT * FROM sales"},
         )
 
     def unavailable(*_args, **_kwargs):

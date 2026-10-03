@@ -1,5 +1,5 @@
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -10,6 +10,7 @@ await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await cp(resolve(frontend, 'src'), resolve(output, 'src'), { recursive: true });
 await cp(resolve(frontend, 'vendor'), resolve(output, 'vendor'), { recursive: true });
+
 const vueSource = await readFile(resolve(frontend, 'vendor/vue.global.prod.js'), 'utf8');
 const decodeHtml = (value) => value
   .replaceAll('&quot;', '"').replaceAll('&#39;', "'")
@@ -26,18 +27,40 @@ globalThis.document = {
 };
 const VueCompiler = Function(`${vueSource}; return Vue;`)();
 globalThis.Vue = VueCompiler;
+
+/**
+ * Discover every module that may declare a component template.
+ *
+ * The list used to be hardcoded, so a new component file silently shipped
+ * without a precompiled render function and the production bundle came up
+ * blank.  Scanning the directory removes that whole failure mode.
+ */
+async function collectModules(directory) {
+  const found = [];
+  for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.isDirectory()) {
+      if (entry.name === 'assets' || entry.name === 'node_modules') continue;
+      found.push(...await collectModules(join(directory, entry.name)));
+    } else if (extname(entry.name) === '.js') {
+      found.push(join(directory, entry.name));
+    }
+  }
+  return found;
+}
+
 const renderSources = [];
-for (const filename of ['components.js', 'analysis-panel.js', 'panels.js', 'settings-panel.js', 'app.js']) {
-  const sourcePath = resolve(output, 'src', filename);
-  const source = await readFile(sourcePath, 'utf8');
+for (const file of await collectModules(resolve(output, 'src'))) {
+  const source = await readFile(file, 'utf8');
+  if (!/template\s*:/.test(source)) continue;
   const compiled = source.replace(/template\s*:\s*`([\s\S]*?)`/g, (_match, template) => {
     const render = VueCompiler.compile(template, { hoistStatic: false, cacheHandlers: false });
     const index = renderSources.length;
     renderSources.push(String(render));
     return `render: window.__MERIDIAN_RENDERS[${index}]`;
   });
-  await writeFile(sourcePath, compiled);
+  await writeFile(file, compiled);
 }
+
 const renderBundle = [
   'window.__MERIDIAN_RENDERS = [];',
   // Keep Vue's compiler-generated `_Vue` closure name. Its leading underscore
@@ -54,3 +77,4 @@ html = html.replace(
 );
 await writeFile(resolve(output, 'index.html'), html);
 console.log(`Built static frontend with ${renderSources.length} precompiled templates at ${output}`);
+console.log(`Modules: ${renderSources.length} of ${relative(root, resolve(output, 'src'))} tree`);

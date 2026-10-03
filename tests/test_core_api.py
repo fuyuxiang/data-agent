@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 import pandas as pd
 
 
@@ -132,14 +134,14 @@ def test_source_query_profile_clean_and_guard(client, source):
 
     query = client.post(
         "/api/query",
-        json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM data GROUP BY region ORDER BY sales DESC"},
+        json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM sales GROUP BY region ORDER BY sales DESC"},
     )
     assert query.status_code == 200
     result = query.get_json()["result"]
     assert result["rows"] == 2
     assert result["data"][0]["region"] == "North"
 
-    blocked = client.post("/api/query", json={"source_ids": [source_id], "sql": "DROP TABLE data"})
+    blocked = client.post("/api/query", json={"source_ids": [source_id], "sql": "DROP TABLE sales"})
     assert blocked.status_code == 400
 
     file_escape = client.post(
@@ -150,7 +152,7 @@ def test_source_query_profile_clean_and_guard(client, source):
 
     literal_keyword = client.post(
         "/api/query",
-        json={"source_ids": [source_id], "sql": "SELECT 'please DELETE later' AS note FROM data LIMIT 1"},
+        json={"source_ids": [source_id], "sql": "SELECT 'please DELETE later' AS note FROM sales LIMIT 1"},
     )
     assert literal_keyword.status_code == 200
 
@@ -253,7 +255,7 @@ def test_database_analysis_tables_can_be_selected(app, client):
 
 def test_query_result_can_be_retrieved(client, source):
     source_id = source["id"]
-    response = client.post("/api/query", json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM data GROUP BY region"})
+    response = client.post("/api/query", json={"source_ids": [source_id], "sql": "SELECT region, SUM(sales) AS sales FROM sales GROUP BY region"})
     assert response.status_code == 200
     query = response.get_json()["result"]
     fetched = client.get(f"/api/query-results/{query['id']}")
@@ -314,10 +316,16 @@ def test_hybrid_knowledge_file_skills(client):
     assert found[0]["lexical_score"] > 0
 
     skills = client.get("/api/skills").get_json()
-    assert len(skills["items"]) == 3
-    quality = client.get("/api/skills/quality-audit").get_json()["item"]
-    assert quality["source"] == "builtin"
-    assert "质量问题" in quality["instruction"]
+    builtin = {item["id"] for item in skills["items"]}
+    assert {
+        "data-query", "data-analysis", "attribution", "forecast",
+        "excel-analysis", "visualization", "deep-research", "report", "ppt", "excel-export",
+    } == builtin
+    assert skills["can_manage"] is True
+    attribution = client.get("/api/skills/attribution").get_json()["item"]
+    assert attribution["source"] == "builtin"
+    assert "归因" in attribution["instruction"]
+    assert "query_metric" in attribution["allowed_tools"]
 
 
 
@@ -325,11 +333,34 @@ def test_formal_analysis_records_user_message(client, source):
     session = client.post("/api/sessions", json={"name": "对话测试", "source_ids": [source["id"]]}).get_json()["item"]
     response = client.post(
         "/api/analyses",
-        json={"session_id": session["id"], "objective": "按 region 汇总 sales", "source_ids": [source["id"]], "skill_id": "executive-summary"},
+        json={
+            "session_id": session["id"], "objective": "按 region 汇总 sales",
+            "source_ids": [source["id"]], "skill_id": "data-analysis",
+        },
     )
-    assert response.status_code == 201
+    assert response.status_code == 201, response.get_json()
     assert response.get_json()["item"]["contract"]["payload"]["source_scope"] == [source["id"]]
     assert client.get(f"/api/sessions/{session['id']}").get_json()["messages"][-1]["role"] == "user"
+
+    # A question may also name its skill inline, which is how the composer works.
+    inline = client.post(
+        "/api/analyses",
+        json={
+            "session_id": session["id"], "objective": "@预测分析 预测下个月",
+            "source_ids": [source["id"]],
+        },
+    )
+    assert inline.status_code == 201, inline.get_json()
+    assert inline.get_json()["item"]["skill_id"] == "forecast"
+
+    unknown = client.post(
+        "/api/analyses",
+        json={
+            "session_id": session["id"], "objective": "随便看看",
+            "source_ids": [source["id"]], "skill_id": "no-such-skill",
+        },
+    )
+    assert unknown.status_code == 400
 
 
 def test_identity_password_not_exposed(client):
@@ -352,7 +383,7 @@ def test_formal_analysis_tools_preserve_dataset_lineage(app, source):
             "run_analysis",
             {
                 "analysis_name": "Data_Decile_Analysis",
-                "sql": "SELECT sales FROM data",
+                "sql": "SELECT sales FROM sales",
                 "target_column": "sales",
                 "n_deciles": 3,
             },
@@ -370,15 +401,19 @@ def test_formal_analysis_tools_preserve_dataset_lineage(app, source):
         assert 1 <= len(selection["candidates"]) <= 3
         assert "catalog" not in selection
 
-        skill, _events = execute_tool("load_analysis_skill", {"name": "data_quality"}, context)
-        assert skill["id"] == "quality-audit"
+        skill, _events = execute_tool("load_analysis_skill", {"name": "data-analysis"}, context)
+        assert skill["id"] == "data-analysis"
+        assert "query_metric" in skill["allowed_tools"]
+        # A skill the workspace does not have must fail with the list of what it does have.
+        with pytest.raises(ValueError, match="技能不存在"):
+            execute_tool("load_analysis_skill", {"name": "no-such-skill"}, context)
 
         profile_context = AgentToolContext(
             app.extensions["meridian_db"], "default", "welcome", [source["id"]],
         )
         profiled, _events = execute_tool(
             "profile_data",
-            {"source_id": source["id"], "table": "data", "columns": ['"sales"']},
+            {"source_id": source["id"], "table": "sales", "columns": ['"sales"']},
             profile_context,
         )
         assert profiled["profile"]["numeric_columns"] == ["sales"]

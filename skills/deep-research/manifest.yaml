@@ -1,0 +1,38 @@
+id: deep-research
+name: 深度研究
+category: 深度研究
+version: 1.0.0
+description: 把一个开放问题拆成多个子问题，逐个取证并综合成有依据的研究结论。
+usage: 问题开放、范围大、需要多角度交叉验证时使用，例如"评估某市场进入策略"。
+notes: 深度研究耗时更长；每个子问题都必须有独立证据，不允许用推测补齐。
+triggers:
+  - 深度研究
+  - 深入分析
+  - 调研
+  - 研究
+  - 系统分析
+  - 全面分析
+  - 综述
+example_questions:
+  - 深入研究一下华东市场的增长机会
+  - 系统分析我们的渠道结构问题
+  - 全面评估明年扩张的可行性
+allowed_tools:
+  - query_knowledge
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - run_analysis
+  - select_chart
+  - generate_chart
+  - search_mcp_tools
+  - validate_result
+inputs:
+  - 开放性问题
+  - 分析边界
+outputs:
+  - 子问题拆解
+  - 分项证据
+  - 综合结论
+  - 未解问题

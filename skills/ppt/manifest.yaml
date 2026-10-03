@@ -1,0 +1,27 @@
+id: ppt
+name: PPT 生成
+category: 报告
+version: 1.0.0
+description: 把已完成的分析整理成管理层汇报用的演示文稿。
+usage: 用户要求"生成 PPT""做一份汇报幻灯片""给领导看的材料"时使用。
+notes: 直接复用当前对话的分析结论；PPT 面向决策，不是数据仓库。
+triggers:
+  - ppt
+  - 幻灯片
+  - 演示文稿
+  - 汇报材料
+  - 给领导看
+  - 汇报用
+example_questions:
+  - 生成经营分析 PPT
+  - 把这次分析做成汇报幻灯片
+  - 给管理层出一份 PPT
+allowed_tools:
+  - read_tool_result
+  - generate_chart
+inputs:
+  - 当前对话已有的分析结论与数据
+  - 汇报对象
+outputs:
+  - PPT 文件
+  - 分页大纲

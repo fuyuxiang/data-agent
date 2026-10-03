@@ -1,0 +1,41 @@
+id: forecast
+name: 预测分析
+category: 数据分析
+version: 1.0.0
+description: 基于历史序列预测未来走势，给出预测区间、关键假设与不确定性说明。
+usage: 用户问"下个月会怎样""预测一下""未来趋势"时使用。
+notes: 预测必须给出区间而不是单点；数据不足以支撑预测时要直接说明。
+triggers:
+  - 预测
+  - 预计
+  - 未来
+  - 下个月
+  - 下月
+  - 下季度
+  - 展望
+  - 会怎样
+  - 趋势预测
+example_questions:
+  - 预测下个月销售额
+  - 未来三个月订单量会怎么走？
+  - 下季度业绩展望
+allowed_tools:
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - run_analysis
+  - select_chart
+  - generate_chart
+  - validate_result
+metric_names:
+  - sales_amount
+  - order_count
+inputs:
+  - 待预测指标
+  - 历史数据区间
+  - 预测步长
+outputs:
+  - 预测值与区间
+  - 关键假设
+  - 不确定性说明

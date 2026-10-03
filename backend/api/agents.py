@@ -5,7 +5,6 @@ from __future__ import annotations
 from flask import Blueprint
 
 from ..services.authorization import actor_role
-from ..services.skills import get_skill, require_formal_skill
 from .common import (
     api_errors, body, current_user_id, db, ok, require_source_access,
     require_workspace_access, require_workspace_record, workspace_id,
@@ -15,12 +14,19 @@ from .common import (
 bp = Blueprint("agents", __name__)
 
 
+def _check_private_owner(item: dict) -> None:
+    if item.get("visibility") == "private" and item.get("created_by") != current_user_id():
+        raise FileNotFoundError("智能体不存在")
+
+
 def _public(item: dict, *, admin: bool) -> dict:
     if admin:
-        return item
+        return {**item, "skill_ids": list(item.get("skill_ids") or ([item["skill_id"]] if item.get("skill_id") else []))}
     return {key: item.get(key) for key in (
         "id", "workspace_id", "name", "description", "version", "status", "source_ids",
-        "knowledge_document_ids", "provider_id", "skill_id", "published_at",
+        "knowledge_document_ids", "provider_id", "skill_id", "skill_ids", "metric_ids",
+        "mcp_server_ids", "icon", "tags", "welcome", "suggested_questions", "visibility",
+        "published_at",
     )}
 
 
@@ -46,19 +52,64 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
     provider_id = str(merged.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", provider_id)
-    skill_id = str(merged.get("skill_id") or "") or None
-    if skill_id:
-        skill = get_skill(skill_id, workspace_id())
-        if not skill or (skill.get("status") and skill.get("status") != "published"):
+
+    # Skills: a resource list, not a single prompt.  Every one must exist, be
+    # published, and stay inside the governed tool surface.
+    from ..skills.models import FORMAL_AGENT_TOOLS
+    from ..skills.registry import SkillRegistry
+
+    wid = workspace_id()
+    registry = SkillRegistry(db(), wid)
+    requested = merged.get("skill_ids")
+    if requested is None:
+        requested = [merged.get("skill_id")] if merged.get("skill_id") else []
+    skill_ids: list[str] = []
+    for skill_id in dict.fromkeys(str(value) for value in requested if value):
+        definition = registry.get(skill_id)
+        if definition is None:
+            raise ValueError(f"技能不存在：{skill_id}")
+        if definition.status != "published":
             raise ValueError("智能体只能绑定已发布的 Skill")
-        require_formal_skill(skill)
-    instruction = str(merged.get("instruction") or "").strip()
+        unsupported = sorted(set(definition.allowed_tools) - FORMAL_AGENT_TOOLS)
+        if unsupported:
+            raise ValueError(f"Skill 使用了正式分析不支持的工具：{'、'.join(unsupported)}")
+        skill_ids.append(definition.id)
+
+    metric_ids = list(dict.fromkeys(str(value) for value in merged.get("metric_ids") or []))
+    for metric_id in metric_ids:
+        metric = require_workspace_record("semantic_metrics", metric_id, wid)
+        model = require_workspace_record("semantic_models", str(metric.get("model_id") or ""), wid)
+        if metric.get("status") != "approved" or not model.get("enabled", True):
+            raise ValueError("智能体只能绑定已发布且模型可用的指标")
+        if model.get("source_id") not in source_ids:
+            raise ValueError("智能体绑定指标的数据源必须在已选范围内")
+
+    mcp_server_ids = list(dict.fromkeys(str(value) for value in merged.get("mcp_server_ids") or []))
+    for server_id in mcp_server_ids:
+        require_workspace_record("mcp_servers", server_id, wid)
+
+    from ..services.knowledge import strip_reasoning
+
+    instruction = strip_reasoning(merged.get("instruction"))
     if len(instruction) > 16_000:
         raise ValueError("智能体说明超过 16000 字")
+    visibility = str(merged.get("visibility") or "workspace").strip()
+    if visibility not in {"workspace", "private"}:
+        raise ValueError("可见范围只能是 workspace 或 private")
+    suggested = merged.get("suggested_questions") or []
+    if not isinstance(suggested, list) or len(suggested) > 8:
+        raise ValueError("推荐问题最多 8 条")
     return {
         "name": name, "description": str(merged.get("description") or "").strip()[:1000],
         "instruction": instruction, "source_ids": source_ids,
-        "knowledge_document_ids": knowledge_ids, "provider_id": provider_id, "skill_id": skill_id,
+        "knowledge_document_ids": knowledge_ids, "provider_id": provider_id,
+        "skill_id": skill_ids[0] if skill_ids else None, "skill_ids": skill_ids,
+        "metric_ids": metric_ids, "mcp_server_ids": mcp_server_ids,
+        "icon": str(merged.get("icon") or "sparkle")[:40],
+        "tags": [str(value)[:24] for value in (merged.get("tags") or [])][:8],
+        "welcome": str(merged.get("welcome") or "")[:500],
+        "suggested_questions": [str(value)[:200] for value in suggested],
+        "visibility": visibility,
     }
 
 
@@ -71,6 +122,8 @@ def list_agents():
     items = []
     for item in db().list("agent_definitions", workspace_id=wid, limit=5000):
         if not admin and item.get("status") != "published":
+            continue
+        if item.get("visibility") == "private" and item.get("created_by") != current_user_id():
             continue
         try:
             for source_id in item.get("source_ids") or []:
@@ -99,6 +152,9 @@ def create_agent():
 def update_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
     require_workspace_access(item["workspace_id"], write=True)
+    _check_private_owner(item)
+    if body().get("visibility") == "private" and item.get("created_by") != current_user_id():
+        raise PermissionError("只能将自己创建的智能体设为私有")
     definition = _validated(body(), item)
     updated = db().patch("agent_definitions", agent_id, {
         **definition, "status": "draft", "version": int(item.get("version") or 1) + 1,
@@ -111,10 +167,18 @@ def update_agent(agent_id: str):
 @api_errors
 def publish_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
-    require_workspace_access(item["workspace_id"], owner=True)
+    _check_private_owner(item)
+    require_workspace_access(
+        item["workspace_id"], write=True if item.get("visibility") == "private" else False,
+        owner=item.get("visibility") != "private",
+    )
     definition = _validated({}, item)
     if not definition["source_ids"]:
         raise ValueError("数据分析智能体至少需要一个数据源")
+    for server_id in definition["mcp_server_ids"]:
+        server = require_workspace_record("mcp_servers", server_id, item["workspace_id"])
+        if not server.get("enabled", True) or server.get("status") != "connected":
+            raise ValueError("智能体绑定的 MCP 服务未连接，请先恢复连接")
     from ..core.database import utcnow
 
     snapshot = {**definition, "id": item["id"], "version": item["version"], "workspace_id": item["workspace_id"]}
@@ -136,7 +200,11 @@ def publish_agent(agent_id: str):
 @api_errors
 def rollback_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
-    require_workspace_access(item["workspace_id"], owner=True)
+    _check_private_owner(item)
+    require_workspace_access(
+        item["workspace_id"], write=True if item.get("visibility") == "private" else False,
+        owner=item.get("visibility") != "private",
+    )
     version = int(body().get("version") or 0)
     old = require_workspace_record("agent_versions", f"{agent_id}:{version}", item["workspace_id"])
     definition = _validated(old["snapshot"], item)
@@ -145,3 +213,22 @@ def rollback_agent(agent_id: str):
         "published_at": None,
     }, workspace_id=item["workspace_id"])
     return ok(item=updated)
+
+
+@bp.delete("/api/agents/<agent_id>")
+@api_errors
+def delete_agent(agent_id: str):
+    item = require_workspace_record("agent_definitions", agent_id)
+    _check_private_owner(item)
+    if item.get("builtin"):
+        raise ValueError("内置智能体不可删除")
+    require_workspace_access(
+        item["workspace_id"], write=True,
+        owner=item.get("status") == "published" and item.get("visibility") != "private",
+    )
+    db().archive("agent_definitions", agent_id, workspace_id=item["workspace_id"])
+    db().audit(
+        "agent.deleted", workspace_id=item["workspace_id"], actor=current_user_id(),
+        object_type="agent_definition", object_id=agent_id,
+    )
+    return ok(archived=True)

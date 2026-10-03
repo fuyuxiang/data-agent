@@ -1,0 +1,32 @@
+id: report
+name: 报告生成
+category: 报告
+version: 1.0.0
+description: 把已完成的分析整理成可直接汇报的正式报告文档。
+usage: 分析已经完成，用户要求"生成报告""写成文档""出一份汇报材料"时使用。
+notes: 直接复用当前对话的分析结论和数据，不要重新取数、重新计算。
+triggers:
+  - 报告
+  - 生成报告
+  - 汇报材料
+  - 文档
+  - 总结文档
+  - 分析报告
+  - 出一份
+example_questions:
+  - 生成 9 月经营分析报告
+  - 把这次分析整理成一份汇报文档
+  - 出一份管理层看的分析报告
+allowed_tools:
+  - query_knowledge
+  - list_semantic_metrics
+  - read_tool_result
+  - generate_chart
+  - validate_result
+inputs:
+  - 当前对话已有的分析结论与数据
+  - 报告受众
+outputs:
+  - Word 报告
+  - 结论摘要
+  - 支撑数据与图表

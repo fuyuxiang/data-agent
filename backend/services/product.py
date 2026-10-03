@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
+import io
 from typing import Any
 
 from werkzeug.datastructures import FileStorage
 
 from ..core.database import Database
+from . import demo_sales
 
-SAMPLE_SEED_ID = "instant_retail_city_pack"
+SAMPLE_SEED_ID = demo_sales.SAMPLE_SEED_ID
 DEPLOYMENT_FEATURES = frozenset({
     "data_sources", "governed_agent", "knowledge_base", "semantic_layer",
     "result_delivery", "mcp_integrations", "warehouse", "workspace_governance",
-    "audit", "lifecycle_management",
+    "audit", "lifecycle_management", "skills", "agents", "library",
 })
 
 
@@ -34,94 +35,53 @@ def assert_feature_enabled(database: Database, workspace_id: str, feature: str) 
 
 
 def onboarding_status(database: Database, workspace_id: str) -> dict[str, Any]:
+    """Three steps, in the order a new user actually needs them."""
     source_count = len(database.list("sources", workspace_id=workspace_id, limit=5000))
-    knowledge_count = len(database.list("knowledge_documents", workspace_id=workspace_id, limit=5000)) + len(
-        database.list("knowledge_entries", workspace_id=workspace_id, limit=5000),
-    )
     metric_count = len([
         item for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
         if item.get("status") == "approved"
     ])
-    run_count = len(database.list("publications", workspace_id=workspace_id, limit=5000)) + len([
-        item for item in database.list("agent_runs", workspace_id=workspace_id, limit=5000)
-        if item.get("execution_status") == "finished"
-    ])
+    from ..services.models import public_provider
+
+    model_ready = False
+    for provider in database.list("providers", workspace_id=workspace_id, limit=5000):
+        if provider.get("enabled", True) and str(public_provider(provider).get("status") or "") == "ready":
+            model_ready = True
+            break
     steps = [
         {
-            "id": "connect_data", "name": "接入数据",
-            "description": "至少登记一个可预览、可查询的数据源。",
-            "done": source_count > 0, "count": source_count, "route": "sources",
+            "id": "connect_model", "name": "连接模型",
+            "description": "配置一个可用的模型服务，Agent 才能自主分析。",
+            "done": model_ready, "route": "admin/models",
         },
         {
-            "id": "define_context", "name": "沉淀业务口径",
-            "description": "录入指标定义、业务规则或知识文档，回答才有业务语境。",
-            "done": knowledge_count > 0, "count": knowledge_count, "route": "knowledge",
+            "id": "add_data", "name": "添加数据",
+            "description": "接入数据源，或先载入一套演示数据直接体验。",
+            "done": source_count > 0, "count": source_count, "route": "admin/data",
         },
         {
-            "id": "approve_metrics", "name": "审批核心指标",
-            "description": "建立语义模型并审批至少一个正式指标。",
-            "done": metric_count > 0, "count": metric_count, "route": "semantic",
-        },
-        {
-            "id": "run_analysis", "name": "完成一次受治理分析",
-            "description": "确认需求理解后执行 Agent，并生成可追溯结果。",
-            "done": run_count > 0, "count": run_count, "route": "chat",
+            "id": "ask_question", "name": "开始提问",
+            "description": "在工作台用业务语言提问，系统会自动选择技能并给出可信结果。",
+            "done": bool(database.list("agent_runs", workspace_id=workspace_id, limit=1)),
+            "route": "workbench",
         },
     ]
-    required_done = all(item["done"] for item in steps[:4])
+    required = [item for item in steps if item["id"] != "ask_question"]
     return {
         "workspace_id": workspace_id,
-        "complete": required_done,
-        "score": round(sum(1 for item in steps if item["done"]) / len(steps), 4),
+        "complete": all(item["done"] for item in required),
+        "score": round(sum(1 for item in required if item["done"]) / len(required), 4),
         "steps": steps,
-        "next_step": next((item for item in steps if not item["done"]), None),
+        "next_step": next((item for item in required if not item["done"]), None),
+        "metric_count": metric_count,
         "demo_available": True,
         "sample_seed_id": SAMPLE_SEED_ID,
     }
 
 
-
-def seed_demo_workspace(database: Database, workspace_id: str, actor_id: str) -> dict[str, Any]:
-    source = _existing_sample_source(database, workspace_id)
-    created: list[str] = []
-    if source is None:
-        source = _register_sample_source(workspace_id)
-        patched = database.patch(
-            "sources",
-            source["id"],
-            {
-                "name": "即时零售 10 城经营样例",
-                "description": "内置标准演示数据：城市、订单、市占率、客单价、履约成本、补贴、用户与商家结构。",
-                "classification": "internal",
-                "sensitivity": "internal",
-                "sample_seed": {"id": SAMPLE_SEED_ID, "version": 1},
-            },
-            workspace_id=workspace_id,
-        )
-        source = patched or source
-        created.append("source")
-
-    entries_created = _ensure_sample_knowledge(database, workspace_id)
-    created.extend(["knowledge_entry"] * entries_created)
-    semantic_created = _ensure_sample_semantic(database, workspace_id, source, actor_id)
-    created.extend(semantic_created)
-    _attach_sample_to_active_session(database, workspace_id, source["id"])
-    database.audit(
-        "product.demo_seeded", workspace_id=workspace_id, actor=actor_id,
-        object_type="sample_seed", object_id=SAMPLE_SEED_ID,
-        detail={"created": created, "source_id": source["id"]},
-    )
-    return {
-        "created": created,
-        "source": source,
-        "onboarding": onboarding_status(database, workspace_id),
-        "entitlements": workspace_entitlements(database, workspace_id),
-    }
-
-
-def _sample_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "deploy" / "samples" / "Sample-data.xlsx"
-
+# --------------------------------------------------------------------------- #
+# Demo data
+# --------------------------------------------------------------------------- #
 
 def _existing_sample_source(database: Database, workspace_id: str) -> dict[str, Any] | None:
     for source in database.list("sources", workspace_id=workspace_id, limit=5000):
@@ -134,60 +94,59 @@ def _existing_sample_source(database: Database, workspace_id: str) -> dict[str, 
 def _register_sample_source(workspace_id: str) -> dict[str, Any]:
     from .datasets import register_upload
 
-    path = _sample_path()
-    if not path.is_file():
-        raise FileNotFoundError("内置演示数据文件不存在：deploy/samples/Sample-data.xlsx")
-    with path.open("rb") as stream:
-        storage = FileStorage(stream=stream, filename=path.name, name="file")
-        return register_upload(storage, workspace_id)
+    frame = demo_sales.build_frame()
+    payload = demo_sales.to_csv_bytes(frame)
+    stream = FileStorage(
+        stream=io.BytesIO(payload),
+        # The upload path is validated with secure_filename, which strips
+        # non-ASCII characters; the display name is set afterwards.
+        filename="sales_monthly.csv",
+        name="file",
+    )
+    record = register_upload(stream, workspace_id)
+    return record
+
+
+def _ensure_sample_source(database: Database, workspace_id: str) -> tuple[dict[str, Any], list[str]]:
+    existing = _existing_sample_source(database, workspace_id)
+    if existing is not None:
+        return existing, []
+    source = _register_sample_source(workspace_id)
+    from ..core.database import utcnow
+
+    frame = demo_sales.build_frame()
+    patched = database.patch(
+        "sources",
+        source["id"],
+        {
+            "name": "即时零售月度销售样例",
+            "description": (
+                f"内置演示数据：{frame['统计年月'].nunique()} 个自然月的销售事实，"
+                f"覆盖 {frame['区域'].nunique()} 个区域、{frame['城市'].nunique()} 座城市、"
+                f"{frame['品类'].nunique()} 个品类与 {frame['渠道'].nunique()} 个渠道。"
+            ),
+            "classification": "internal",
+            "sensitivity": "internal",
+            "sample_seed": {"id": SAMPLE_SEED_ID, "version": 2},
+            "last_refreshed_at": utcnow(),
+        },
+        workspace_id=workspace_id,
+    )
+    return (patched or source), ["source"]
 
 
 def _ensure_sample_knowledge(database: Database, workspace_id: str) -> int:
     from .knowledge import save_entry
 
-    existing_entries = {
+    existing = {
         str((item.get("sample_seed") or {}).get("key") or ""): item
         for item in database.list("knowledge_entries", workspace_id=workspace_id, limit=5000)
         if (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID
     }
-    payloads = [
-        {
-            "key": "profitability",
-            "type": "metric",
-            "name": "城市盈利状态",
-            "alias": "盈利/亏损城市",
-            "definition": "基于城市当前盈利状况字段识别经营健康度，必须结合订单规模、市占率、履约成本和补贴判断。",
-            "notes": "样例中用于解释区域经营差异，不能外推为真实市场结论。",
-        },
-        {
-            "key": "active_merchants",
-            "type": "metric",
-            "name": "活跃合作商家数",
-            "alias": "商家供给",
-            "definition": "城市当前可服务的活跃合作商家数量，用于衡量供给密度和履约承载能力。",
-            "sql_template": "SUM(活跃合作商家数)",
-        },
-        {
-            "key": "subsidy_rule",
-            "type": "business_rule",
-            "name": "补贴效率诊断规则",
-            "rule_id": "IR-SUBSIDY-001",
-            "description": "当城市补贴及营销/单高、但市占率或订单增速仍低时，应优先检查供给密度、履约成本和高价值用户占比。",
-            "severity": "medium",
-        },
-        {
-            "key": "analysis_context",
-            "type": "context_note",
-            "name": "即时零售经营分析背景",
-            "topic": "即时零售经营分析背景",
-            "content": "样例用于演示从数据接入、口径沉淀、指标审批到可信分析与报告交付的 Data Agent 核心主路径。",
-            "tags": ["demo", "instant-retail"],
-        },
-    ]
     created = 0
-    for payload in payloads:
+    for payload in demo_sales.knowledge_payloads():
         key = payload.pop("key")
-        current = existing_entries.get(key)
+        current = existing.get(key)
         desired = {**payload, "sample_seed": {"id": SAMPLE_SEED_ID, "key": key}}
         if current:
             if any(current.get(field) != value for field, value in desired.items()):
@@ -204,6 +163,12 @@ def _ensure_sample_semantic(
     from .semantic import save_metric, save_model
 
     created: list[str] = []
+    tables = source.get("tables") or []
+    table_name = str(tables[0].get("name") or tables[0].get("source_name") or "") if tables else ""
+    if not table_name:
+        return created
+
+    payload = demo_sales.semantic_model_payload(table_name)
     existing_model = next(
         (
             item for item in database.list("semantic_models", workspace_id=workspace_id, limit=5000)
@@ -211,84 +176,121 @@ def _ensure_sample_semantic(
         ),
         None,
     )
-    table_name = str((source.get("tables") or [{}])[0].get("name") or "t_10城数据包")
     if existing_model:
         model = existing_model
     else:
         model = save_model(
-            database,
-            {
-                "source_id": source["id"],
-                "name": "即时零售城市经营模型",
-                "description": "围绕城市、省份、盈利状态和活跃商家供给构建的演示语义模型。",
-                "table": table_name,
-                "grain": "城市",
-                "entities": [{"name": "城市", "column": "城市", "type": "primary", "label": "城市"}],
-                "dimensions": [
-                    {"name": "城市", "column": "城市", "type": "categorical", "label": "城市"},
-                    {"name": "省份", "column": "省份", "type": "categorical", "label": "省份"},
-                    {
-                        "name": "城市当前盈利状况", "column": "城市当前盈利状况",
-                        "type": "categorical", "label": "盈利状态",
-                    },
-                ],
-                "measures": [
-                    {
-                        "name": "active_merchants", "column": "活跃合作商家数",
-                        "aggregation": "sum", "label": "活跃合作商家数",
-                    },
-                ],
-            },
-            workspace_id,
-            actor_id,
+            database, {**payload, "source_id": source["id"]}, workspace_id, actor_id,
         )
         model = database.patch(
-            "semantic_models", model["id"], {"sample_seed": {"id": SAMPLE_SEED_ID, "version": 1}},
-            workspace_id=workspace_id,
+            "semantic_models", model["id"],
+            {"sample_seed": {"id": SAMPLE_SEED_ID, "version": 2}}, workspace_id=workspace_id,
         ) or model
         created.append("semantic_model")
 
-    existing_metric = next(
-        (
-            item for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
-            if item.get("model_id") == model["id"] and item.get("name") == "active_merchants_total"
-        ),
-        None,
-    )
-    if not existing_metric:
-        metric = save_metric(
-            database,
-            {
-                "model_id": model["id"],
-                "name": "active_merchants_total",
-                "label": "活跃合作商家总数",
-                "description": "样例经营分析中的供给规模指标。",
-                "measure": "active_merchants",
-                "aliases": ["商家供给", "活跃商家"],
-                "unit": "个",
-                "format": "integer",
-                "status": "approved",
-            },
-            workspace_id,
-            actor_id,
+    by_name = {
+        str(item.get("name")): item
+        for item in database.list("semantic_metrics", workspace_id=workspace_id, limit=5000)
+        if item.get("model_id") == model["id"]
+    }
+    # Atomic metrics must exist before derived ones reference them.
+    for metric in sorted(demo_sales.metric_payloads(), key=lambda item: item.get("metric_type") != "atomic"):
+        name = str(metric["name"])
+        desired = {key: value for key, value in metric.items() if key != "status"}
+        if name in by_name:
+            continue
+        saved = save_metric(
+            database, {**desired, "model_id": model["id"], "status": "approved"},
+            workspace_id, actor_id,
         )
         database.patch(
-            "semantic_metrics", metric["id"], {"sample_seed": {"id": SAMPLE_SEED_ID, "version": 1}},
-            workspace_id=workspace_id,
+            "semantic_metrics", saved["id"],
+            {"sample_seed": {"id": SAMPLE_SEED_ID, "version": 2}}, workspace_id=workspace_id,
         )
         created.append("semantic_metric")
     return created
 
 
-def _attach_sample_to_active_session(
-    database: Database, workspace_id: str, source_id: str,
-) -> None:
+def _attach_sample_to_active_session(database: Database, workspace_id: str, source_id: str) -> None:
     sessions = database.list("sessions", workspace_id=workspace_id, limit=5000)
-    session = next((item for item in sessions if item.get("status") == "active"), sessions[0] if sessions else None)
+    session = next(
+        (item for item in sessions if item.get("status") == "active"),
+        sessions[0] if sessions else None,
+    )
     if not session:
         return
     source_ids = list(dict.fromkeys([source_id, *(str(item) for item in session.get("source_ids") or [])]))
     database.patch(
-        "sessions", session["id"], {"source_ids": source_ids},
-        workspace_id=workspace_id,
+        "sessions", session["id"], {"source_ids": source_ids}, workspace_id=workspace_id,
     )
+
+
+def seed_demo_workspace(database: Database, workspace_id: str, actor_id: str) -> dict[str, Any]:
+    """Idempotently load the demo data set, its metrics and its knowledge."""
+    source, created = _ensure_sample_source(database, workspace_id)
+    created += ["knowledge_entry"] * _ensure_sample_knowledge(database, workspace_id)
+    created += _ensure_sample_semantic(database, workspace_id, source, actor_id)
+    _attach_sample_to_active_session(database, workspace_id, source["id"])
+    ensure_super_agent(database, workspace_id, actor_id)
+    database.audit(
+        "product.demo_seeded", workspace_id=workspace_id, actor=actor_id,
+        object_type="sample_seed", object_id=SAMPLE_SEED_ID,
+        detail={"created": created},
+    )
+    return {
+        "created": created,
+        "source": source,
+        "summary": demo_sales.summary(demo_sales.build_frame()),
+        "onboarding": onboarding_status(database, workspace_id),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Super agent
+# --------------------------------------------------------------------------- #
+
+SUPER_AGENT_ID = "agent-superskill"
+SUPER_AGENT_NAME = "数擎超级智能体"
+SUPER_AGENT_INSTRUCTION = (
+    "你是企业数据智能体。用户会提出业务问题，你负责理解问题、选择正确的能力、"
+    "调用企业数据得出可靠结论。\n\n"
+    "工作方式：\n"
+    "1. 有正式指标时优先用指标定义，保证口径一致；没有对应指标时再做探索性分析。\n"
+    "2. 结论先行，再给支撑数据。每个数字都要能追溯。\n"
+    "3. 数据不足以回答时直接说明缺什么，不用估算填补。\n"
+    "4. 区分「数据表明的」和「推测的」，推测必须标注。\n"
+    "5. 不展示内部推理过程，只给结论、证据和下一步建议。"
+)
+
+
+def ensure_super_agent(database: Database, workspace_id: str, actor_id: str) -> dict[str, Any]:
+    """Create the default entry agent if the workspace does not have one yet."""
+    existing = database.get("agent_definitions", SUPER_AGENT_ID, workspace_id=workspace_id)
+    if existing:
+        return existing
+    from ..core.database import utcnow
+
+    return database.put("agent_definitions", {
+        "id": SUPER_AGENT_ID,
+        "workspace_id": workspace_id,
+        "name": SUPER_AGENT_NAME,
+        "description": "默认入口智能体，自动选择合适技能完成问数、分析、归因、预测与报告生成。",
+        "instruction": SUPER_AGENT_INSTRUCTION,
+        "icon": "sparkle",
+        "tags": ["官方", "数据分析", "问数"],
+        "source_ids": [],
+        "knowledge_document_ids": [],
+        "metric_ids": [],
+        "mcp_server_ids": [],
+        "provider_id": None,
+        "skill_id": None,
+        "skill_ids": [],
+        "welcome": "问我任何企业数据问题，我会自动选择合适的技能并给出可核验的结论。",
+        "suggested_questions": demo_sales.sample_questions()[:4],
+        "visibility": "workspace",
+        "status": "published",
+        "version": 1,
+        "created_by": actor_id,
+        "published_at": utcnow(),
+        "builtin": True,
+    }, workspace_id=workspace_id)

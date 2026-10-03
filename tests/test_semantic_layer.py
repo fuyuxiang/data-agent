@@ -6,7 +6,7 @@ def _model(client, source):
         "name": "sales_model",
         "description": "销售事实语义模型",
         "source_id": source["id"],
-        "table": "data",
+        "table": "sales",
         "grain": "每行为一个区域月度记录",
         "entities": [],
         "dimensions": [

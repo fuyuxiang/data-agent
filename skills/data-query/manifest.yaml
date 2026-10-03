@@ -1,0 +1,41 @@
+id: data-query
+name: 数据查询
+category: 数据分析
+version: 1.0.0
+description: 用业务语言取数并给出可追溯的数值与明细，支持按维度拆分、排序和筛选。
+usage: 当用户只想知道"是多少""有多少""哪些"这类事实性问题时使用。
+notes: 取数优先走正式指标定义；没有对应指标时才做探索性 SQL。
+triggers:
+  - 多少
+  - 是多少
+  - 查询
+  - 统计
+  - 总量
+  - 汇总
+  - 排名
+  - 占比
+  - 列出
+  - 明细
+example_questions:
+  - 本月销售额是多少？
+  - 华东地区各城市的订单量排名
+  - 本季度销售额前 10 的商品有哪些？
+allowed_tools:
+  - get_schema
+  - list_semantic_metrics
+  - query_metric
+  - query_data
+  - profile_data
+  - generate_chart
+  - validate_result
+metric_names:
+  - sales_amount
+  - order_count
+  - average_order_value
+inputs:
+  - 业务问题
+  - 时间范围
+outputs:
+  - 结论数值
+  - 维度明细表
+  - 口径与数据来源
