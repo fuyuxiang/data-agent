@@ -27,14 +27,19 @@ jobs:
             requirements-dev.lock
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y unixodbc-dev postgresql mysql-server
-      - name: Start test databases
+      - name: Start PostgreSQL and MySQL
         run: |
           sudo systemctl start postgresql mysql
+          pg_isready -h 127.0.0.1
+          sudo mysqladmin ping
+      - name: Configure PostgreSQL test database
+        run: |
           sudo -u postgres psql -c "CREATE ROLE meridian LOGIN PASSWORD 'meridian-ci-password'"
           sudo -u postgres createdb --owner=meridian meridian
-          sudo mysql -e "CREATE DATABASE meridian; CREATE USER 'meridian'@'127.0.0.1' IDENTIFIED BY 'meridian-ci-password'; CREATE USER 'meridian'@'localhost' IDENTIFIED BY 'meridian-ci-password'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'127.0.0.1'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'localhost';"
-          pg_isready -h 127.0.0.1
           PGPASSWORD=meridian-ci-password psql -h 127.0.0.1 -U meridian -d meridian -c 'SELECT 1'
+      - name: Configure MySQL test database
+        run: |
+          sudo mysql -e "CREATE DATABASE meridian; CREATE USER 'meridian'@'127.0.0.1' IDENTIFIED BY 'meridian-ci-password'; CREATE USER 'meridian'@'localhost' IDENTIFIED BY 'meridian-ci-password'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'127.0.0.1'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'localhost';"
           mysql -h 127.0.0.1 -u meridian -pmeridian-ci-password -e 'SELECT 1'
       - name: Install Python dependencies
         run: python -m pip install --require-hashes --requirement requirements-dev.lock
