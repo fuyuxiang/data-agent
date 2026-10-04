@@ -5,13 +5,11 @@ import subprocess
 
 import pandas as pd
 import pytest
-import requests
 
 from backend.services.data_plane.livy import LivyBatchAdapter, LivyConfig
-from backend.services.data_plane.sandbox import SandboxLimits, SandboxRunner, SandboxUnavailable
-from backend.services.data_plane.sandbox_client import SandboxClient
+from backend.services.data_plane.local_analysis import LocalAnalysisRunner
+from backend.services.data_plane.reviewed_analysis import _parquet_safe_frame
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
-from deploy.sandbox.run_job import _parquet_safe_frame
 
 
 class Response:
@@ -31,7 +29,7 @@ class Response:
         return self.value
 
 
-def test_sandbox_describe_result_with_categorical_values_is_parquet_safe(tmp_path):
+def test_reviewed_describe_result_with_categorical_values_is_parquet_safe(tmp_path):
     frame = pd.DataFrame({"group": ["a", "a", "b"], "value": [1, 2, 3]})
 
     result = _parquet_safe_frame(frame.describe(include="all").reset_index())
@@ -44,7 +42,7 @@ def test_sandbox_describe_result_with_categorical_values_is_parquet_safe(tmp_pat
     assert pd.isna(restored.loc[4, "group"])
 
 
-def test_sandbox_grouped_result_has_flat_unique_parquet_columns():
+def test_reviewed_grouped_result_has_flat_unique_parquet_columns():
     frame = pd.DataFrame({"group": ["a", "a", "b"], "value": [1, 2, 3]})
     grouped = frame.groupby("group", dropna=False).agg(["count", "mean"]).reset_index()
 
@@ -239,101 +237,66 @@ def test_livy_trusted_job_lifecycle_manifest_and_result_ref(app, monkeypatch):
         adapter.poll("missing")
 
 
-def test_sandbox_runner_enforces_container_flags_and_validates_outputs(tmp_path, monkeypatch):
-    from backend.services.data_plane import sandbox as module
-
+def test_local_analysis_runner_executes_reviewed_method(tmp_path):
     input_root = tmp_path / "inputs"
     output_root = tmp_path / "outputs"
     input_dir = input_root / "task"
     input_dir.mkdir(parents=True)
-    output_root.mkdir()
-    (input_dir / "input.csv").write_text("value\n1\n", encoding="utf-8")
-    runner = SandboxRunner(
-        image="meridian-sandbox:py311-20260906", input_root=input_root, output_root=output_root,
-        limits=SandboxLimits(output_bytes=1024),
+    (input_dir / "input.csv").write_text("group,value\na,1\na,2\nb,3\n", encoding="utf-8")
+    runner = LocalAnalysisRunner(input_root=input_root, output_root=output_root)
+
+    result = runner.execute(
+        {"input": "input.csv", "method": "describe", "parameters": {}},
+        input_dir=input_dir, run_id="run-1",
     )
-    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/docker")
-    monkeypatch.setattr(runner, "capability", lambda: {"available": True})
-    commands: list[list[str]] = []
-
-    class Process:
-        returncode = 0
-
-        def __init__(self, command):
-            commands.append(command)
-            output = output_root / "run-1"
-            (output / "result.parquet").write_bytes(b"parquet")
-            (output / "manifest.json").write_text(json.dumps({
-                "files": [{"path": "result.parquet"}], "metrics": {"output_rows": 1},
-            }), encoding="utf-8")
-
-        def communicate(self, timeout=None):
-            return "ok", ""
-
-    monkeypatch.setattr(module.subprocess, "Popen", lambda command, **_kwargs: Process(command))
-    result = runner.execute({"input": "input.csv", "method": "describe"}, input_dir=input_dir, run_id="run-1")
     assert result["status"] == "SUCCEEDED"
+    assert result["backend"] == "reviewed-local-worker"
     assert result["files"][0]["sha256"]
-    command = commands[0]
-    assert command[command.index("--network") + 1] == "none"
-    assert command[command.index("--user") + 1] == "65534:65534"
-    assert "--read-only" in command and "no-new-privileges:true" in command
-    assert not list((output_root / "run-1").glob("meridian-sandbox-*.json"))
+    assert result["metrics"]["input_rows"] == 3
+    assert (output_root / "run-1" / "manifest.json").is_file()
+    assert len(pd.read_parquet(output_root / "run-1" / "result.parquet")) > 0
 
-    volume_runner = SandboxRunner(
-        image="meridian-sandbox:py311-20260906", input_root=input_root,
-        output_root=output_root, docker_volume="meridian-data",
-    )
-    monkeypatch.setattr(volume_runner, "capability", lambda: {"available": True})
 
-    class VolumeProcess(Process):
-        def __init__(self, command):
-            commands.append(command)
-            output = output_root / "run-volume"
-            (output / "result.parquet").write_bytes(b"parquet")
-            (output / "manifest.json").write_text(json.dumps({
-                "files": [{"path": "result.parquet"}], "metrics": {},
-            }), encoding="utf-8")
+def test_local_analysis_runner_rejects_generated_code_and_path_escape(tmp_path):
+    input_root = tmp_path / "inputs"
+    input_dir = input_root / "task"
+    input_dir.mkdir(parents=True)
+    (input_dir / "input.csv").write_text("value\n1\n", encoding="utf-8")
+    runner = LocalAnalysisRunner(input_root=input_root, output_root=tmp_path / "outputs")
 
-    monkeypatch.setattr(module.subprocess, "Popen", lambda command, **_kwargs: VolumeProcess(command))
-    volume_runner.execute({}, input_dir=input_dir, run_id="run-volume")
-    mounts = [commands[-1][index + 1] for index, value in enumerate(commands[-1]) if value == "--mount"]
-    assert mounts == [
-        "type=volume,src=meridian-data,dst=/input,volume-subpath=workspaces/sandbox-inputs/task,readonly",
-        "type=volume,src=meridian-data,dst=/output,volume-subpath=exports/sandbox/run-volume",
-    ]
-
-    with pytest.raises(ValueError, match="latest"):
-        SandboxRunner(image="sandbox:latest", input_root=input_root, output_root=output_root)
-    with pytest.raises(ValueError, match="volume"):
-        SandboxRunner(
-            image="sandbox:v1", input_root=input_root, output_root=output_root,
-            docker_volume="bad/volume",
+    with pytest.raises(ValueError, match="固定的审核"):
+        runner.execute(
+            {"input": "input.csv", "method": "describe", "code": "print('unsafe')"},
+            input_dir=input_dir, run_id="blocked",
         )
-    unavailable = SandboxRunner(image="sandbox:v1", input_root=input_root, output_root=output_root)
-    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
-    with pytest.raises(SandboxUnavailable):
-        unavailable.execute({}, input_dir=input_dir, run_id="closed")
+    with pytest.raises(ValueError, match="文件名"):
+        runner.execute(
+            {"input": "../input.csv", "method": "describe"},
+            input_dir=input_dir, run_id="escape",
+        )
+    with pytest.raises(PermissionError, match="受管"):
+        runner.execute(
+            {"input": "input.csv", "method": "describe"},
+            input_dir=input_root, run_id="bad-root",
+        )
+    assert not (tmp_path / "outputs").exists()
 
 
-def test_sandbox_runner_propagates_real_cancellation(tmp_path, monkeypatch):
-    from backend.services.data_plane import sandbox as module
+def test_local_analysis_runner_cancels_worker(tmp_path, monkeypatch):
+    from backend.services.data_plane import local_analysis as module
 
     input_root = tmp_path / "inputs"
-    output_root = tmp_path / "outputs"
-    input_root.mkdir()
-    output_root.mkdir()
-    runner = SandboxRunner(image="sandbox:v1", input_root=input_root, output_root=output_root)
-    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/docker")
-    monkeypatch.setattr(runner, "capability", lambda: {"available": True})
+    input_dir = input_root / "task"
+    input_dir.mkdir(parents=True)
+    (input_dir / "input.csv").write_text("value\n1\n", encoding="utf-8")
+    runner = LocalAnalysisRunner(input_root=input_root, output_root=tmp_path / "outputs")
 
     class WaitingProcess:
-        returncode = None
         killed = False
 
         def communicate(self, timeout=None):
             if not self.killed:
-                raise subprocess.TimeoutExpired("docker", timeout)
+                raise subprocess.TimeoutExpired("reviewed-analysis", timeout)
             return "", ""
 
         def kill(self):
@@ -341,87 +304,9 @@ def test_sandbox_runner_propagates_real_cancellation(tmp_path, monkeypatch):
 
     process = WaitingProcess()
     monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
-    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs: Response({}, 0))
     with pytest.raises(InterruptedError, match="取消"):
-        runner.execute({}, input_dir=input_root, run_id="cancelled", should_cancel=lambda: True)
+        runner.execute(
+            {"input": "input.csv", "method": "describe"},
+            input_dir=input_dir, run_id="cancelled", should_cancel=lambda: True,
+        )
     assert process.killed is True
-
-
-def test_sandbox_client_authentication_execution_capability_and_failures(tmp_path, monkeypatch):
-    input_root = tmp_path / "inputs"
-    output_root = tmp_path / "outputs"
-    input_dir = input_root / "task"
-    input_dir.mkdir(parents=True)
-    output_root.mkdir()
-    token = "sandbox-token-that-is-definitely-long-enough"
-    expected_image = "sandbox:v1"
-    state = {"mode": "ok"}
-
-    class Session:
-        trust_env = True
-
-        def post(self, _url, **kwargs):
-            assert self.trust_env is False
-            assert kwargs["headers"]["Authorization"] == f"Bearer {token}"
-            mode = state["mode"]
-            if mode == "network":
-                raise requests.ConnectionError("offline")
-            if mode == "server":
-                return Response({"error": "rejected"}, 400)
-            run_id = kwargs["json"]["run_id"]
-            (output_root / run_id).mkdir(exist_ok=True)
-            image = "sandbox:wrong" if mode == "image" else expected_image
-            return Response({"status": "SUCCEEDED", "image": image, "files": []})
-
-        def get(self, _url, **_kwargs):
-            if state["mode"] == "network":
-                raise requests.ConnectionError("offline")
-            return Response({"available": True, "host_fallback": False})
-
-        def delete(self, _url, **_kwargs):
-            if state["mode"] == "network":
-                raise requests.ConnectionError("offline")
-            return Response({"accepted": True}, 202)
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("backend.services.data_plane.sandbox_client.requests.Session", Session)
-    client = SandboxClient(
-        endpoint="http://127.0.0.1:8090", token=token, input_root=input_root,
-        output_root=output_root, timeout_seconds=5, expected_image=expected_image,
-    )
-    result = client.execute({"method": "describe"}, input_dir=input_dir, run_id="run-1")
-    assert result["output_dir"] == str(output_root / "run-1")
-    assert client.capability()["available"] is True
-    client.cancel("run-1")
-
-    state["mode"] = "image"
-    with pytest.raises(RuntimeError, match="镜像版本"):
-        client.execute({}, input_dir=input_dir, run_id="run-2")
-    state["mode"] = "server"
-    with pytest.raises(RuntimeError, match="rejected"):
-        client.execute({}, input_dir=input_dir, run_id="run-3")
-    state["mode"] = "network"
-    with pytest.raises(SandboxUnavailable, match="不可用"):
-        client.execute({}, input_dir=input_dir, run_id="run-4")
-    assert client.capability()["available"] is False
-    client.cancel("run-4")
-
-    with pytest.raises(PermissionError, match="输入"):
-        client.execute({}, input_dir=input_root, run_id="bad-path")
-    with pytest.raises(SandboxUnavailable, match="URL"):
-        SandboxClient(
-            endpoint="", token=token, input_root=input_root, output_root=output_root,
-            timeout_seconds=5, expected_image=expected_image,
-        )
-    with pytest.raises(SandboxUnavailable, match="HTTPS"):
-        SandboxClient(
-            endpoint="http://remote.example.test", token=token, input_root=input_root,
-            output_root=output_root, timeout_seconds=5, expected_image=expected_image,
-        )
-    with pytest.raises(SandboxUnavailable, match="32"):
-        SandboxClient(
-            endpoint="http://localhost:8090", token="weak", input_root=input_root,
-            output_root=output_root, timeout_seconds=5, expected_image=expected_image,
-        )

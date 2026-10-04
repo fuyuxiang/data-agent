@@ -11,8 +11,8 @@ from backend import create_app
 
 def main() -> None:
     storage = Path(tempfile.mkdtemp(prefix="meridian-browser-test-"))
-    # Keep the browser fixture deterministic even when the aggregate verifier
-    # itself carries production Compose variables in its environment.
+    # Keep the browser fixture deterministic even when the verifier uses
+    # production environment settings.
     os.environ["MERIDIAN_ENV"] = "test"
     os.environ.pop("MERIDIAN_TRUSTED_HOSTS", None)
     os.environ.pop("MERIDIAN_ALLOWED_ORIGINS", None)

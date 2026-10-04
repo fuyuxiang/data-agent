@@ -93,22 +93,6 @@ def database_integration() -> list[Result]:
     )]
 
 
-def root_compose_config() -> list[Result]:
-    return [command(
-        "production-compose-config", ["docker", "compose", "config", "-q"],
-        environment={
-            "MERIDIAN_SECRET_KEY": "verifier-session-key-at-least-32-characters",
-            "MERIDIAN_ENCRYPTION_KEY": "verifier-encryption-key-at-least-32-characters",
-            "MERIDIAN_BACKUP_KEY": "verifier-backup-key-at-least-32-characters",
-            "MERIDIAN_BOOTSTRAP_TOKEN": "verifier-bootstrap-token-at-least-32-characters",
-            "MERIDIAN_METRICS_TOKEN": "verifier-metrics-token-at-least-32-characters",
-            "MERIDIAN_TRUSTED_HOSTS": "localhost",
-            "MERIDIAN_OUTBOUND_HOST_ALLOWLIST": "api.openai.com",
-            "MERIDIAN_SANDBOX_PROXY_TOKEN": "verifier-sandbox-token-at-least-32-characters",
-        },
-    )]
-
-
 def probe(check_id: str, url: str, validator=None) -> Result:
     started = time.monotonic()
     try:
@@ -132,10 +116,10 @@ def ci() -> list[Result]:
     )
     return [
         command("python-compile", [
-            sys.executable, "-m", "compileall", "-q", "backend", "scripts", "deploy/sandbox", "app.py",
+            sys.executable, "-m", "compileall", "-q", "backend", "scripts", "app.py",
         ]),
-        command("ruff", ["ruff", "check", "backend", "scripts", "deploy/sandbox", "tests", "app.py"]),
-        command("ruff-security", ["ruff", "check", "--select", "S", "backend", "scripts", "deploy/sandbox", "app.py"]),
+        command("ruff", ["ruff", "check", "backend", "scripts", "tests", "app.py"]),
+        command("ruff-security", ["ruff", "check", "--select", "S", "backend", "scripts", "app.py"]),
         command_no_skips("pytest", [
             sys.executable, "-m", "pytest", "-q", "-m", "not database_integration",
             "--cov=backend/agent", "--cov=backend/api", "--cov=backend/core", "--cov=backend/services",
@@ -146,16 +130,11 @@ def ci() -> list[Result]:
         ]),
         *database_integration(),
         command("python-dependency-audit", ["pip-audit", "-r", "requirements.lock", "--no-deps", "--disable-pip"]),
-        command("sandbox-proxy-dependency-audit", [
-            "pip-audit", "-r", "deploy/sandbox/requirements-proxy.txt", "--no-deps", "--disable-pip",
-        ]),
         command("frontend-check", ["npm", "run", "check"]),
         command("frontend-build", ["npm", "run", "build"]),
         command("frontend-dependency-audit", ["npm", "audit", "--audit-level=high"]),
-        *root_compose_config(),
-        command("warehouse-compose-config", ["docker", "compose", "-f", "deploy/warehouse/docker-compose.yml", "config", "-q"]),
         command("eval-contracts", [sys.executable, "scripts/validate_eval_contracts.py"]),
-        *sandbox_integration(),
+        *local_analysis_integration(),
         *browser_integration(),
     ]
 
@@ -314,39 +293,31 @@ def migration_restore() -> list[Result]:
     )
 
 
-def sandbox_integration() -> list[Result]:
-    from backend.services.data_plane.sandbox import SandboxRunner
+def local_analysis_integration() -> list[Result]:
+    from backend.services.data_plane.local_analysis import LocalAnalysisRunner
 
-    image = os.getenv("MERIDIAN_SANDBOX_IMAGE", "meridian-sandbox:py311-20260906")
-    with tempfile.TemporaryDirectory(prefix="meridian-sandbox-verify-") as raw:
+    with tempfile.TemporaryDirectory(prefix="meridian-analysis-verify-") as raw:
         root = Path(raw)
-        runner = SandboxRunner(image=image, input_root=root / "input", output_root=root / "output")
-        capability = runner.capability()
-        if not capability["available"]:
-            return [Result("sandbox-integration", "BLOCKED", str(capability.get("error") or "Docker daemon 不可用"))]
-        inspected = command("sandbox-image", ["docker", "image", "inspect", image])
-        if inspected.status != "PASS":
-            inspected.status = "BLOCKED"
-            inspected.detail = f"固定 sandbox 镜像未构建：{image}"
-            return [inspected]
-        (root / "input").mkdir()
+        input_dir = root / "input" / "task"
+        input_dir.mkdir(parents=True)
         (root / "output").mkdir()
-        (root / "input" / "input.csv").write_text("group,value\na,1\na,2\nb,3\n", encoding="utf-8")
+        (input_dir / "input.csv").write_text("group,value\na,1\na,2\nb,3\n", encoding="utf-8")
+        runner = LocalAnalysisRunner(input_root=root / "input", output_root=root / "output")
         try:
             result = runner.execute(
-                {"input": "input.csv", "method": "describe", "code": None, "parameters": {}},
-                input_dir=root / "input", run_id="verification",
+                {"input": "input.csv", "method": "describe", "parameters": {}},
+                input_dir=input_dir, run_id="verification",
             )
             valid = result.get("status") == "SUCCEEDED" and any(
                 item.get("path") == "result.parquet" for item in result.get("files") or []
             )
             return [Result(
-                "sandbox-integration", "PASS" if valid else "FAIL",
-                "真实无网容器作业已执行" if valid else "sandbox 未生成声明的 Parquet 结果",
+                "local-analysis-integration", "PASS" if valid else "FAIL",
+                "固定审核方法已在本地子进程执行" if valid else "分析未生成声明的 Parquet 结果",
                 output=json.dumps(result, ensure_ascii=False)[:4000],
             )]
         except Exception as exc:
-            return [Result("sandbox-integration", "FAIL", f"sandbox 真实作业失败：{exc}")]
+            return [Result("local-analysis-integration", "FAIL", f"本地分析作业失败：{exc}")]
 
 
 def browser_integration() -> list[Result]:

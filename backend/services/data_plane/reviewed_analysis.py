@@ -1,4 +1,4 @@
-"""Reviewed bounded analysis entrypoint used only inside the sandbox image."""
+"""Fixed, bounded analysis methods executed by a local worker process."""
 
 from __future__ import annotations
 
@@ -199,24 +199,16 @@ def _reviewed_method(frame: pd.DataFrame, method: str, params: dict) -> tuple[pd
 
 
 def main() -> int:
-    spec_path = Path(sys.argv[1]).resolve()
-    if spec_path.parent != Path("/output") or not spec_path.is_file():
-        raise ValueError("JobSpec path is invalid")
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    method = str(spec.get("method") or "")
-    code = str(spec.get("code") or "")
-    if bool(method) == bool(code):
-        raise ValueError("provide exactly one reviewed method or Python code")
-    if method and method not in METHODS:
-        raise ValueError("unsupported reviewed method")
-    if len(code.encode("utf-8")) > 64 * 1024:
-        raise ValueError("Python code exceeds 64 KiB")
-    relative = Path(str(spec.get("input") or ""))
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("input path is invalid")
-    source = (Path("/input") / relative).resolve()
-    if Path("/input") not in source.parents:
-        raise ValueError("input escaped root")
+    if len(sys.argv) != 5:
+        raise ValueError("expected input, output, method and parameters")
+    source = Path(sys.argv[1]).resolve()
+    target = Path(sys.argv[2]).resolve()
+    method = sys.argv[3]
+    params = json.loads(sys.argv[4])
+    if method not in METHODS or not isinstance(params, dict):
+        raise ValueError("unsupported reviewed method or parameters")
+    if not source.is_file() or source.is_symlink() or target.name != "result.parquet":
+        raise ValueError("invalid analysis paths")
     if source.suffix == ".parquet":
         frame = pd.read_parquet(source)
     elif source.suffix == ".csv":
@@ -224,27 +216,14 @@ def main() -> int:
     else:
         raise ValueError("unsupported bounded input")
     _validate_frame(frame, "input")
-    metrics: dict[str, Any] = {}
-    if code:
-        namespace: dict[str, Any] = {"df": frame.copy(), "pd": pd, "result": None, "metrics": {}}
-        exec(compile(code, "<generated-analysis>", "exec"), namespace, namespace)  # noqa: S102 -- inside OS sandbox
-        result = namespace.get("result")
-        metrics = namespace.get("metrics") or {}
-        if not isinstance(result, pd.DataFrame):
-            raise ValueError("generated analysis must assign a pandas DataFrame to result")
-        if not isinstance(metrics, dict):
-            raise ValueError("generated analysis metrics must be an object")
-    else:
-        result, metrics = _reviewed_method(frame, method, dict(spec.get("parameters") or {}))
+    result, metrics = _reviewed_method(frame, method, params)
     result = _parquet_safe_frame(result)
     _validate_frame(result, "output")
-    target = Path("/output/result.parquet")
     result.to_parquet(target, index=False)
-    Path("/output/manifest.json").write_text(json.dumps({
+    (target.parent / "manifest.json").write_text(json.dumps({
         "files": [{"path": target.name}],
         "metrics": _json_safe({
-            **metrics, "input_rows": len(frame), "output_rows": len(result),
-            "method": method or "generated_python",
+            **metrics, "input_rows": len(frame), "output_rows": len(result), "method": method,
         }),
     }), encoding="utf-8")
     return 0

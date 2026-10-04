@@ -8,7 +8,7 @@ import pandas as pd
 from backend.agent.store import RunStore
 from backend.services.advanced_agent import _scoped_warehouse_sql, available_formal_tools, build_executor
 from backend.services.data_policy import normalize_policies, rewrite_database_sql
-from deploy.sandbox.run_job import _reviewed_method
+from backend.services.data_plane.reviewed_analysis import _reviewed_method
 
 
 def _source(client):

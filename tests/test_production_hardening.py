@@ -66,6 +66,7 @@ def test_production_metrics_require_bearer_token_and_readiness_is_strict(monkeyp
     readiness = client.get("/api/ready")
     assert readiness.status_code == 503
     assert readiness.get_json()["owner_configured"] is False
+    assert readiness.get_json()["analysis_worker"]["backend"] == "reviewed-local-worker"
 
 
 def test_explicit_embedding_provider_fails_closed(monkeypatch):

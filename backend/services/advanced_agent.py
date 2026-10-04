@@ -24,7 +24,7 @@ from .agent_tools import AgentToolContext, execute_tool, tool_schemas
 from .authorization import actor_role, require_sources_access
 from .data_policy import policy_fingerprint
 from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefStore
-from .data_plane.factory import livy_adapter, sandbox_client, trino_adapter
+from .data_plane.factory import livy_adapter, local_analysis_runner, trino_adapter
 from .datasets import frame_records
 from .jobs import register_job_handler
 from .knowledge import strip_reasoning
@@ -275,8 +275,8 @@ def _spark_tool(database: Database, run: dict[str, Any], args: dict[str, Any]) -
     return {**submitted, "completeness": "unknown"}
 
 
-def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-    """Run reviewed methods or generated Python only inside the bounded container."""
+def _local_analysis_tool(database: Database, run: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    """Run a reviewed method on a bounded DatasetRef in a local worker."""
     ref_id = str(args.get("dataset_ref_id") or "")
     ref = DatasetRefStore(database).get(ref_id, workspace_id=run["workspace_id"])
     if not ref or ref.kind != "bounded_file":
@@ -297,24 +297,22 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     if export_root not in source_path.parents or not source_path.is_file() or source_path.is_symlink():
         raise PermissionError("DatasetRef 输入不在受管的有界结果目录")
     method = str(args.get("method") or "").strip()
-    code = str(args.get("code") or "")
-    if bool(method) == bool(code):
-        raise ValueError("run_analysis 必须且只能提供 method 或 code")
+    if not method or args.get("code"):
+        raise ValueError("run_analysis 仅接受固定审核方法，不执行生成的 Python 代码")
 
-    input_root = settings.workspace_dir / "sandbox-inputs"
-    output_root = settings.export_dir / "sandbox"
+    input_root = settings.workspace_dir / "analysis-inputs"
+    output_root = settings.export_dir / "analysis"
     input_root.mkdir(parents=True, exist_ok=True)
     output_root.mkdir(parents=True, exist_ok=True)
     input_dir = Path(tempfile.mkdtemp(prefix="analysis-", dir=input_root))
-    action_ref = database.new_id("sandbox")
+    action_ref = database.new_id("analysis")
     input_path = input_dir / f"input{source_path.suffix.lower()}"
     shutil.copy2(source_path, input_path)
-    runner = sandbox_client()
-    sandbox_image = runner.expected_image
+    runner = local_analysis_runner()
     try:
-        sandbox_result = runner.execute(
+        analysis_result = runner.execute(
             {
-                "input": input_path.name, "method": method or None, "code": code or None,
+                "input": input_path.name, "method": method,
                 "parameters": dict(args.get("params") or {}),
             },
             input_dir=input_dir, run_id=f"{run['id']}-{action_ref}",
@@ -324,23 +322,23 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
     finally:
         shutil.rmtree(input_dir, ignore_errors=True)
 
-    files = sandbox_result.get("files") or []
+    files = analysis_result.get("files") or []
     output = next((item for item in files if item.get("path") == "result.parquet"), None)
     if not output:
-        raise RuntimeError("sandbox 未返回受管的 Parquet 结果")
-    output_path = (Path(str(sandbox_result["output_dir"])) / "result.parquet").resolve()
+        raise RuntimeError("本地分析未返回受管的 Parquet 结果")
+    output_path = (Path(str(analysis_result["output_dir"])) / "result.parquet").resolve()
     if output_root.resolve() not in output_path.parents or not output_path.is_file() or output_path.is_symlink():
-        raise PermissionError("sandbox 结果路径越界")
+        raise PermissionError("本地分析结果路径越界")
     frame = pd.read_parquet(output_path)
     if len(frame) > settings.max_analysis_rows or len(frame.columns) > 500:
-        raise ValueError("sandbox 结果超过本地分析上限")
+        raise ValueError("本地分析结果超过行列上限")
     encoded_bytes = output_path.stat().st_size
     result_budget = (run.get("budget") or {}).get("result_bytes")
     remaining = None if result_budget is None else float(result_budget) - float(
         (run.get("usage") or {}).get("result_bytes") or 0,
     )
     if remaining is not None and encoded_bytes > remaining:
-        raise RuntimeError("sandbox 结果超过任务剩余产物字节预算")
+        raise RuntimeError("本地分析结果超过任务剩余产物字节预算")
     derived_id = database.new_id("qry")
     derived_result = database.put("query_results", {
         "id": derived_id, "workspace_id": run["workspace_id"],
@@ -350,11 +348,10 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
         "returned_rows": len(frame), "total_rows": len(frame), "completeness": "complete",
         "accuracy": "exact", "columns": [str(value) for value in frame.columns],
         "data": frame_records(frame, 300), "path": str(output_path),
-        "sandbox": {
-            "image": sandbox_image, "method": method or "generated_python",
-            "code_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest() if code else None,
+        "analysis_runtime": {
+            "backend": analysis_result.get("backend"), "method": method,
             "input_dataset_ref_id": ref.ref_id, "output_sha256": output["sha256"],
-            "metrics": sandbox_result.get("metrics") or {},
+            "metrics": analysis_result.get("metrics") or {},
         },
     }, workspace_id=run["workspace_id"])
     derived_ref = _dataset_ref(database, run, derived_result)
@@ -363,16 +360,16 @@ def _sandbox_tool(database: Database, run: dict[str, Any], args: dict[str, Any])
         "id": database.new_id("ana"), "workspace_id": run["workspace_id"],
         "actor_id": run["actor_id"], "source_ids": list(ref.source_refs),
         "session_id": run["session_id"], "agent_run_id": run["id"],
-        "method": method or "generated_python", "code": code or None,
+        "method": method,
         "inputs": {"dataset_ref_id": ref.ref_id, "params": dict(args.get("params") or {})},
-        "result": sandbox_result.get("metrics") or {}, "status": "completed",
+        "result": analysis_result.get("metrics") or {}, "status": "completed",
         "result_ids": {"result": derived_id}, "dataset_ref_id": derived_ref.ref_id,
     }, workspace_id=run["workspace_id"])
     return {
         "status": "SUCCEEDED", "analysis_id": analysis["id"], "result_id": derived_id,
         "dataset_ref_id": derived_ref.ref_id, "output_refs": [derived_ref.ref_id],
         "completeness": "complete", "accuracy": "exact", "actual_cost": encoded_bytes,
-        "provenance_ref": f"sandbox:{analysis['id']}", "metrics": sandbox_result.get("metrics") or {},
+        "provenance_ref": f"local_analysis:{analysis['id']}", "metrics": analysis_result.get("metrics") or {},
     }
 
 
@@ -514,8 +511,7 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         registry.register(spec, handler)
     registry.register(ToolSpec(
         id="run_analysis", description=(
-            "对一个已完整物化且通过有界转移门禁的 DatasetRef 运行隔离 Python 分析。"
-            "可选审核方法，或提供在容器内以 df 为输入并将 DataFrame 赋给 result 的代码。"
+            "对一个已完整物化且通过有界转移门禁的 DatasetRef 运行固定审核分析方法。"
         ),
         input_schema={
             "type": "object", "properties": {
@@ -524,11 +520,11 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
                     "describe", "correlation", "grouped_summary", "decile", "ab_test",
                     "linear_regression", "kmeans", "anomaly", "trend_forecast",
                 ]},
-                "code": {"type": "string"}, "params": {"type": "object"},
-            }, "required": ["dataset_ref_id"],
+                "params": {"type": "object"},
+            }, "required": ["dataset_ref_id", "method"],
         }, mutability="read", timeout_seconds=120, cancellable=True,
         cost_kind="result_bytes",
-    ), lambda arguments: _sandbox_tool_with_events(database, run, arguments))
+    ), lambda arguments: _local_analysis_tool_with_events(database, run, arguments))
     registry.register(ToolSpec(
         id="validate_result", description="对当前查询结果执行独立完整性、范围与结构验证；正式发布前必须调用。",
         input_schema={
@@ -592,10 +588,10 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
     return ToolExecutor(RunStore(database), registry)
 
 
-def _sandbox_tool_with_events(
+def _local_analysis_tool_with_events(
     database: Database, run: dict[str, Any], arguments: dict[str, Any],
 ) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
-    value = _sandbox_tool(database, run, arguments)
+    value = _local_analysis_tool(database, run, arguments)
     return value, [
         ("analysis", {
             "analysis_id": value["analysis_id"], "dataset_ref_id": value["dataset_ref_id"],

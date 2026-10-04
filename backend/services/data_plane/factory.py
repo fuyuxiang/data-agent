@@ -8,7 +8,7 @@ from flask import current_app
 from ...core.database import Database
 from ..security import SecretVault
 from .livy import LivyBatchAdapter, LivyConfig
-from .sandbox_client import SandboxClient
+from .local_analysis import LocalAnalysisRunner
 from .trino import TrinoAdapter, TrinoConfig
 
 
@@ -32,13 +32,10 @@ def livy_adapter(database: Database, workspace_id: str, engine_id: str) -> LivyB
     return LivyBatchAdapter(database, workspace_id, LivyConfig.from_dict({**record, **secret, "engine_id": record["id"]}))
 
 
-def sandbox_client() -> SandboxClient:
+def local_analysis_runner() -> LocalAnalysisRunner:
     settings = current_app.config["SETTINGS"]
-    return SandboxClient(
-        endpoint=os.getenv("MERIDIAN_SANDBOX_PROXY_URL", ""),
-        token=os.getenv("MERIDIAN_SANDBOX_PROXY_TOKEN", ""),
-        input_root=settings.workspace_dir / "sandbox-inputs",
-        output_root=settings.export_dir / "sandbox",
-        timeout_seconds=max(5, int(os.getenv("MERIDIAN_SANDBOX_TIMEOUT_SECONDS", "120"))),
-        expected_image=os.getenv("MERIDIAN_SANDBOX_IMAGE", "meridian-sandbox:py311-20260906"),
+    return LocalAnalysisRunner(
+        input_root=settings.workspace_dir / "analysis-inputs",
+        output_root=settings.export_dir / "analysis",
+        timeout_seconds=max(5, int(os.getenv("MERIDIAN_LOCAL_ANALYSIS_TIMEOUT_SECONDS", "120"))),
     )

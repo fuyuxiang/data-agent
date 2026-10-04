@@ -279,11 +279,11 @@ def create_app(test_config: dict | None = None) -> Flask:
         database_status = database.ping()
         storage_ready = settings.storage_dir.is_dir() and os.access(settings.storage_dir, os.W_OK)
         try:
-            from .services.data_plane.factory import sandbox_client
+            from .services.data_plane.factory import local_analysis_runner
 
-            sandbox = sandbox_client().capability()
+            analysis_worker = local_analysis_runner().capability()
         except Exception as exc:
-            sandbox = {"available": False, "host_fallback": False, "error": str(exc)}
+            analysis_worker = {"available": False, "error": str(exc)}
         owner_ready = bool(database.list("users", include_archived=True, limit=1))
         provider_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
         if not provider_ready:
@@ -302,12 +302,12 @@ def create_app(test_config: dict | None = None) -> Flask:
                 if provider_ready:
                     break
         base_ready = storage_ready and database_status == "ready"
-        production_dependencies = owner_ready and provider_ready and bool(sandbox.get("available"))
+        production_dependencies = owner_ready and provider_ready and bool(analysis_worker.get("available"))
         status = 200 if base_ready and (settings.environment != "production" or production_dependencies) else 503
         return jsonify({
             "ok": status == 200, "database": database_status, "storage_writable": storage_ready,
             "owner_configured": owner_ready, "model_provider_configured": provider_ready,
-            "sandbox": sandbox,
+            "analysis_worker": analysis_worker,
         }), status
 
     @app.get("/api/metrics")

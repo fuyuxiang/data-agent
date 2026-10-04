@@ -36,9 +36,7 @@ def files() -> list[Path]:
             and not ({"node_modules", "dist", "vendor", "__pycache__"} & set(path.parts))
             and path.resolve() != Path(__file__).resolve()
         )
-    values.extend(path for path in (
-        ROOT / "Dockerfile", ROOT / "compose.yaml", ROOT / "package.json", ROOT / "requirements.txt",
-    ) if path.is_file())
+    values.extend(path for path in (ROOT / "package.json", ROOT / "requirements.txt") if path.is_file())
     return sorted(set(values))
 
 
@@ -116,11 +114,11 @@ def run_audit(*, negative_fixture: bool = False) -> list[Check]:
             r"/api/(?:gpu|business-canvas|drawio)|/drawio(?:/|\")",
             "退役路由不再注册或被前端调用",
         ))
-        build_paths = [path for path in paths if str(path.relative_to(ROOT)).startswith(("scripts/", "frontend/src/")) or path.name in {"Dockerfile", "package.json"}]
+        build_paths = [path for path in paths if str(path.relative_to(ROOT)).startswith(("scripts/", "frontend/src/")) or path.name == "package.json"]
         checks.append(absent(
             "C19-build-clean", build_paths,
             r"frontend/(?:dist/)?drawio|meridian_remote_runner\.py|backend\.(?:api\.gpu|services\.remote_gpu)",
-            "构建和镜像不再包含退役资源",
+            "构建不再包含退役资源",
         ))
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         checks.append(Check(
@@ -132,26 +130,29 @@ def run_audit(*, negative_fixture: bool = False) -> list[Check]:
             "PASS" if "远程数据源不允许经 source_frames 隐式拉取" in (ROOT / "backend/services/datasets.py").read_text(encoding="utf-8") else "FAIL",
             "远端来源进入旧 DataFrame 路径时 fail closed", ("backend/services/datasets.py",),
         ))
-        formal_sandbox_paths = [
+        formal_analysis_paths = [
             ROOT / "backend/services/advanced_agent.py",
             ROOT / "backend/services/data_plane/factory.py",
-            ROOT / "backend/services/data_plane/sandbox_client.py",
+            ROOT / "backend/services/data_plane/local_analysis.py",
+            ROOT / "backend/services/data_plane/reviewed_analysis.py",
         ]
         checks.append(absent(
-            "R08-no-app-docker-access", formal_sandbox_paths,
-            r"SandboxRunner|docker\.sock|subprocess\.(?:run|Popen).{0,120}\bdocker\b",
-            "Web/Agent 路径仅通过有限鉴权代理提交 sandbox JobSpec",
+            "R08-no-generated-code-execution", formal_analysis_paths,
+            r"\bexec\s*\(|\beval\s*\(|generated.analysis.{0,120}compile",
+            "本地分析仅运行固定审核方法，不执行生成代码",
         ))
-        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-        proxy_offset = compose.find("\n  sandbox-proxy:")
-        socket_offset = compose.find("/var/run/docker.sock")
-        socket_isolated = compose.count("/var/run/docker.sock") == 2 and proxy_offset >= 0 and socket_offset > proxy_offset
-        # One source and one destination occurrence are expected on a single
-        # volume-mount line; no application service may receive the socket.
+        container_files = [
+            relative for relative in ("Dockerfile", ".dockerignore", "compose.yaml", "railway.json")
+            if (ROOT / relative).is_file()
+        ]
+        container_files.extend(
+            relative for relative in ("deploy/sandbox", "deploy/warehouse")
+            if any(path.is_file() and "__pycache__" not in path.parts for path in (ROOT / relative).rglob("*"))
+        )
         checks.append(Check(
-            "R08-proxy-only-docker-socket", "PASS" if socket_isolated else "FAIL",
-            "Docker socket 只挂载到 sandbox-proxy，不挂载到 Web/Agent 容器",
-            ("compose.yaml",),
+            "R08-no-container-deployment", "FAIL" if container_files else "PASS",
+            "仓库不再包含容器部署入口",
+            tuple(container_files),
         ))
         checks.append(Check(
             "C23-negative-detector", "PASS", "审计器内置负样本模式必须使至少一项检查失败",

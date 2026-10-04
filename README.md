@@ -54,10 +54,9 @@
 - Python 3.10 或更高版本（CI 使用 Python 3.11）
 - Git
 - Node.js 20+ 仅在前端检查或生产构建时需要
-- Docker + Docker Compose 仅在容器部署时需要
 
 > [!NOTE]
-> SQL Server 连接需要系统已安装 Microsoft ODBC Driver 18。项目的 Docker 镜像已自动安装该驱动。
+> SQL Server 连接需要在运行主机上安装 Microsoft ODBC Driver 18。
 
 ### 本地 Web 启动
 
@@ -185,12 +184,9 @@ flowchart TB
 │   ├── store.js / router.js     # 全局状态与信息架构
 ├── skills/                      # 内置 Skill 包（SKILL.md + manifest.yaml）
 ├── scripts/                     # 构建、前端检查、UI 验证、仓库审计、备份与恢复
-├── deploy/warehouse/            # 固定版本的 Trino/Iceberg/Spark-Livy 参考环境
 ├── tests/                       # API、安全、Skill 运行时、演示数据与浏览器测试
 ├── storage/                     # 本地运行数据（不纳入 Git）
-├── docs/                        # V2 重构设计与迁移清单
-├── Dockerfile / compose.yaml    # 单节点生产部署
-└── railway.json                 # Railway Dockerfile 部署配置
+└── docs/                        # V2 重构设计与迁移清单
 ```
 
 ## 配置
@@ -198,12 +194,12 @@ flowchart TB
 完整模板见 [`.env.example`](.env.example)。本机开发可以使用默认值；生产环境必须显式注入密钥和信任边界。
 
 > [!IMPORTANT]
-> `app.py` 不会自动加载 `.env` 文件。Docker Compose 会自动读取项目根目录的 `.env`；直接在主机运行时，请通过 Shell、进程管理器或密钥管理服务注入环境变量。
+> `app.py` 不会自动加载 `.env` 文件。请通过 Shell、进程管理器或密钥管理服务注入环境变量。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MERIDIAN_ENV` | `development` | `development` / `production` / `test` |
-| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `127.0.0.1` / `5001` | HTTP 监听地址与端口；容器内由 Compose 显式监听所有接口 |
+| `MERIDIAN_HOST` / `MERIDIAN_PORT` | `127.0.0.1` / `5001` | HTTP 监听地址与端口 |
 | `MERIDIAN_STORAGE_DIR` | `./storage` | SQLite、上传文件、知识、交付物和回收站根目录 |
 | `MERIDIAN_SECRET_KEY` | 开发环境自动生成 | 会话签名密钥；生产环境至少 32 字符 |
 | `MERIDIAN_ENCRYPTION_KEY` | 开发环境复用会话密钥 | 外部凭据静态加密密钥；生产必须独立持久化 |
@@ -223,20 +219,25 @@ flowchart TB
 | `MERIDIAN_MAX_QUERY_CELL_KB` | `1024` | 单个字符串或二进制结果单元格上限（KB） |
 | `MERIDIAN_QUERY_TIMEOUT_SECONDS` | `30` | 外部数据库查询超时 |
 | `MERIDIAN_DAILY_TOKEN_LIMIT` | `5000000` | 每工作空间每日模型 token 配额 |
-| `MERIDIAN_SANDBOX_IMAGE` | `meridian-sandbox:py311-20260906` | 固定的有界 Python 执行镜像；禁止 `latest` |
-| `MERIDIAN_SANDBOX_PROXY_TOKEN` | 空 | Web 与宿主 sandbox 代理的独立鉴权令牌；生产至少 32 字符 |
-| `MERIDIAN_SANDBOX_STORAGE_VOLUME` | `meridian-data` | 应用、代理与短命容器共享的显式命名数据卷 |
+| `MERIDIAN_LOCAL_ANALYSIS_TIMEOUT_SECONDS` | `120` | 固定审核分析方法的子进程超时秒数；不执行生成的 Python 代码 |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | 参见模板 | 可选的环境级 OpenAI-Compatible 默认服务 |
 
 与资源边界相关的行数、单元格数、分析规模、Agent 迭代、任务队列、会话时长、SMTP 和嵌入模型变量，请直接查看 [`.env.example`](.env.example)。
 
 ## 生产部署
 
-### Docker Compose
-
-`compose.yaml` 使用只读根文件系统、独立数据卷、`tmpfs`、非 root 用户、capability 删除、资源限制和日志轮转。启动前至少配置以下环境变量：
+在运行主机上安装 Python 依赖并构建前端，然后至少配置以下环境变量：
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --require-hashes -r requirements.lock
+npm ci
+npm run check
+npm run build
+
+export MERIDIAN_ENV=production
+export MERIDIAN_FRONTEND_DIR="$PWD/frontend/dist"
 export MERIDIAN_SECRET_KEY="$(openssl rand -hex 32)"
 export MERIDIAN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 export MERIDIAN_BACKUP_KEY="$(openssl rand -hex 32)"
@@ -245,47 +246,22 @@ export MERIDIAN_METRICS_TOKEN="$(openssl rand -hex 32)"
 export MERIDIAN_TRUSTED_HOSTS="analytics.example.com"
 export MERIDIAN_ALLOWED_ORIGINS="https://analytics.example.com"
 export MERIDIAN_OUTBOUND_HOST_ALLOWLIST="api.openai.com"
-export MERIDIAN_SANDBOX_PROXY_TOKEN="$(openssl rand -hex 32)"
-
-# 先构建固定执行镜像，再启动 Web 和有限代理
-docker compose --profile sandbox-build build
-docker compose up -d analytics-workbench sandbox-proxy
-docker compose ps
-curl --fail http://127.0.0.1:5001/api/health
-```
-
-Compose 默认只将服务映射到主机 `127.0.0.1`。首次打开页面时还必须输入部署时生成的 `MERIDIAN_BOOTSTRAP_TOKEN`；创建首位所有者后注册入口自动关闭。Web/Agent 容器不挂载 Docker socket；只有 `sandbox-proxy` 持有 socket，且其鉴权 API 仅接收固定镜像、固定挂载根和固定资源边界的 JobSpec。生成代码容器使用非 root 用户、无网络、只读根和输入；代理或镜像不可用时必须 fail closed。请在前方配置 HTTPS 反向代理，并将对外域名精确写入 `MERIDIAN_TRUSTED_HOSTS` 和 `MERIDIAN_ALLOWED_ORIGINS`。所有实际使用的模型、MCP、HTTP 数据源和通知服务域名都应纳入出站白名单。
-
-### 主机部署
-
-非容器生产部署需先构建前端，并将 `MERIDIAN_FRONTEND_DIR` 指向构建产物：
-
-```bash
-npm run check
-npm run build
-
-export MERIDIAN_ENV=production
-export MERIDIAN_FRONTEND_DIR="$PWD/frontend/dist"
-# 继续注入上文所列的密钥、Host、Origin 和出站白名单
 python app.py
 ```
 
-`app.py` 在非 debug 模式下使用 Waitress。生产环境禁止启用 `MERIDIAN_DEBUG=1`，且会拒绝不完整的前端产物或弱密钥配置。主机部署若没有另行部署并配置 `MERIDIAN_SANDBOX_PROXY_URL`/令牌，浏览和查询仍可用，但动态 Python 分析会明确报告 unavailable，不会回退宿主执行。
+启动后可从另一个终端执行 `curl --fail http://127.0.0.1:5001/api/health`。默认仅监听 `127.0.0.1`。首次打开页面时还必须输入部署时生成的 `MERIDIAN_BOOTSTRAP_TOKEN`；创建首位所有者后注册入口自动关闭。请在前方配置 HTTPS 反向代理，并将对外域名精确写入 `MERIDIAN_TRUSTED_HOSTS` 和 `MERIDIAN_ALLOWED_ORIGINS`。所有实际使用的模型、MCP、HTTP 数据源和通知服务域名都应纳入出站白名单。
 
-### Railway
-
-根目录的 [`railway.json`](railway.json) 会使用 [`Dockerfile`](Dockerfile) 构建，并以 `/api/ready` 作为就绪检查。除上述生产变量外，Railway 环境会强制新用户验证邮箱，因此还应配置 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `SMTP_FROM`。
+`app.py` 在非 debug 模式下使用 Waitress。生产环境禁止启用 `MERIDIAN_DEBUG=1`，且会拒绝不完整的前端产物或弱密钥配置。有界分析以本地子进程执行固定审核方法；生成的任意 Python 代码会被拒绝。生产部署还应使用专用低权限系统账号和进程管理器。
 
 ### 运行边界
 
 > [!WARNING]
-> 当前生产形态是**单节点**：控制面使用 SQLite，进程会对 `storage/.instance.lock` 加独占锁。不要将多个应用副本指向同一个 `storage` 卷。如需多副本高可用，必须先将控制面、任务队列和文件存储迁移到可共享的外部服务。
+> 当前生产形态是**单节点**：控制面使用 SQLite，进程会对 `storage/.instance.lock` 加独占锁。不要将多个应用副本指向同一个 `storage` 目录。如需多副本高可用，必须先将控制面、任务队列和文件存储迁移到可共享的外部服务。
 
 ### 健康检查
 
 - `GET /api/health`：进程与数据库基础健康状态。
-- `GET /api/ready`：业务就绪检查；生产环境在所有者、模型和 sandbox 任一未就绪时返回 503，但响应会精确列出缺失项。
-- `GET /api/compute/status`：分别返回本地 sandbox 代理与远程数据面能力。
+- `GET /api/ready`：业务就绪检查；生产环境在所有者、模型和本地审核分析能力任一未就绪时返回 503，并列出缺失项。
 
 ## 备份与恢复
 
@@ -322,15 +298,14 @@ python -m pip install --require-hashes -r requirements-dev.lock
 ### 后端质量检查
 
 ```bash
-ruff check backend scripts deploy/sandbox tests app.py
-ruff check --select S backend scripts deploy/sandbox app.py
-python -m compileall -q backend scripts deploy/sandbox app.py
+ruff check backend scripts tests app.py
+ruff check --select S backend scripts app.py
+python -m compileall -q backend scripts app.py
 pytest -q -m "not database_integration" \
   --cov=backend/agent --cov=backend/api --cov=backend/core --cov=backend/services \
   --cov-report=term --cov-fail-under=60
 coverage report --include='backend/agent/*' --fail-under=85
 pip-audit -r requirements.lock --no-deps --disable-pip
-pip-audit -r deploy/sandbox/requirements-proxy.txt --no-deps --disable-pip
 ```
 
 ### 前端检查与构建
@@ -348,7 +323,7 @@ npm run test:browser
 
 ### 集成测试
 
-PostgreSQL 和 MySQL 连接器测试需要临时数据库，环境变量与执行方式可参考 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。CI 还会执行覆盖率门槛、锁定依赖安全审计、Compose 配置校验和生产镜像构建。
+PostgreSQL 和 MySQL 连接器测试需要临时数据库，环境变量与执行方式可参考 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。CI 还会执行覆盖率门槛、锁定依赖安全审计、本地审核分析和浏览器测试。
 
 当前版本按验证场景生成可重现的结果，不再使用从已缺失旧规范自动填入 `IMPLEMENTED` 的验收矩阵。运行以下 profile，分别检查本地代码及需要真实外部环境的能力：
 
@@ -364,7 +339,7 @@ python scripts/verify_advanced_agent.py --profile migration-restore
 python scripts/verify_advanced_agent.py --profile release
 ```
 
-参考 Trino/Iceberg/Spark-Livy 环境见 [`deploy/warehouse/README.md`](deploy/warehouse/README.md)。缺少真实模型、集群、SMTP、迁移、目标平台或规模证据时，相应 profile 返回 `BLOCKED` 和非零状态，不会把“未执行”写成 PASS。
+缺少真实模型、集群、SMTP、迁移、目标平台或规模证据时，相应 profile 返回 `BLOCKED` 和非零状态，不会把“未执行”写成 PASS。
 
 ## 安全边界
 
@@ -375,7 +350,7 @@ python scripts/verify_advanced_agent.py --profile release
 - **秘密保护：** 模型、数据源、MCP 和通知凭据使用应用主密钥加密落库，API 只返回脱敏状态。
 - **出站防护：** 外部 HTTP 请求校验 scheme、域名白名单和解析后 IP，默认禁止本机、内网、链路本地与保留地址，并限制重定向和响应体大小。
 - **身份与隔离：** 生产环境强制登录，首位所有者需初始化令牌；工作空间角色、数据源成员白名单和私有会话所有权同时生效，且结果、任务、快照与导出会重新检查当前数据授权；写请求受 Origin 和 CSRF 校验保护。
-- **受控执行：** stdio MCP 默认关闭；Agent 不具备宿主写改删、Shell/Git、自改 Hook 或任意远程代码能力；Docker sandbox 缺失时 fail closed。
+- **受控执行：** stdio MCP 默认关闭；Agent 不具备宿主写改删、Shell/Git、自改 Hook 或任意远程代码能力；有界分析仅运行固定审核方法，并对输入、输出和执行时间设限。
 - **可追溯：** 查询、分析、工具调用、快照恢复和交付动作保留审计证据。
 
 安全控制不代替部署环境的 TLS、网络分区、最小权限数据库账号、密钥托管、异地备份和安全监控。生产上线前应根据组织的数据分类分级和合规要求完成独立评审。
@@ -383,7 +358,7 @@ python scripts/verify_advanced_agent.py --profile release
 ## 数据与许可说明
 
 - `storage/`、`.env`、本地数据库、日志和构建产物已通过 `.gitignore` 排除；请勿将真实数据、密钥或备份提交到 Git。
-- 依赖版本由 `requirements.lock` 以哈希锁定，生产镜像使用 `--require-hashes` 安装。
+- 依赖版本由 `requirements.lock` 以哈希锁定，生产环境使用 `--require-hashes` 安装。
 - 当前仓库**没有项目级 `LICENSE`**，且部分分析与清洗实现受第三方条款约束。在企业内部商用、分发或二次销售前，须确认相关授权。详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 ---

@@ -22,7 +22,6 @@ from backend.agent.store import RunStore
 from backend.agent.tools import ToolExecutor, ToolRegistry, _validate
 from backend.services.advanced_agent import FORMAL_AGENT_TOOLS, _run_knowledge_ids
 from backend.services.data_plane.contracts import DatasetRef, DatasetRefStore
-from backend.services.data_plane.sandbox import SandboxUnavailable
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
 from backend.services.results.manifests import ResultService
 
@@ -938,14 +937,14 @@ def test_http_cursor_pagination_records_truthful_completion(app, monkeypatch):
     }
 
 
-def test_formal_python_analysis_uses_only_bounded_sandbox(app, source, monkeypatch):
+def test_formal_python_analysis_uses_only_bounded_local_worker(app, source, monkeypatch):
     from backend.services.advanced_agent import build_executor
 
     database = app.extensions["meridian_db"]
     store, run = _confirmed_run(
         app, source_ids=(source["id"],), allowed=("query_data", "run_analysis"),
     )
-    context = store.acquire_lease(run["id"], "sandbox-test")
+    context = store.acquire_lease(run["id"], "local-analysis-test")
     decision = store.record_decision(run["id"], ModelResponse(
         "scripted_test", "fixture", "", (), "tool_calls", None, {"total_tokens": 0},
     ))
@@ -959,10 +958,8 @@ def test_formal_python_analysis_uses_only_bounded_sandbox(app, source, monkeypat
 
     monkeypatch.setattr(
         "backend.services.advanced_agent.execute_tool",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("host analysis path called")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy analysis path called")),
     )
-    monkeypatch.setenv("MERIDIAN_SANDBOX_PROXY_URL", "http://127.0.0.1:8090")
-    monkeypatch.setenv("MERIDIAN_SANDBOX_PROXY_TOKEN", "test-sandbox-token-that-is-long-enough")
 
     def fake_execute(self, spec, *, input_dir, run_id, should_cancel=None):
         assert spec["method"] == "describe"
@@ -980,9 +977,10 @@ def test_formal_python_analysis_uses_only_bounded_sandbox(app, source, monkeypat
                 "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
             }],
             "metrics": {"input_rows": 6, "output_rows": 1, "method": "describe"},
+            "backend": "reviewed-local-worker",
         }
 
-    monkeypatch.setattr("backend.services.data_plane.sandbox_client.SandboxClient.execute", fake_execute)
+    monkeypatch.setattr("backend.services.data_plane.local_analysis.LocalAnalysisRunner.execute", fake_execute)
     with app.app_context():
         analyzed = executor.execute(
             context=context, decision_id=decision["id"], call_id="analysis",
@@ -991,17 +989,17 @@ def test_formal_python_analysis_uses_only_bounded_sandbox(app, source, monkeypat
     assert analyzed.result.status.value == "SUCCEEDED"
     result_ref = DatasetRefStore(database).get(analyzed.value["dataset_ref_id"], workspace_id="default")
     assert result_ref and result_ref.result_completeness == "complete"
-    assert analyzed.value["provenance_ref"].startswith("sandbox:")
+    assert analyzed.value["provenance_ref"].startswith("local_analysis:")
 
 
-def test_formal_python_analysis_fails_closed_without_sandbox(app, source, monkeypatch):
+def test_formal_python_analysis_rejects_generated_code(app, source):
     from backend.services.advanced_agent import build_executor
 
     database = app.extensions["meridian_db"]
     store, run = _confirmed_run(
         app, source_ids=(source["id"],), allowed=("query_data", "run_analysis"),
     )
-    context = store.acquire_lease(run["id"], "sandbox-unavailable-test")
+    context = store.acquire_lease(run["id"], "generated-code-test")
     decision = store.record_decision(run["id"], ModelResponse(
         "scripted_test", "fixture", "", (), "tool_calls", None, {"total_tokens": 0},
     ))
@@ -1012,20 +1010,14 @@ def test_formal_python_analysis_fails_closed_without_sandbox(app, source, monkey
             tool_id="query_data", arguments={"sql": "SELECT * FROM sales"},
         )
 
-    def unavailable(*_args, **_kwargs):
-        raise SandboxUnavailable("隔离容器不可用")
-
-    monkeypatch.setenv("MERIDIAN_SANDBOX_PROXY_URL", "http://127.0.0.1:8090")
-    monkeypatch.setenv("MERIDIAN_SANDBOX_PROXY_TOKEN", "test-sandbox-token-that-is-long-enough")
-    monkeypatch.setattr("backend.services.data_plane.sandbox_client.SandboxClient.execute", unavailable)
     with app.app_context():
         analyzed = executor.execute(
             context=context, decision_id=decision["id"], call_id="analysis",
             tool_id="run_analysis", arguments={
                 "dataset_ref_id": queried.value["dataset_ref_id"],
-                "code": "result = df.describe().reset_index()",
+                "method": "describe", "code": "result = df.describe().reset_index()",
             },
         )
     assert analyzed.result.status.value == "FAILED"
-    assert "隔离容器不可用" in analyzed.value["error"]
+    assert "不执行生成的 Python 代码" in analyzed.value["error"]
     assert not database.list("analysis_runs", workspace_id="default")
