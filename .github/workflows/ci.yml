@@ -26,12 +26,12 @@ jobs:
             requirements.lock
             requirements-dev.lock
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev postgresql mysql-server
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
       - name: Start PostgreSQL and MySQL
         run: |
           sudo systemctl start postgresql mysql
           pg_isready -h 127.0.0.1
-          sudo mysqladmin ping
+          sudo mysqladmin -u root -proot ping
       - name: Configure PostgreSQL test database
         run: |
           sudo -u postgres psql -c "CREATE ROLE meridian LOGIN PASSWORD 'meridian-ci-password'"
@@ -39,8 +39,8 @@ jobs:
           PGPASSWORD=meridian-ci-password psql -h 127.0.0.1 -U meridian -d meridian -c 'SELECT 1'
       - name: Configure MySQL test database
         run: |
-          sudo mysql -e "CREATE DATABASE meridian; CREATE USER 'meridian'@'127.0.0.1' IDENTIFIED BY 'meridian-ci-password'; CREATE USER 'meridian'@'localhost' IDENTIFIED BY 'meridian-ci-password'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'127.0.0.1'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'localhost';"
-          mysql -h 127.0.0.1 -u meridian -pmeridian-ci-password -e 'SELECT 1'
+          sudo mysql -u root -proot -e "CREATE DATABASE meridian; CREATE USER 'meridian'@'127.0.0.1' IDENTIFIED BY 'MeridianCI2026_Pass'; CREATE USER 'meridian'@'localhost' IDENTIFIED BY 'MeridianCI2026_Pass'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'127.0.0.1'; GRANT ALL PRIVILEGES ON meridian.* TO 'meridian'@'localhost';"
+          mysql -h 127.0.0.1 -u meridian -pMeridianCI2026_Pass -e 'SELECT 1'
       - name: Install Python dependencies
         run: python -m pip install --require-hashes --requirement requirements-dev.lock
       - name: Verify Python
@@ -57,7 +57,7 @@ jobs:
           MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK: "1"
           MERIDIAN_DATABASE_HOST_ALLOWLIST: 127.0.0.1
           MERIDIAN_TEST_POSTGRES_URL: postgresql+psycopg2://meridian:meridian-ci-password@127.0.0.1:5432/meridian
-          MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:meridian-ci-password@127.0.0.1:3306/meridian
+          MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:MeridianCI2026_Pass@127.0.0.1:3306/meridian
         run: pytest -q -m database_integration tests/test_database_integration.py
       - name: Audit locked production dependencies
         run: pip-audit -r requirements.lock --no-deps --disable-pip
@@ -83,5 +83,5 @@ jobs:
           MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK: "1"
           MERIDIAN_DATABASE_HOST_ALLOWLIST: 127.0.0.1
           MERIDIAN_TEST_POSTGRES_URL: postgresql+psycopg2://meridian:meridian-ci-password@127.0.0.1:5432/meridian
-          MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:meridian-ci-password@127.0.0.1:3306/meridian
+          MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:MeridianCI2026_Pass@127.0.0.1:3306/meridian
         run: python scripts/verify_advanced_agent.py --profile ci
