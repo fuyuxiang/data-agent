@@ -15,7 +15,6 @@ from backend.agent.model import (
     ChatCompletionsAdapter,
     ModelProtocolError,
     ResponsesAdapter,
-    ScriptedModelAdapter,
     build_model_adapter,
 )
 from backend.agent.store import RunStore
@@ -24,6 +23,24 @@ from backend.services.advanced_agent import FORMAL_AGENT_TOOLS, _run_knowledge_i
 from backend.services.data_plane.contracts import DatasetRef, DatasetRefStore
 from backend.services.data_plane.trino import TrinoAdapter, TrinoConfig
 from backend.services.results.manifests import ResultService
+
+
+class ScriptedModelAdapter:
+    """Deterministic model protocol fixture used only by this test module."""
+
+    protocol = "scripted_test"
+
+    def __init__(self, responses, model="scripted"):
+        self.responses = iter(responses)
+        self.model = model
+
+    def complete(self, _messages, _tools, *, max_output_tokens, on_text_delta=None, should_cancel=None):
+        if should_cancel and should_cancel():
+            raise InterruptedError("模型调用已取消")
+        response = next(self.responses)
+        if response.content and on_text_delta:
+            on_text_delta(response.content)
+        return response
 
 
 def _contract(source_ids=(), objective="按区域核对销售额"):

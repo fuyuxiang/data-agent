@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .contracts import ModelResponse, ModelToolCall
@@ -213,24 +213,6 @@ class ResponsesAdapter:
             tool_calls=tuple(calls), finish_reason=finish_reason,
             refusal="".join(refusal).strip() or None, usage=_usage(_value(response, "usage")),
         )
-
-
-class ScriptedModelAdapter:
-    """Deterministic protocol fixture; never used as a production fallback."""
-
-    protocol = "scripted_test"
-
-    def __init__(self, responses: Iterable[ModelResponse], model: str = "scripted"):
-        self.responses = iter(responses)
-        self.model = model
-
-    def complete(self, _messages, _tools, *, max_output_tokens, on_text_delta=None, should_cancel=None):
-        if should_cancel and should_cancel():
-            raise InterruptedError("模型调用已取消")
-        response = next(self.responses)
-        if response.content and on_text_delta:
-            on_text_delta(response.content)
-        return response
 
 
 def build_model_adapter(client: Any, provider: dict[str, Any]) -> ModelAdapter:

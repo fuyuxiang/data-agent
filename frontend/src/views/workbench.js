@@ -65,7 +65,7 @@ export const WorkbenchView = {
       return Boolean(state.activeSessionId);
     },
     questions() {
-      const fromState = state.recommendedQuestions.length ? state.recommendedQuestions : SUGGESTED;
+      const fromState = state.recommendedQuestions;
       const fromAgents = state.agents.flatMap(agent => agent.suggested_questions || []);
       const merged = [...fromAgents, ...fromState];
       return merged
@@ -182,8 +182,8 @@ export const WorkbenchView = {
     <Modal :open="demoOpen" title="载入演示数据" @close="demoOpen = false">
       <p class="muted small" style="margin-bottom:14px">
         会创建一套 24 个月的零售销售事实数据（区域 / 城市 / 品类 / 渠道），
-        并同步建立正式指标、业务知识和默认智能体。数据是确定性的，
-        所以下面这些问题每次都会得到同样的答案。
+        并同步建立正式指标、业务知识和默认智能体。这是合成样例，
+        不代表真实企业数据；同一载入月份的数据可复现，新工作空间跨月首次载入时数据窗口会移动。
       </p>
       <ul class="stack" style="display:flex;flex-direction:column;gap:6px">
         <li v-for="text in sampleQuestions" :key="text" class="small muted">· {{ text }}</li>

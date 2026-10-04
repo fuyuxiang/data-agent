@@ -113,8 +113,9 @@ def _ensure_sample_source(database: Database, workspace_id: str) -> tuple[dict[s
         return existing, []
     source = _register_sample_source(workspace_id)
     from ..core.database import utcnow
+    from .datasets import source_table
 
-    frame = demo_sales.build_frame()
+    _, frame = source_table(source)
     patched = database.patch(
         "sources",
         source["id"],
@@ -211,8 +212,17 @@ def _ensure_sample_semantic(
     return created
 
 
-def _attach_sample_to_active_session(database: Database, workspace_id: str, source_id: str) -> None:
-    sessions = database.list("sessions", workspace_id=workspace_id, limit=5000)
+def _attach_sample_to_active_session(
+    database: Database, workspace_id: str, source_id: str, actor_id: str,
+) -> None:
+    from .authorization import actor_role
+
+    can_use_legacy_session = actor_role(database, workspace_id, actor_id) == "owner"
+    sessions = [
+        item for item in database.list("sessions", workspace_id=workspace_id, limit=5000)
+        if item.get("owner_id") == actor_id
+        or (can_use_legacy_session and not item.get("owner_id"))
+    ]
     session = next(
         (item for item in sessions if item.get("status") == "active"),
         sessions[0] if sessions else None,
@@ -227,10 +237,12 @@ def _attach_sample_to_active_session(database: Database, workspace_id: str, sour
 
 def seed_demo_workspace(database: Database, workspace_id: str, actor_id: str) -> dict[str, Any]:
     """Idempotently load the demo data set, its metrics and its knowledge."""
+    from .datasets import source_table
+
     source, created = _ensure_sample_source(database, workspace_id)
     created += ["knowledge_entry"] * _ensure_sample_knowledge(database, workspace_id)
     created += _ensure_sample_semantic(database, workspace_id, source, actor_id)
-    _attach_sample_to_active_session(database, workspace_id, source["id"])
+    _attach_sample_to_active_session(database, workspace_id, source["id"], actor_id)
     ensure_super_agent(database, workspace_id, actor_id)
     database.audit(
         "product.demo_seeded", workspace_id=workspace_id, actor=actor_id,
@@ -240,7 +252,7 @@ def seed_demo_workspace(database: Database, workspace_id: str, actor_id: str) ->
     return {
         "created": created,
         "source": source,
-        "summary": demo_sales.summary(demo_sales.build_frame()),
+        "summary": demo_sales.summary(source_table(source)[1]),
         "onboarding": onboarding_status(database, workspace_id),
     }
 

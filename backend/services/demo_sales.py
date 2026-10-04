@@ -5,8 +5,9 @@ non-trivial answers.  That means a *multi-dimensional sales fact table* with
 enough history for year-over-year comparison and forecasting — not a static
 one-sheet lookup table.
 
-The generator is seeded, so every install produces byte-identical numbers and
-the documented sample questions always have the same answers.
+The generator is seeded, so the same anchor month produces identical data.
+The default anchor is the current month; new workspaces seeded in different
+months therefore have different time windows and numeric answers.
 
 The narrative baked into the data is deliberate:
 
@@ -116,8 +117,8 @@ def _shenzhen_fresh_anomaly(months_from_end: int) -> float:
 
 
 def _rows(anchor: date) -> Iterator[dict[str, Any]]:
-    # Deterministic pseudo-randomness: the demo must produce identical
-    # numbers on every install so the documented answers stay stable.
+    # Deterministic pseudo-randomness: the same anchor month produces
+    # identical numbers across installs.
     rng = random.Random(20260917)  # noqa: S311
     months = _month_starts(anchor, MONTHS)
     for index, month in enumerate(months):

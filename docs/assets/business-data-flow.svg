@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 920" role="img" aria-labelledby="title desc">
+  <title id="title">数擎业务数据流图（DFD Level 1）</title>
+  <desc id="desc">业务用户提交问题，系统确认任务、授权查询与分析、核验结果并交付成果。管理员配置指标、知识、权限和数据源。图中外部实体使用矩形，处理过程使用圆形，数据存储使用开口双线矩形，箭头标注传递的数据。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#155e75"/>
+    </marker>
+    <style>
+      .title { font: 700 30px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #102a43; }
+      .subtitle { font: 17px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #526b7a; }
+      .entity { fill: #eff6ff; stroke: #1e40af; stroke-width: 3; }
+      .process { fill: #e7f8f5; stroke: #087f8c; stroke-width: 3; }
+      .store { fill: none; stroke: #455d75; stroke-width: 3; }
+      .flow { fill: none; stroke: #155e75; stroke-width: 3; marker-end: url(#arrow); }
+      .node-id { font: 700 18px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f3551; }
+      .node-label { font: 600 21px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #102a43; }
+      .flow-label { font: 16px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #23485d; }
+      .legend { font: 17px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #334e68; }
+    </style>
+  </defs>
+  <rect width="1800" height="920" fill="#ffffff"/>
+  <text x="50" y="58" class="title">业务分析数据流图 · DFD Level 1</text>
+  <text x="50" y="89" class="subtitle">只表达业务数据如何流转；模型服务、传输协议及计算引擎见技术架构图。</text>
+
+  <!-- External entities. E1 is repeated on the right to avoid a crossing return line. -->
+  <rect x="40" y="210" width="165" height="100" rx="3" class="entity"/>
+  <text x="122" y="250" text-anchor="middle" class="node-id">E1</text>
+  <text x="122" y="282" text-anchor="middle" class="node-label">业务用户</text>
+  <rect x="1595" y="210" width="165" height="100" rx="3" class="entity"/>
+  <rect x="1601" y="216" width="153" height="88" rx="2" fill="none" stroke="#1e40af" stroke-width="1.5"/>
+  <text x="1677" y="250" text-anchor="middle" class="node-id">E1（重复）</text>
+  <text x="1677" y="282" text-anchor="middle" class="node-label">业务用户</text>
+  <rect x="40" y="650" width="165" height="100" rx="3" class="entity"/>
+  <text x="122" y="690" text-anchor="middle" class="node-id">E2</text>
+  <text x="122" y="722" text-anchor="middle" class="node-label">管理员</text>
+
+  <!-- Gane-Sarson-like processes, shown as numbered circles. -->
+  <circle cx="350" cy="260" r="90" class="process"/>
+  <text x="350" y="240" text-anchor="middle" class="node-id">2.0</text>
+  <text x="350" y="270" text-anchor="middle" class="node-label">确认分析任务</text>
+  <circle cx="700" cy="260" r="90" class="process"/>
+  <text x="700" y="240" text-anchor="middle" class="node-id">3.0</text>
+  <text x="700" y="270" text-anchor="middle" class="node-label">授权查询</text>
+  <text x="700" y="297" text-anchor="middle" class="node-label">与分析</text>
+  <circle cx="1050" cy="260" r="90" class="process"/>
+  <text x="1050" y="240" text-anchor="middle" class="node-id">4.0</text>
+  <text x="1050" y="270" text-anchor="middle" class="node-label">核验结果</text>
+  <circle cx="1400" cy="260" r="90" class="process"/>
+  <text x="1400" y="240" text-anchor="middle" class="node-id">5.0</text>
+  <text x="1400" y="270" text-anchor="middle" class="node-label">发布与交付</text>
+  <circle cx="350" cy="700" r="90" class="process"/>
+  <text x="350" y="680" text-anchor="middle" class="node-id">1.0</text>
+  <text x="350" y="710" text-anchor="middle" class="node-label">配置资产</text>
+  <text x="350" y="737" text-anchor="middle" class="node-label">与规则</text>
+
+  <!-- Open-ended data-store symbols: top/bottom rails and an identifier divider. -->
+  <path d="M 245 490 H 525 M 245 555 H 525 M 245 490 V 555 M 288 490 V 555" class="store"/>
+  <text x="267" y="531" text-anchor="middle" class="node-id">D1</text>
+  <text x="400" y="531" text-anchor="middle" class="node-label">指标 · 知识 · 权限</text>
+  <path d="M 590 490 H 870 M 590 555 H 870 M 590 490 V 555 M 633 490 V 555" class="store"/>
+  <text x="612" y="531" text-anchor="middle" class="node-id">D2</text>
+  <text x="746" y="531" text-anchor="middle" class="node-label">业务数据源</text>
+  <path d="M 935 490 H 1215 M 935 555 H 1215 M 935 490 V 555 M 978 490 V 555" class="store"/>
+  <text x="957" y="531" text-anchor="middle" class="node-id">D3</text>
+  <text x="1090" y="531" text-anchor="middle" class="node-label">结果 · 证据 · 审计</text>
+  <path d="M 1280 490 H 1560 M 1280 555 H 1560 M 1280 490 V 555 M 1323 490 V 555" class="store"/>
+  <text x="1302" y="531" text-anchor="middle" class="node-id">D4</text>
+  <text x="1442" y="531" text-anchor="middle" class="node-label">资料库</text>
+
+  <!-- Main business data flow. -->
+  <path d="M 205 260 H 255" class="flow"/>
+  <text x="215" y="235" class="flow-label">问题与范围</text>
+  <path d="M 440 260 H 605" class="flow"/>
+  <text x="470" y="235" class="flow-label">已确认任务</text>
+  <path d="M 790 260 H 955" class="flow"/>
+  <text x="830" y="235" class="flow-label">分析结果</text>
+  <path d="M 1140 260 H 1305" class="flow"/>
+  <text x="1170" y="235" class="flow-label">核验状态</text>
+  <path d="M 1490 260 H 1590" class="flow"/>
+  <text x="1494" y="235" class="flow-label">结论与成果</text>
+
+  <!-- Configuration, source data, evidence and deliverables. -->
+  <path d="M 205 700 H 255" class="flow"/>
+  <text x="211" y="676" class="flow-label">配置</text>
+  <path d="M 350 610 V 560" class="flow"/>
+  <text x="364" y="594" class="flow-label">指标/知识/授权规则</text>
+  <path d="M 440 631 L 640 555" class="flow"/>
+  <text x="512" y="612" class="flow-label">数据源登记</text>
+  <path d="M 405 483 L 385 350" class="flow"/>
+  <text x="410" y="415" class="flow-label">口径与权限</text>
+  <path d="M 666 343 L 666 484" class="flow"/>
+  <text x="575" y="425" class="flow-label">只读查询</text>
+  <path d="M 745 485 L 735 345" class="flow"/>
+  <text x="756" y="425" class="flow-label">授权数据</text>
+  <path d="M 772 314 L 990 485" class="flow"/>
+  <text x="820" y="386" class="flow-label">结果与执行记录</text>
+  <path d="M 1022 485 L 1022 350" class="flow"/>
+  <text x="934" y="427" class="flow-label">查询证据</text>
+  <path d="M 1090 348 L 1132 485" class="flow"/>
+  <text x="1127" y="416" class="flow-label">验证记录</text>
+  <path d="M 1400 350 V 484" class="flow"/>
+  <text x="1417" y="428" class="flow-label">通过校验的成果</text>
+
+  <line x1="40" y1="835" x2="1760" y2="835" stroke="#d7e2eb" stroke-width="2"/>
+  <text x="50" y="877" class="legend">图例：矩形 = 外部实体　　圆形 = 处理过程　　开口双线矩形 = 数据存储　　单向箭头 = 数据流</text>
+</svg>

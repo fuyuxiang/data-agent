@@ -110,3 +110,52 @@ def test_demo_seed_populates_the_focused_analysis_flow(client):
     repeated = client.post("/api/demo/seed", json={"workspace_id": "default"})
     assert repeated.status_code == 200
     assert repeated.get_json()["created"] == []
+
+
+def test_demo_questions_are_not_suggested_without_an_authorized_demo_source(client, app):
+    from backend.services.demo_sales import sample_questions
+
+    assert client.get("/api/bootstrap").get_json()["recommended_questions"] == []
+    seeded = client.post("/api/demo/seed", json={"workspace_id": "default"}).get_json()
+    assert client.get("/api/bootstrap").get_json()["recommended_questions"] == sample_questions()[:4]
+
+    database = app.extensions["meridian_db"]
+    database.patch(
+        "sources", seeded["source"]["id"],
+        {"authorized_user_ids": ["another-user"]}, workspace_id="default",
+    )
+    bootstrap = client.get("/api/bootstrap").get_json()
+    assert bootstrap["recommended_questions"] == []
+    assert all(
+        not agent["suggested_questions"]
+        for agent in bootstrap["agents"] if agent["id"] == "agent-superskill"
+    )
+
+
+def test_repeated_demo_seed_summarizes_the_stored_dataset(client, monkeypatch):
+    from datetime import date
+
+    from backend.services import demo_sales
+
+    build_frame = demo_sales.build_frame
+    monkeypatch.setattr(demo_sales, "build_frame", lambda: build_frame(date(2026, 9, 1)))
+    first = client.post("/api/demo/seed", json={"workspace_id": "default"}).get_json()
+    monkeypatch.setattr(demo_sales, "build_frame", lambda: build_frame(date(2026, 10, 1)))
+    repeated = client.post("/api/demo/seed", json={"workspace_id": "default"}).get_json()
+
+    assert repeated["created"] == []
+    assert repeated["summary"] == first["summary"]
+
+
+def test_demo_seed_does_not_attach_source_to_another_users_session(client, app):
+    database = app.extensions["meridian_db"]
+    other = database.put(
+        "sessions", {
+            "id": database.new_id("ses"), "workspace_id": "default",
+            "owner_id": "another-user", "status": "active", "source_ids": [],
+        }, workspace_id="default",
+    )
+
+    seeded = client.post("/api/demo/seed", json={"workspace_id": "default"}).get_json()
+    stored = database.get("sessions", other["id"], workspace_id="default")
+    assert seeded["source"]["id"] not in stored["source_ids"]

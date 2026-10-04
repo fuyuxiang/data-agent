@@ -13,8 +13,8 @@ from werkzeug.datastructures import FileStorage
 from ..core.database import utcnow
 from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
-from ..services.demo_sales import sample_questions
-from ..services.product import product_status, seed_demo_workspace
+from ..services.demo_sales import SAMPLE_SEED_ID, sample_questions
+from ..services.product import SUPER_AGENT_ID, product_status, seed_demo_workspace
 from ..services.workspace_tools import WorkspaceFiles
 from .common import (
     api_errors,
@@ -90,7 +90,12 @@ def bootstrap():
              or item.get("created_by") == current_user_id())
         and all(source_id in available.source_ids for source_id in item.get("source_ids") or [])
     ]
-    recommended = _recommended_questions(wid, active_session)
+    demo_accessible = any(
+        (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID
+        and item["id"] in available.source_ids
+        for item in db().list("sources", workspace_id=wid, limit=5000)
+    )
+    recommended = _recommended_questions(wid, demo_accessible)
     return ok(
         skills=[item.to_card() for item in skills],
         skill_categories=list(CATEGORIES),
@@ -104,7 +109,10 @@ def bootstrap():
                 "created_by": item.get("created_by") or "",
                 "tags": list(item.get("tags") or []),
                 "welcome": item.get("welcome") or "",
-                "suggested_questions": list(item.get("suggested_questions") or []),
+                "suggested_questions": (
+                    list(item.get("suggested_questions") or [])
+                    if item["id"] != SUPER_AGENT_ID or demo_accessible else []
+                ),
             }
             for item in agents
         ],
@@ -144,21 +152,19 @@ def bootstrap():
     )
 
 
-def _recommended_questions(wid: str, session: dict | None) -> list[str]:
+def _recommended_questions(wid: str, demo_accessible: bool) -> list[str]:
     """Questions the workbench should offer *right now*.
 
     Demo workspaces get the documented sample questions; everyone else gets the
     questions their own agents declare, so the first screen is never generic.
     """
-    demo = next(
-        (item for item in db().list("sources", workspace_id=wid, limit=5000)
-         if (item.get("sample_seed") or {}).get("id")), None,
-    )
-    if demo is not None:
+    if demo_accessible:
         return sample_questions()[:4]
     questions: list[str] = []
     for agent in db().list("agent_definitions", workspace_id=wid, limit=5000):
         if agent.get("status") != "published":
+            continue
+        if agent.get("id") == SUPER_AGENT_ID:
             continue
         if agent.get("visibility") == "private" and agent.get("created_by") != current_user_id():
             continue
