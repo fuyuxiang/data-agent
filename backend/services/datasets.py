@@ -72,7 +72,18 @@ def _configure_read_only(connection, timeout_seconds: int) -> None:
 
 
 def _database_engine(url: str):
-    engine = create_engine(url, pool_pre_ping=True, pool_recycle=300)
+    parsed = make_url(url)
+    connect_args = {}
+    if parsed.get_backend_name() == "mysql":
+        query = dict(parsed.query)
+        for key in ("ssl_ca", "ssl_cert", "ssl_key", "ssl_capath"):
+            if key in query:
+                connect_args[key] = query.pop(key)
+        for key in ("ssl_disabled", "ssl_verify_cert", "ssl_verify_identity"):
+            if key in query:
+                connect_args[key] = str(query.pop(key)).lower() == "true"
+        parsed = parsed.set(query=query)
+    engine = create_engine(parsed, connect_args=connect_args, pool_pre_ping=True, pool_recycle=300)
     if engine.dialect.name == "mssql":
         timeout = settings().query_timeout_seconds
 
@@ -362,7 +373,8 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
         query = {key: value for key, value in query.items() if key.lower() not in {"sslmode", "connect_timeout"}}
         query.update({"sslmode": ssl_mode, "connect_timeout": str(connect_timeout)})
     elif backend == "mysql":
-        if _should_use_loopback_for_local_mysql(str(url.host), resolved_addresses):
+        local_mysql = _should_use_loopback_for_local_mysql(str(url.host), resolved_addresses)
+        if local_mysql:
             url = url.set(host="127.0.0.1")
         ssl_mode = str(config.get("ssl_mode") or ("verify-identity" if production else "preferred")).lower()
         if ssl_mode not in {"disabled", "preferred", "required", "verify-ca", "verify-identity"}:
@@ -379,6 +391,10 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
         elif ssl_mode != "preferred":
             query["ssl_verify_cert"] = "true" if ssl_mode in {"verify-ca", "verify-identity"} else "false"
             query["ssl_verify_identity"] = "true" if ssl_mode == "verify-identity" else "false"
+        if local_mysql:
+            local_ca = os.getenv("MERIDIAN_DATABASE_MYSQL_CA_PATH", "").strip()
+            if local_ca:
+                query["ssl_ca"] = local_ca
     else:
         query = {
             key: value for key, value in query.items()
@@ -398,7 +414,7 @@ def _harden_database_url(raw_url: str | URL, config: dict, workspace_id: str) ->
 def _build_database_url(config: dict, workspace_id: str) -> str:
     if config.get("url"):
         return _harden_database_url(str(config["url"]), config, workspace_id)
-    driver = str(config.get("driver", "sqlite")).lower()
+    driver = str(config.get("driver") or config.get("dialect") or "sqlite").strip().lower()
     dialects = {
         "postgresql": "postgresql+psycopg2", "postgres": "postgresql+psycopg2",
         "mysql": "mysql+pymysql", "sqlserver": "mssql+pyodbc", "mssql": "mssql+pyodbc",

@@ -40,12 +40,12 @@ const Shell = {
   setup() {
     return {
       activeSession, canAdmin, commandItems, currentTitle, deleteSession, isAdminRoute, logout,
-      navigate, newSession, openSession, renameSession, sendAuthCode, state, submitAuth,
+      navigate, newSession, openSession, sendAuthCode, state, submitAuth,
       toggleTheme, userInitial, USER_NAV, ADMIN_NAV,
     };
   },
   data() {
-    return { sessionDialog: null, commandQuery: '' };
+    return { sessionDialog: null, sessionName: '', sessionSaving: false, commandQuery: '' };
   },
   computed: {
     filteredCommands() {
@@ -98,14 +98,26 @@ const Shell = {
     openConversation(session) {
       navigate('conversation', { id: session.id });
     },
-    async renameSession(session) {
-      const name = window.prompt('新的名称', session.name || '');
-      if (name === null || !name.trim()) return;
+    openSessionRename(session) {
+      this.sessionDialog = session;
+      this.sessionName = session.name || '';
+    },
+    closeSessionRename() {
+      if (!this.sessionSaving) this.sessionDialog = null;
+    },
+    async saveSessionRename() {
+      const session = this.sessionDialog;
+      const name = this.sessionName.trim();
+      if (!session || !name || this.sessionSaving) return;
+      this.sessionSaving = true;
       try {
-        await renameSession(session, name.trim());
+        await renameSession(session, name);
+        this.sessionDialog = null;
         state.toasts.push({ id: Date.now(), title: '已重命名', message: '', tone: 'success' });
       } catch (error) {
         state.toasts.push({ id: Date.now(), title: error.message, message: '', tone: 'error' });
+      } finally {
+        this.sessionSaving = false;
       }
     },
     async removeSession(session) {
@@ -137,15 +149,16 @@ const Shell = {
 
           <div v-if="recentSessions.length" class="sidebar__recent">
             <div class="nav-group__label">最近对话</div>
-            <div v-for="session in recentSessions" :key="session.id" class="row" style="gap:0">
+            <div v-for="session in recentSessions" :key="session.id" class="sidebar__session">
               <button class="recent-item" :class="{ active: state.activeSessionId === session.id }"
-                      @click="openConversation(session)">
+                      :title="session.name || '新对话'" @click="openConversation(session)">
                 <Icon name="chat" :size="13" /><span class="truncate">{{ session.name || '新对话' }}</span>
               </button>
-              <span v-if="canAdmin" class="row" style="gap:0">
-                <button class="icon-btn" style="width:22px;height:22px" aria-label="重命名"
-                        @click="renameSession(session)"><Icon name="edit" :size="12" /></button>
-                <button class="icon-btn icon-btn--danger" style="width:22px;height:22px" aria-label="删除"
+              <span v-if="canAdmin || (state.user && session.owner_id === state.user.id)"
+                    class="sidebar__session-actions">
+                <button class="icon-btn" aria-label="重命名会话" title="重命名会话"
+                        @click="openSessionRename(session)"><Icon name="edit" :size="13" /></button>
+                <button class="icon-btn icon-btn--danger" aria-label="删除会话" title="删除会话"
                         @click="removeSession(session)"><Icon name="trash" :size="12" /></button>
               </span>
             </div>
@@ -248,6 +261,19 @@ const Shell = {
           </section>
         </div>
       </Transition>
+
+      <Modal :open="!!sessionDialog" title="重命名会话" @close="closeSessionRename">
+        <label class="field">
+          <span>会话名称</span>
+          <input v-model="sessionName" class="input" maxlength="100" autofocus
+                 @keyup.enter="saveSessionRename" />
+        </label>
+        <template #footer>
+          <button class="btn" :disabled="sessionSaving" @click="closeSessionRename">取消</button>
+          <button class="btn btn--primary" :disabled="sessionSaving || !sessionName.trim()"
+                  @click="saveSessionRename">保存</button>
+        </template>
+      </Modal>
 
       <Transition name="fade">
         <div v-if="state.busy" class="busy"><span class="spinner"></span>{{ state.busyLabel || '正在处理' }}</div>

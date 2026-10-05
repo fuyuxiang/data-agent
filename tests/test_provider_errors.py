@@ -49,6 +49,44 @@ def test_provider_connection_error_is_actionable(app, client, monkeypatch):
     assert "检查网络、代理和 Base URL" in response.get_json()["error"]
 
 
+def test_provider_connection_uses_only_required_chat_parameters(app, client, monkeypatch):
+    provider_id = "provider-minimal-test"
+    app.extensions["meridian_db"].put(
+        "providers",
+        {
+            "id": provider_id,
+            "workspace_id": "default",
+            "name": "兼容模型",
+            "base_url": "https://model.example.test/v1",
+            "model": "example-model",
+        },
+        workspace_id="default",
+    )
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            model="example-model",
+            choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))],
+            usage=None,
+        )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(
+        "backend.services.models.resolve_provider",
+        lambda _provider_id, _workspace_id=None: ({"model": "example-model"}, fake_client),
+    )
+
+    response = client.post(f"/api/providers/{provider_id}/test")
+
+    assert response.status_code == 200
+    assert captured == {
+        "model": "example-model",
+        "messages": [{"role": "user", "content": "Reply with OK only."}],
+    }
+
+
 def test_delete_provider_clears_session_references(app, client):
     database = app.extensions["meridian_db"]
     provider_id = "provider-to-delete"
@@ -111,6 +149,37 @@ def test_provider_resolution_ignores_broken_system_proxy_by_default(app, monkeyp
     assert provider["model"] == "example-model"
     assert client is not None
     assert getattr(captured["http_client"], "_trust_env") is False
+
+
+def test_default_provider_skips_unconfigured_environment_placeholder(app, monkeypatch):
+    from backend.services.models import resolve_provider
+    from backend.services.security import SecretVault
+
+    _stub_public_dns(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("backend.services.models.OpenAI", lambda **_kwargs: SimpleNamespace())
+    with app.app_context():
+        credential = SecretVault(app.config["VAULT_KEY"]).seal({"api_key": "sk-test"})
+        app.extensions["meridian_db"].put(
+            "providers",
+            {
+                "id": "provider-configured-default",
+                "workspace_id": "default",
+                "name": "可用模型",
+                "base_url": "https://api.openai.com/v1",
+                "model": "example-model",
+                "credential": credential,
+                "enabled": True,
+            },
+            workspace_id="default",
+        )
+        provider, client = resolve_provider(None, "default")
+        placeholder, placeholder_client = resolve_provider("environment-default", "default")
+
+    assert provider["id"] == "provider-configured-default"
+    assert client is not None
+    assert placeholder["id"] == "environment-default"
+    assert placeholder_client is None
 
 
 def test_provider_resolution_can_opt_into_system_proxy(app, monkeypatch):

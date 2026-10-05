@@ -27,13 +27,28 @@ export const UsersView = {
   data() {
     return {
       members: [], loading: true, inviteOpen: false,
-      invite: { email: '', role: 'analyst' }, busy: false, tab: 'members',
+      invite: { email: '', role: 'analyst' }, inviteMode: 'new', invitationUrl: '',
+      busy: false, tab: 'members',
     };
   },
   async mounted() {
     await this.load();
   },
   methods: {
+    roleLabel(role) {
+      return ROLE_LABEL[role] || role;
+    },
+    openInvite() {
+      this.invite = { email: '', role: 'analyst' };
+      this.inviteMode = 'new';
+      this.invitationUrl = '';
+      this.inviteOpen = true;
+    },
+    closeInvite() {
+      if (this.busy) return;
+      this.inviteOpen = false;
+      this.invitationUrl = '';
+    },
     async load() {
       this.loading = true;
       try {
@@ -46,17 +61,34 @@ export const UsersView = {
       }
     },
     async inviteMember() {
+      if (!this.invite.email || this.busy) return;
       this.busy = true;
       try {
-        await actions.post(`/api/workspaces/${state.workspaceId}/members`, this.invite);
-        this.inviteOpen = false;
-        this.invite = { email: '', role: 'analyst' };
-        await this.load();
-        toast('邀请已创建', '完成');
+        if (this.inviteMode === 'new') {
+          const response = await actions.post(
+            `/api/workspaces/${state.workspaceId}/invitations`, this.invite,
+          );
+          this.invitationUrl = new URL(response.registration_url, window.location.origin).href;
+          toast('注册链接已生成，请复制并发给对方', '完成');
+        } else {
+          await actions.post(`/api/workspaces/${state.workspaceId}/members`, this.invite);
+          this.inviteOpen = false;
+          this.invitationUrl = '';
+          await this.load();
+          toast('已有账号已加入工作空间', '完成');
+        }
       } catch (error) {
-        toast(error.message, '邀请失败', 'error');
+        toast(error.message, '添加成员失败', 'error');
       } finally {
         this.busy = false;
+      }
+    },
+    async copyInvitation() {
+      try {
+        await navigator.clipboard.writeText(this.invitationUrl);
+        toast('注册链接已复制', '完成');
+      } catch {
+        toast('请选中链接手动复制', '复制失败', 'error');
       }
     },
     async changeRole(member, role) {
@@ -88,7 +120,7 @@ export const UsersView = {
           </p>
         </div>
         <div class="page-head__actions">
-          <button class="btn btn--primary btn--sm" @click="inviteOpen = true"><Icon name="plus" :size="14" />邀请成员</button>
+          <button v-if="state.workspaceRole === 'owner'" class="btn btn--primary btn--sm" @click="openInvite"><Icon name="plus" :size="14" />添加用户</button>
         </div>
       </header>
 
@@ -122,11 +154,12 @@ export const UsersView = {
               <p class="small muted">{{ member.email || member.user_id }}</p>
             </div>
             <div class="row" style="gap:8px">
-              <select class="select input--sm" style="width:120px" :value="member.role"
+              <select v-if="state.workspaceRole === 'owner'" class="select input--sm" style="width:120px" :value="member.role"
                       @change="changeRole(member, $event.target.value)">
                 <option v-for="role in roles" :key="role.key" :value="role.key">{{ role.label }}</option>
               </select>
-              <button class="icon-btn icon-btn--danger" aria-label="移除成员" @click="remove(member)">
+              <span v-else class="badge">{{ roleLabel(member.role) }}</span>
+              <button v-if="state.workspaceRole === 'owner'" class="icon-btn icon-btn--danger" aria-label="移除成员" @click="remove(member)">
                 <Icon name="trash" :size="15" />
               </button>
             </div>
@@ -135,19 +168,35 @@ export const UsersView = {
       </div>
     </div>
 
-    <Modal :open="inviteOpen" title="邀请成员" @close="inviteOpen = false">
-      <div class="stack">
+    <Modal :open="inviteOpen" :title="invitationUrl ? '注册链接' : '添加用户'" @close="closeInvite">
+      <div v-if="invitationUrl" class="stack">
+        <p class="small">链接在 24 小时内有效。请复制并发给对方；对方打开后使用受邀邮箱设置账号和密码。</p>
+        <input class="input" :value="invitationUrl" readonly aria-label="注册链接"
+               @focus="$event.target.select()" />
+        <p class="xs faint">系统不会自动发送邀请邮件。关闭窗口后，链接将不再显示。</p>
+      </div>
+      <div v-else class="stack">
+        <label class="field"><span>添加方式</span>
+          <select v-model="inviteMode" class="select">
+            <option value="new">邀请新用户注册</option>
+            <option value="existing">添加已有账号</option>
+          </select></label>
         <label class="field"><span>邮箱<em> *</em></span>
           <input v-model.trim="invite.email" type="email" class="input" placeholder="name@company.com" /></label>
         <label class="field"><span>角色</span>
           <select v-model="invite.role" class="select">
             <option v-for="role in roles" :key="role.key" :value="role.key">{{ role.label }}</option>
           </select></label>
-        <p class="xs faint">被邀请人会收到一次性邀请链接，只能访问自己有权的数据。</p>
+        <p class="xs faint">{{ inviteMode === 'new'
+          ? '创建后复制注册链接并发给对方，链接 24 小时有效。'
+          : '该邮箱须已注册数擎账号；添加后即可访问当前工作空间。' }}</p>
       </div>
       <template #footer>
-        <button class="btn" @click="inviteOpen = false">取消</button>
-        <button class="btn btn--primary" :disabled="busy || !invite.email" @click="inviteMember">创建邀请</button>
+        <button class="btn" @click="closeInvite">{{ invitationUrl ? '完成' : '取消' }}</button>
+        <button v-if="invitationUrl" class="btn btn--primary" @click="copyInvitation">复制链接</button>
+        <button v-else class="btn btn--primary" :disabled="busy || !invite.email" @click="inviteMember">
+          {{ busy ? '处理中…' : inviteMode === 'new' ? '生成注册链接' : '添加成员' }}
+        </button>
       </template>
     </Modal>`,
   computed: {

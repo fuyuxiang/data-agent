@@ -133,6 +133,13 @@
   border-top: 1px solid var(--sidebar-border);
 }
 
+.sidebar__session { display: flex; align-items: center; width: 100%; min-width: 0; }
+.sidebar__session .recent-item { flex: 1; min-width: 0; width: auto; }
+.sidebar__session .recent-item svg { flex: none; }
+.sidebar__session-actions { display: flex; align-items: center; flex: none; }
+.sidebar__session-actions .icon-btn { width: 26px; height: 30px; color: var(--sidebar-text); }
+.sidebar__session-actions .icon-btn:hover { background: var(--sidebar-hover); color: var(--sidebar-text-strong); }
+
 .recent-item {
   display: flex;
   align-items: center;

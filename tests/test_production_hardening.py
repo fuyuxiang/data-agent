@@ -670,6 +670,54 @@ def test_mysql_uses_loopback_for_current_deployment_host(app, monkeypatch):
         assert mysql.host == "127.0.0.1"
 
 
+def test_database_url_accepts_ui_dialect_field(app, monkeypatch):
+    from backend.services import datasets
+
+    monkeypatch.setattr(datasets, "validate_outbound_host", lambda *_args, **_kwargs: ["127.0.0.1"])
+    with app.app_context():
+        mysql = make_url(datasets._build_database_url({
+            "dialect": "mysql", "host": "127.0.0.1", "database": "dataagent",
+            "username": "dataagent", "password": "secret",
+        }, "default"))
+        assert mysql.drivername == "mysql+pymysql"
+        assert mysql.database == "dataagent"
+
+
+def test_local_mysql_uses_configured_ca(app, monkeypatch):
+    from backend.services import datasets
+
+    monkeypatch.setattr(datasets, "validate_outbound_host", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setenv("MERIDIAN_DATABASE_MYSQL_CA_PATH", "/etc/mysql/data-agent-tls/ca.pem")
+    with app.app_context():
+        mysql = make_url(datasets._build_database_url({
+            "driver": "mysql", "host": "127.0.0.1", "database": "dataagent",
+        }, "default"))
+        assert mysql.query["ssl_ca"] == "/etc/mysql/data-agent-tls/ca.pem"
+
+
+def test_mysql_tls_options_reach_pymysql_without_sqlalchemy_rewriting(monkeypatch):
+    from backend.services import datasets
+
+    captured = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = make_url(url)
+        captured["args"] = kwargs["connect_args"]
+        return SimpleNamespace(dialect=SimpleNamespace(name="mysql"))
+
+    monkeypatch.setattr(datasets, "create_engine", fake_create_engine)
+    datasets._database_engine(
+        "mysql+pymysql://reader:secret@127.0.0.1/dataagent?"
+        "ssl_ca=%2Fetc%2Fmysql%2Fca.pem&ssl_verify_cert=true&ssl_verify_identity=true"
+    )
+    assert "ssl_ca" not in captured["url"].query
+    assert captured["args"] == {
+        "ssl_ca": "/etc/mysql/ca.pem",
+        "ssl_verify_cert": True,
+        "ssl_verify_identity": True,
+    }
+
+
 def test_database_password_accepts_pasted_key_value_secret(app, monkeypatch):
     from backend.services import datasets
 

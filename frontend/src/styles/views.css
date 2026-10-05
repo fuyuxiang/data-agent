@@ -555,4 +555,5 @@
 .command__list { max-height: 46vh; overflow: auto; padding: 6px; }
 .command__item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px; border-radius: var(--radius-button); text-align: left; font-size: var(--text-body); }
 .command__item:hover { background: var(--surface-sunken); }
+.command__item.is-selected { background: var(--brand-soft); color: var(--brand-primary); }
 .command__item small { display: block; font-size: var(--text-xs); color: var(--text-tertiary); }

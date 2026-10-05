@@ -108,6 +108,13 @@ def save_provider(
 def resolve_provider(
     provider_id: str | None = None, workspace_id: str = "default",
 ) -> tuple[dict, OpenAI] | tuple[None, None]:
+    vault = SecretVault(current_app.config["VAULT_KEY"])
+    environment_key = os.getenv("OPENAI_API_KEY")
+
+    def api_key_for(item: dict) -> str | None:
+        secret = vault.open(item.get("credential", ""), {})
+        return (secret or {}).get("api_key") or environment_key
+
     provider = _db().get("providers", provider_id) if provider_id else None
     if provider and provider["id"] != "environment-default":
         if provider.get("workspace_id", "default") != workspace_id:
@@ -123,11 +130,12 @@ def resolve_provider(
                 or item.get("workspace_id", "default") == workspace_id
             )
         ]
-        provider = providers[0] if providers else None
+        provider = next((item for item in providers if api_key_for(item)), None)
+        if not provider:
+            provider = providers[0] if providers else None
     if not provider:
         return None, None
-    secret = SecretVault(current_app.config["VAULT_KEY"]).open(provider.get("credential", ""), {})
-    api_key = (secret or {}).get("api_key") or os.getenv("OPENAI_API_KEY")
+    api_key = api_key_for(provider)
     base_url = provider.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = provider.get("model") or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     if not api_key:
@@ -156,8 +164,6 @@ def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
         response = client.chat.completions.create(
             model=provider["model"],
             messages=[{"role": "user", "content": "Reply with OK only."}],
-            temperature=0,
-            max_tokens=8,
         )
     except APIConnectionError as exc:
         host = urlsplit(str(provider.get("base_url") or "")).hostname or "模型服务"
@@ -171,7 +177,7 @@ def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
     except RateLimitError as exc:
         raise ConnectionError("模型服务请求受限，请检查调用频率、账户余额或套餐额度。") from exc
     except BadRequestError as exc:
-        raise ValueError("模型服务拒绝了测试参数，请确认模型 ID 与 OpenAI-Compatible 协议匹配。") from exc
+        raise ValueError("模型服务拒绝了测试请求，请核对模型标识、API Key 权限和接口地址。") from exc
     except APIStatusError as exc:
         raise ConnectionError(f"模型服务返回 HTTP {exc.status_code}，请稍后重试或检查服务状态。") from exc
     record_usage(

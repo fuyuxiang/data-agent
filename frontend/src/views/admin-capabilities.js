@@ -34,7 +34,10 @@ export const ModelsView = {
     return { state, toast };
   },
   data() {
-    return { providers: [], loading: true, editor: null, testing: '', result: {} };
+    return {
+      providers: [], loading: true, editor: null, detail: null, removeTarget: null,
+      saving: false, deleting: false, testing: '', result: {},
+    };
   },
   async mounted() {
     await this.load();
@@ -54,17 +57,38 @@ export const ModelsView = {
     create() {
       this.editor = { name: '', base_url: '', model: '', api_key: '', enabled: true };
     },
+    edit(provider) {
+      this.detail = null;
+      this.editor = {
+        id: provider.id,
+        name: provider.name || '',
+        base_url: provider.base_url || '',
+        model: provider.model || '',
+        api_key: '',
+        enabled: provider.enabled !== false,
+      };
+    },
     async save() {
+      if (!this.editor?.name || !this.editor?.model || this.saving) {
+        if (this.editor && (!this.editor.name || !this.editor.model)) {
+          toast('请填写名称和模型标识', '信息未填完整', 'error');
+        }
+        return;
+      }
+      this.saving = true;
       try {
         const response = this.editor.id
           ? await actions.patch(`/api/providers/${this.editor.id}`, this.editor)
           : await actions.post('/api/providers', this.editor);
         this.providers = this.providers
           .filter(item => item.id !== response.item.id).concat(response.item);
+        delete this.result[response.item.id];
         this.editor = null;
         toast('模型服务已保存', '完成');
       } catch (error) {
         toast(error.message, '保存失败', 'error');
+      } finally {
+        this.saving = false;
       }
     },
     async test(provider) {
@@ -79,11 +103,18 @@ export const ModelsView = {
       }
     },
     async remove(provider) {
+      if (!provider || this.deleting) return;
+      this.deleting = true;
       try {
         await actions.remove(`/api/providers/${provider.id}`);
         this.providers = this.providers.filter(item => item.id !== provider.id);
+        this.removeTarget = null;
+        this.detail = null;
+        toast('模型服务已删除', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+      } finally {
+        this.deleting = false;
       }
     },
   },
@@ -116,6 +147,7 @@ export const ModelsView = {
           </div>
           <div class="tag-row">
             <span class="badge">{{ item.secret_source === 'environment' ? '环境变量' : '工作空间凭据' }}</span>
+            <span v-if="item.id === 'environment-default'" class="badge">系统内置，不可删除</span>
             <span v-if="item.context_window" class="badge">上下文 {{ item.context_window }}</span>
             <span v-if="item.tool_calling" class="badge badge--brand">支持工具调用</span>
           </div>
@@ -124,16 +156,44 @@ export const ModelsView = {
             {{ result[item.id].text }}
           </div>
           <div class="row" style="margin-top:12px">
+            <button class="btn btn--sm" @click="detail = item"><Icon name="fileText" :size="14" />查看</button>
+            <button v-if="item.id !== 'environment-default' || state.user?.role === 'owner'"
+                    class="btn btn--sm" @click="edit(item)"><Icon name="edit" :size="14" />编辑</button>
             <button class="btn btn--sm" :disabled="testing === item.id" @click="test(item)">
               <Icon name="play" :size="14" />{{ testing === item.id ? '测试中…' : '测试连接' }}
             </button>
             <span class="grow"></span>
-            <button v-if="item.secret_source !== 'environment'" class="icon-btn icon-btn--danger"
-                    aria-label="删除" @click="remove(item)"><Icon name="trash" :size="15" /></button>
+            <button v-if="item.id !== 'environment-default'" class="btn btn--sm"
+                    style="color:var(--danger)" @click="removeTarget = item"><Icon name="trash" :size="14" />删除</button>
           </div>
         </article>
       </div>
     </div>
+
+    <Modal :open="!!detail" :title="detail?.name || '模型详情'" @close="detail = null">
+      <dl v-if="detail" class="definition">
+        <dt>名称</dt><dd>{{ detail.name }}</dd>
+        <dt>模型标识</dt><dd>{{ detail.model || '未设置' }}</dd>
+        <dt>接口地址</dt><dd>{{ detail.base_url || '默认地址' }}</dd>
+        <dt>状态</dt><dd>{{ detail.enabled === false ? '已停用' : '已启用' }}</dd>
+        <dt>API Key</dt><dd>{{ detail.has_api_key ? '已配置' : '未配置' }}</dd>
+      </dl>
+      <template #footer>
+        <button class="btn" @click="detail = null">关闭</button>
+        <button v-if="detail && (detail.id !== 'environment-default' || state.user?.role === 'owner')"
+                class="btn btn--primary" @click="edit(detail)">编辑</button>
+      </template>
+    </Modal>
+
+    <Modal :open="!!removeTarget" title="删除模型服务" @close="removeTarget = null">
+      <p>确定删除「{{ removeTarget?.name }}」吗？使用此模型的智能体可能无法继续分析，请先为它们选择其他模型。</p>
+      <template #footer>
+        <button class="btn" @click="removeTarget = null">取消</button>
+        <button class="btn btn--danger" :disabled="deleting" @click="remove(removeTarget)">
+          {{ deleting ? '删除中…' : '删除' }}
+        </button>
+      </template>
+    </Modal>
 
     <Modal :open="!!editor" :title="editor?.id ? '编辑模型服务' : '添加模型服务'" @close="editor = null">
       <div v-if="editor" class="stack">
@@ -143,13 +203,21 @@ export const ModelsView = {
           <input v-model.trim="editor.base_url" class="input" placeholder="https://api.openai.com/v1" /></label>
         <label class="field"><span>模型标识<em> *</em></span>
           <input v-model.trim="editor.model" class="input" placeholder="gpt-4.1-mini" /></label>
+        <p v-if="editor.base_url?.includes('minimax')" class="xs faint">
+          MiniMax 模型标识示例：MiniMax-M3.1-Flash-Preview。请使用连字符，不要写成空格。
+        </p>
         <label class="field"><span>API Key</span>
           <input type="password" v-model="editor.api_key" class="input" autocomplete="new-password" /></label>
-        <p class="xs faint">凭据使用工作空间主密钥加密保存，不会以明文回显。</p>
+        <p class="xs faint">{{ editor.id ? '留空则保留已保存的 API Key。' : 'API Key 会加密保存，不会以明文回显。' }}</p>
+        <label class="field"><span>状态</span>
+          <select v-model="editor.enabled" class="select">
+            <option :value="true">启用</option>
+            <option :value="false">停用</option>
+          </select></label>
       </div>
       <template #footer>
         <button class="btn" @click="editor = null">取消</button>
-        <button class="btn btn--primary" @click="save">保存</button>
+        <button class="btn btn--primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>`,
 };

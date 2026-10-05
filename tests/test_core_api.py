@@ -222,6 +222,41 @@ def test_database_preview_uses_bounded_read_only_query(app, tmp_path):
             preview_source(source, "not_allowed", 2)
 
 
+def test_database_profile_uses_bounded_read_only_preview(app, client, tmp_path):
+    from sqlalchemy import create_engine, text
+
+    from backend.services.security import SecretVault
+
+    database_path = tmp_path / "remote-profile.sqlite3"
+    url = f"sqlite:///{database_path.as_posix()}"
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE students (id INTEGER, score INTEGER)"))
+            connection.execute(text(
+                "INSERT INTO students(id, score) VALUES (1, 90), (2, 80), (3, 80)"
+            ))
+    finally:
+        engine.dispose()
+
+    with app.app_context():
+        app.extensions["meridian_db"].put("sources", {
+            "id": "src_database_profile", "workspace_id": "default", "name": "学生库",
+            "kind": "database", "status": "ready",
+            "credential": SecretVault(app.config["VAULT_KEY"]).seal({"url": url}),
+            "tables": [{"name": "students", "source_name": "students", "schema_name": None}],
+        }, workspace_id="default")
+
+    response = client.get("/api/sources/src_database_profile/profile?table=students")
+    assert response.status_code == 200
+    result = response.get_json()["profile"]
+    assert result["sampled"] is True
+    assert result["table"] == "students"
+    assert result["rows"] == 3
+    assert result["duplicate_rows"] == 0
+    assert {column["name"] for column in result["columns"]} == {"id", "score"}
+
+
 def test_database_analysis_tables_can_be_selected(app, client):
     from backend.services.datasets import _query_table_scope
 

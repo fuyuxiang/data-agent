@@ -31,6 +31,11 @@ export const Composer = {
     submitLabel: { default: '发送' },
   },
   emits: ['submit', 'cancel'],
+  setup() {
+    // Expose the shared bootstrap state to the template as well as computed
+    // properties. Without this, the data-source drawer cannot render its list.
+    return { state };
+  },
   data() {
     return {
       text: '',
@@ -38,6 +43,7 @@ export const Composer = {
       scopeExplicit: false,
       fileScopeAuto: false,
       scopeOpen: false,
+      agentOpen: false,
       agentId: '',
       pendingFiles: [],
       mentionQuery: null,
@@ -58,6 +64,14 @@ export const Composer = {
     chosenSources() {
       const ids = new Set(this.visibleSources);
       return state.sources.filter(item => ids.has(item.id));
+    },
+    availableSources() {
+      const allowed = this.agent?.source_ids;
+      return state.sources.filter(item => item.status === 'ready'
+        && (!this.agentId || !allowed?.length || allowed.includes(item.id)));
+    },
+    availableAgents() {
+      return state.agents.filter(item => item.status === 'published');
     },
     scopeLabel() {
       if (!this.chosenSources.length) return '选择数据';
@@ -105,6 +119,7 @@ export const Composer = {
       if (event.key === 'Escape') {
         this.mentionQuery = null;
         this.scopeOpen = false;
+        this.agentOpen = false;
       }
     },
     insertMention(item) {
@@ -160,6 +175,15 @@ export const Composer = {
       this.sourceIds = current.includes(id)
         ? current.filter(value => value !== id)
         : [...current, id];
+    },
+    selectAgent(id) {
+      this.agentId = id;
+      this.agentOpen = false;
+      if (id) {
+        // An explicitly selected agent owns the data scope for this question.
+        this.scopeExplicit = false;
+        this.sourceIds = [];
+      }
     },
     pickFiles(event) {
       this.addFiles(Array.from(event.target.files || []));
@@ -256,7 +280,8 @@ export const Composer = {
           <Icon name="upload" :size="15" />
           <input type="file" multiple hidden accept=".docx,.xlsx,.pdf,.md,.txt" @change="pickFiles" />
         </label>
-        <button type="button" class="composer__scope" :class="{ 'is-on': agentId }" @click="agentId = ''">
+        <button type="button" class="composer__scope" :class="{ 'is-on': agentId }"
+                title="选择本次使用的智能体" @click="agentOpen = true">
           <Icon name="robot" :size="15" />
           <span class="truncate" style="max-width:120px">{{ agent ? agent.name : '自动选择智能体' }}</span>
         </button>
@@ -277,7 +302,7 @@ export const Composer = {
 
       <Drawer :open="scopeOpen" title="选择数据范围" subtitle="本次分析只能使用你有权访问的数据"
               @close="scopeOpen = false">
-        <label v-for="item in state.sources.filter(source => source.status === 'ready' && (!agentId || agent?.source_ids?.includes(source.id)))"
+        <label v-for="item in availableSources"
                :key="item.id" class="checkbox" style="padding:8px 0">
           <input type="checkbox" :value="item.id" :checked="visibleSources.includes(item.id)"
                  @change="toggleSource(item.id)" />
@@ -286,7 +311,27 @@ export const Composer = {
             <small class="faint" style="display:block">{{ item.kind }} · {{ item.status }}</small>
           </span>
         </label>
-        <p v-if="!state.sources.length" class="muted small">还没有数据源。可以先到「管理后台 → 数据」接入，或在工作台载入演示数据。</p>
+        <p v-if="!availableSources.length" class="muted small">
+          {{ agentId ? '当前智能体没有可用的数据源。请先在管理后台配置并发布数据源。' : '还没有可用数据源。可以先到「管理后台 → 数据」接入，或在工作台载入演示数据。' }}
+        </p>
+      </Drawer>
+
+      <Drawer :open="agentOpen" title="选择智能体" subtitle="固定智能体后，本次提问会使用它已配置的能力和数据范围"
+              @close="agentOpen = false">
+        <button type="button" class="command__item" :class="{ 'is-selected': !agentId }"
+                @click="selectAgent('')">
+          <Icon name="sparkle" :size="15" />
+          <span class="grow"><b>自动选择智能体</b><small>由系统根据问题自动匹配</small></span>
+          <Icon v-if="!agentId" name="check" :size="15" />
+        </button>
+        <button v-for="item in availableAgents" :key="item.id" type="button"
+                class="command__item" :class="{ 'is-selected': item.id === agentId }"
+                @click="selectAgent(item.id)">
+          <Icon :name="item.icon || 'robot'" :size="15" />
+          <span class="grow"><b>{{ item.name }}</b><small>{{ item.description || '已发布智能体' }}</small></span>
+          <Icon v-if="item.id === agentId" name="check" :size="15" />
+        </button>
+        <p v-if="!availableAgents.length" class="muted small">当前没有已发布的智能体。</p>
       </Drawer>
     </div>
 

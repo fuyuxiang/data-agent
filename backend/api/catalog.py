@@ -298,7 +298,23 @@ def source_preview(source_id: str):
 @bp.get("/api/sources/<source_id>/profile")
 @api_errors
 def source_profile(source_id: str):
-    _, frame = source_table(require_source_access(source_id), request.args.get("table"), actor_id=current_user_id())
+    source = require_source_access(source_id)
+    table_name = request.args.get("table")
+    if source.get("kind") == "database":
+        # Remote databases must stay on the controlled read-only path. Pull a
+        # bounded sample through the same policy-aware preview used by the
+        # preview tab, then run the quality calculations on that sample.
+        preview = preview_source(source, table_name, 1000, actor_id=current_user_id())
+        frame = pd.DataFrame(preview.get("data") or [], columns=preview.get("columns") or [])
+        result = profile(frame)
+        result.update({
+            "table": preview.get("table"),
+            "sampled": True,
+            "sample_rows": int(preview.get("rows") or 0),
+            "sample_truncated": bool(preview.get("truncated")),
+        })
+        return ok(profile=result)
+    _, frame = source_table(source, table_name, actor_id=current_user_id())
     return ok(profile=profile(frame))
 
 
