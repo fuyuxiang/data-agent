@@ -327,9 +327,10 @@ export const MetricsView = {
                         text="指标定义了业务口径，让不同人问同一个问题时得到同一个答案。" />
 
             <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <button v-for="item in filtered" :key="item.id" class="card card--interactive"
-                      style="display:flex;align-items:center;gap:12px;text-align:left;width:100%"
-                      @click="select(item)">
+              <article v-for="item in filtered" :key="item.id" class="card card--interactive"
+                       style="display:flex;align-items:center;gap:12px;text-align:left;width:100%"
+                       role="button" tabindex="0" @click="select(item)"
+                       @keydown.enter="select(item)">
                 <span class="agent-card__mark" style="width:34px;height:34px">
                   <Icon name="metric" :size="17" />
                 </span>
@@ -345,8 +346,13 @@ export const MetricsView = {
                   <span class="xs faint truncate" style="display:block;margin-top:2px">
                     {{ item.description || '暂无业务定义' }}
                   </span>
+                  <span v-if="state.workspaceRole === 'owner'" class="row" style="margin-top:10px">
+                    <span class="grow"></span>
+                    <button class="btn btn--sm" style="color:var(--danger)"
+                            @click.stop="metricDeleteTarget = item">删除指标</button>
+                  </span>
                 </span>
-              </button>
+              </article>
             </div>
           </div>
 
