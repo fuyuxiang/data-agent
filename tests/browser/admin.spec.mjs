@@ -79,6 +79,111 @@ test('从数据表建立语义模型并新建指标', async ({ page }) => {
   await expect(page.locator('.view')).toContainText('复盘销售额');
 });
 
+test('停用模型的删除确认仍展示关联指标', async ({ page }) => {
+  const models = await (await page.request.get('/api/semantic/models')).json();
+  const sample = models.items[0];
+  expect(sample).toBeTruthy();
+  const created = await page.request.post('/api/semantic/models', { data: {
+    name: '待清理语义模型', source_id: sample.source_id, table: sample.table,
+    dimensions: sample.dimensions, measures: sample.measures,
+  } });
+  expect(created.ok()).toBeTruthy();
+  const model = (await created.json()).item;
+  const metric = await page.request.post('/api/semantic/metrics', { data: {
+    name: 'pending_model_metric', model_id: model.id, measure: sample.measures[0].name, status: 'draft',
+  } });
+  expect(metric.ok()).toBeTruthy();
+  expect((await page.request.patch(`/api/semantic/models/${model.id}`, { data: { enabled: false } })).ok()).toBeTruthy();
+
+  await page.goto('/#/admin/metrics');
+  await page.locator('.tabs button', { hasText: '语义模型' }).click();
+  const card = page.locator('article.card').filter({ hasText: '待清理语义模型' });
+  await card.getByRole('button', { name: '删除模型' }).click();
+  const dialog = page.getByRole('dialog', { name: '删除语义模型' });
+  await expect(dialog).toContainText('pending_model_metric');
+  await expect(dialog).toContainText('请先启用模型');
+  await expect(dialog.getByRole('button', { name: '确认删除' })).toHaveCount(0);
+});
+
+test('指标删除先提示依赖，移除依赖后可完成删除', async ({ page }) => {
+  const models = await (await page.request.get('/api/semantic/models')).json();
+  const sample = models.items[0];
+  const created = await page.request.post('/api/semantic/models', { data: {
+    name: '删除验证模型', source_id: sample.source_id, table: sample.table,
+    dimensions: sample.dimensions, measures: sample.measures,
+  } });
+  expect(created.ok()).toBeTruthy();
+  const model = (await created.json()).item;
+  const baseResponse = await page.request.post('/api/semantic/metrics', { data: {
+    name: 'delete_review_base', model_id: model.id,
+    measure: sample.measures[0].name, status: 'approved',
+  } });
+  expect(baseResponse.ok()).toBeTruthy();
+  const base = (await baseResponse.json()).item;
+  const dependentResponse = await page.request.post('/api/semantic/metrics', { data: {
+    name: 'delete_review_derived', model_id: model.id, metric_type: 'derived',
+    expression: 'delete_review_base * 2', status: 'approved',
+  } });
+  expect(dependentResponse.ok()).toBeTruthy();
+  const dependent = (await dependentResponse.json()).item;
+
+  await page.goto('/#/admin/metrics');
+  await page.locator('article.card:has(b:text-is("delete_review_base"))')
+    .getByRole('button', { name: '删除指标' }).click();
+  const dialog = page.getByRole('dialog', { name: '删除指标' });
+  await expect(dialog).toContainText('delete_review_derived');
+  await expect(dialog.getByRole('button', { name: '确认删除' })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '取消' }).click();
+
+  expect((await page.request.delete(`/api/semantic/metrics/${dependent.id}`)).ok()).toBeTruthy();
+  await page.reload();
+  await page.locator('article.card:has(b:text-is("delete_review_base"))')
+    .getByRole('button', { name: '删除指标' }).click();
+  await expect(dialog.getByRole('button', { name: '确认删除' })).toBeEnabled();
+  await dialog.getByRole('button', { name: '确认删除' }).click();
+  await expect(page.locator('article.card:has(b:text-is("delete_review_base"))')).toHaveCount(0);
+  expect((await page.request.get(`/api/semantic/metrics/${base.id}/references`)).status()).toBe(404);
+});
+
+test('多表质量检查重试和切表时只显示当前表结果', async ({ page }) => {
+  const source = {
+    id: 'src_two_tables', name: '双表数据', kind: 'file', status: 'ready',
+    tables: [{ name: 'a', rows: 111, columns: 1 }, { name: 'b', rows: 222, columns: 1 }],
+  };
+  await page.route('**/api/sources', route => route.fulfill({ json: { ok: true, items: [source] } }));
+  let releaseFirst;
+  const firstResponse = new Promise(resolve => { releaseFirst = resolve; });
+  const requested = [];
+  let bRequests = 0;
+  await page.route('**/api/sources/src_two_tables/profile*', async (route) => {
+    const table = new URL(route.request().url()).searchParams.get('table');
+    requested.push(table);
+    if (table === 'a') await firstResponse;
+    if (table === 'b' && ++bRequests === 1) {
+      await route.fulfill({ status: 500, json: { ok: false, error: '暂时失败' } });
+      return;
+    }
+    await route.fulfill({ json: { ok: true, profile: {
+      rows: table === 'a' ? 111 : 222, column_count: 1, missing_cells: 0,
+      duplicate_rows: 0, columns: [],
+    } } });
+  });
+
+  await page.goto('/#/admin/data');
+  await page.locator('.file-tile').filter({ hasText: '双表数据' }).getByRole('button', { name: '查看' }).click();
+  const drawer = page.getByRole('dialog', { name: '双表数据' });
+  await drawer.getByRole('tab', { name: '数据质量' }).click();
+  await drawer.getByRole('button', { name: '运行数据质量检查' }).click();
+  await expect.poll(() => requested).toContain('a');
+  await drawer.locator('select').selectOption('b');
+  await expect(drawer).toContainText('暂时失败');
+  await drawer.getByRole('button', { name: '运行数据质量检查' }).click();
+  await expect(drawer.locator('.metric-strip__item').first()).toContainText('222');
+  releaseFirst();
+  await expect.poll(() => requested.filter(table => table === 'b').length).toBe(2);
+  await expect(drawer.locator('.metric-strip__item').first()).toContainText('222');
+});
+
 test('智能体发布会保存当前编辑，删除需要确认', async ({ page }) => {
   const sources = await (await page.request.get('/api/sources')).json();
   const created = await page.request.post('/api/agents', { data: {

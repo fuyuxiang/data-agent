@@ -62,6 +62,8 @@ def delete_provider(provider_id: str):
     if provider_id == "environment-default":
         raise ValueError("环境变量模型配置不能删除")
     provider = require_workspace_record("providers", provider_id)
+    if _provider_references(provider_id, provider.get("workspace_id", "default")):
+        raise ValueError("模型服务仍被智能体使用，请先为这些智能体选择其他模型")
     if not db().archive("providers", provider_id):
         raise FileNotFoundError("模型配置不存在")
     cleared_sessions = 0
@@ -70,6 +72,22 @@ def delete_provider(provider_id: str):
             db().patch("sessions", session["id"], {"provider_id": None}, workspace_id=session["workspace_id"])
             cleared_sessions += 1
     return ok(archived=True, cleared_sessions=cleared_sessions)
+
+
+def _provider_references(provider_id: str, wid: str) -> list[dict]:
+    return [
+        {"id": item["id"], "name": item.get("name"), "status": item.get("status")}
+        for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
+        if item.get("provider_id") == provider_id
+    ]
+
+
+@bp.get("/api/providers/<provider_id>/references")
+@api_errors
+def provider_references(provider_id: str):
+    require_workspace_access(workspace_id(), owner=True)
+    provider = require_workspace_record("providers", provider_id)
+    return ok(agents=_provider_references(provider_id, provider.get("workspace_id", "default")))
 
 
 @bp.post("/api/providers/<provider_id>/test")

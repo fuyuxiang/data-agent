@@ -42,6 +42,10 @@ export const MetricsView = {
       modelEditor: null,
       modelDeleteTarget: null,
       metricDeleteTarget: null,
+      modelDeleteReferences: null,
+      metricDeleteReferences: null,
+      deleteReferencesLoading: false,
+      deleteReferencesError: '',
       modelTables: [],
       modelColumns: [],
       saving: false,
@@ -147,28 +151,88 @@ export const MetricsView = {
       return state.workspaceRole === 'owner'
         || !this.metrics.some(metric => metric.model_id === model.id && metric.status === 'approved');
     },
-    modelMetrics(model) {
-      return this.metrics.filter(metric => metric.model_id === model.id);
+    async openModelDelete(model) {
+      this.modelDeleteTarget = model;
+      this.modelDeleteReferences = null;
+      this.deleteReferencesError = '';
+      await this.loadModelDeleteReferences();
+    },
+    closeModelDelete() {
+      if (!this.deleting) this.modelDeleteTarget = null;
+    },
+    async loadModelDeleteReferences() {
+      const model = this.modelDeleteTarget;
+      if (!model) return;
+      this.deleteReferencesLoading = true;
+      this.deleteReferencesError = '';
+      try {
+        const response = await actions.get(`/api/semantic/models/${model.id}/references`);
+        if (this.modelDeleteTarget?.id === model.id) this.modelDeleteReferences = response.metrics || [];
+      } catch (error) {
+        if (this.modelDeleteTarget?.id === model.id) this.deleteReferencesError = error.message;
+      } finally {
+        if (this.modelDeleteTarget?.id === model.id) this.deleteReferencesLoading = false;
+      }
+    },
+    showModelMetric() {
+      const reference = this.modelDeleteReferences?.[0];
+      this.tab = 'metrics';
+      this.query = '';
+      this.statusFilter = '';
+      const metric = this.metrics.find(item => item.id === reference?.id);
+      if (metric) this.select(metric);
+      this.modelDeleteTarget = null;
     },
     async deleteModel() {
       const model = this.modelDeleteTarget;
-      if (!model || this.deleting || this.modelMetrics(model).length) return;
+      if (!model || this.deleting || this.deleteReferencesLoading || !this.modelDeleteReferences
+          || this.modelDeleteReferences.length) return;
       this.deleting = true;
       try {
         await actions.remove(`/api/semantic/models/${model.id}`);
         this.models = this.models.filter(item => item.id !== model.id);
         this.modelDeleteTarget = null;
+        this.modelDeleteReferences = null;
         if (this.modelEditor?.id === model.id) this.modelEditor = null;
         toast('语义模型已删除', '完成');
       } catch (error) {
         toast(error.message, '删除语义模型失败', 'error');
+        await this.loadModelDeleteReferences();
       } finally {
         this.deleting = false;
       }
     },
+    async openMetricDelete(metric) {
+      this.metricDeleteTarget = metric;
+      this.metricDeleteReferences = null;
+      this.deleteReferencesError = '';
+      await this.loadMetricDeleteReferences();
+    },
+    closeMetricDelete() {
+      if (!this.deleting) this.metricDeleteTarget = null;
+    },
+    async loadMetricDeleteReferences() {
+      const metric = this.metricDeleteTarget;
+      if (!metric) return;
+      this.deleteReferencesLoading = true;
+      this.deleteReferencesError = '';
+      try {
+        const response = await actions.get(`/api/semantic/metrics/${metric.id}/references`);
+        if (this.metricDeleteTarget?.id === metric.id) {
+          this.metricDeleteReferences = {
+            metrics: response.metrics || [], agents: response.agents || [],
+          };
+        }
+      } catch (error) {
+        if (this.metricDeleteTarget?.id === metric.id) this.deleteReferencesError = error.message;
+      } finally {
+        if (this.metricDeleteTarget?.id === metric.id) this.deleteReferencesLoading = false;
+      }
+    },
     async deleteMetric() {
       const metric = this.metricDeleteTarget;
-      if (!metric || this.deleting) return;
+      if (!metric || this.deleting || this.deleteReferencesLoading || !this.metricDeleteReferences
+          || this.metricDeleteReferences.metrics.length || this.metricDeleteReferences.agents.length) return;
       this.deleting = true;
       try {
         await actions.remove(`/api/semantic/metrics/${metric.id}`);
@@ -176,9 +240,11 @@ export const MetricsView = {
         if (this.selected?.id === metric.id) this.selected = null;
         if (this.editor?.id === metric.id) this.editor = null;
         this.metricDeleteTarget = null;
+        this.metricDeleteReferences = null;
         toast('指标已删除', '完成');
       } catch (error) {
         toast(error.message, '删除指标失败', 'error');
+        await this.loadMetricDeleteReferences();
       } finally {
         this.deleting = false;
       }
@@ -330,7 +396,7 @@ export const MetricsView = {
               <article v-for="item in filtered" :key="item.id" class="card card--interactive"
                        style="display:flex;align-items:center;gap:12px;text-align:left;width:100%"
                        role="button" tabindex="0" @click="select(item)"
-                       @keydown.enter="select(item)">
+                       @keydown.enter.self="select(item)" @keydown.space.self.prevent="select(item)">
                 <span class="agent-card__mark" style="width:34px;height:34px">
                   <Icon name="metric" :size="17" />
                 </span>
@@ -349,7 +415,7 @@ export const MetricsView = {
                   <span v-if="state.workspaceRole === 'owner'" class="row" style="margin-top:10px">
                     <span class="grow"></span>
                     <button class="btn btn--sm" style="color:var(--danger)"
-                            @click.stop="metricDeleteTarget = item">删除指标</button>
+                            @click.stop="openMetricDelete(item)">删除指标</button>
                   </span>
                 </span>
               </article>
@@ -422,7 +488,7 @@ export const MetricsView = {
                     <button v-if="selected.status === 'draft' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="publish(selected)">发布</button>
                     <button v-if="selected.status === 'approved' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="disable(selected)">停用</button>
                     <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm"
-                            style="color:var(--danger)" @click="metricDeleteTarget = selected">删除指标</button>
+                            style="color:var(--danger)" @click="openMetricDelete(selected)">删除指标</button>
                   </template>
                 </div>
               </div>
@@ -530,7 +596,7 @@ export const MetricsView = {
             <div v-if="canAdmin" class="row" style="margin-top:12px">
               <button v-if="canEditModel(model)" class="btn btn--sm" @click="editModel(model)">编辑模型</button>
               <button class="btn btn--sm" style="color:var(--danger)"
-                      @click="modelDeleteTarget = model">删除模型</button>
+                      @click="openModelDelete(model)">删除模型</button>
             </div>
           </article>
           <EmptyState v-if="!models.length" icon="database" title="还没有语义模型"
@@ -562,31 +628,54 @@ export const MetricsView = {
       </div>
     </div>
 
-    <Modal :open="!!modelDeleteTarget" title="删除语义模型" @close="modelDeleteTarget = null">
+    <Modal :open="!!modelDeleteTarget" title="删除语义模型" @close="closeModelDelete">
       <template v-if="modelDeleteTarget">
-        <p v-if="modelMetrics(modelDeleteTarget).length" class="small">
+        <p v-if="deleteReferencesLoading" class="small muted">正在检查关联指标…</p>
+        <div v-else-if="deleteReferencesError" class="stack">
+          <p class="small" style="color:var(--danger)">{{ deleteReferencesError }}</p>
+          <button class="btn btn--sm" @click="loadModelDeleteReferences">重试检查</button>
+        </div>
+        <p v-else-if="modelDeleteReferences?.length" class="small">
           「{{ modelDeleteTarget.name }}」仍被以下指标引用。请先删除或迁移这些指标，再删除模型：
-          {{ modelMetrics(modelDeleteTarget).map(item => item.label || item.name).join('、') }}。
+          {{ modelDeleteReferences.map(item => item.name).join('、') }}。
+          <span v-if="modelDeleteTarget.enabled === false">模型已停用，请先启用模型以管理关联指标。</span>
         </p>
         <p v-else class="small">确定删除语义模型「{{ modelDeleteTarget.name }}」吗？删除后将不再出现在指标中心。</p>
       </template>
       <template #footer>
-        <button class="btn" :disabled="deleting" @click="modelDeleteTarget = null">取消</button>
-        <button v-if="modelDeleteTarget && modelMetrics(modelDeleteTarget).length" class="btn btn--primary"
-                @click="tab = 'metrics'; select(modelMetrics(modelDeleteTarget)[0]); modelDeleteTarget = null">查看关联指标</button>
-        <button v-else class="btn btn--danger" :disabled="deleting" @click="deleteModel">
+        <button class="btn" :disabled="deleting" @click="closeModelDelete">取消</button>
+        <button v-if="modelDeleteReferences?.length && modelDeleteTarget?.enabled === false" class="btn btn--primary"
+                @click="editModel(modelDeleteTarget); closeModelDelete()">编辑模型</button>
+        <button v-else-if="modelDeleteReferences?.length" class="btn btn--primary"
+                @click="showModelMetric">查看关联指标</button>
+        <button v-else class="btn btn--danger"
+                :disabled="deleting || deleteReferencesLoading || !!deleteReferencesError || !modelDeleteReferences" @click="deleteModel">
           {{ deleting ? '删除中…' : '确认删除' }}
         </button>
       </template>
     </Modal>
 
-    <Modal :open="!!metricDeleteTarget" title="删除指标" @close="metricDeleteTarget = null">
-      <p v-if="metricDeleteTarget" class="small">
+    <Modal :open="!!metricDeleteTarget" title="删除指标" @close="closeMetricDelete">
+      <p v-if="deleteReferencesLoading" class="small muted">正在检查指标和智能体引用…</p>
+      <div v-else-if="deleteReferencesError" class="stack">
+        <p class="small" style="color:var(--danger)">{{ deleteReferencesError }}</p>
+        <button class="btn btn--sm" @click="loadMetricDeleteReferences">重试检查</button>
+      </div>
+      <div v-else-if="metricDeleteReferences?.metrics.length || metricDeleteReferences?.agents.length" class="stack small">
+        <p v-if="metricDeleteReferences.metrics.length">仍被指标 {{ metricDeleteReferences.metrics.map(item => item.name).join('、') }} 引用，请先修改这些指标的公式。</p>
+        <p v-if="metricDeleteReferences.agents.length">仍被智能体 {{ metricDeleteReferences.agents.map(item => item.name).join('、') }} 使用，请先调整智能体配置。</p>
+      </div>
+      <p v-else-if="metricDeleteTarget" class="small">
         确定删除指标「{{ metricDeleteTarget.label || metricDeleteTarget.name }}」吗？历史分析记录会保留，但该指标将不再用于后续分析。
       </p>
       <template #footer>
-        <button class="btn" :disabled="deleting" @click="metricDeleteTarget = null">取消</button>
-        <button class="btn btn--danger" :disabled="deleting" @click="deleteMetric">
+        <button class="btn" :disabled="deleting" @click="closeMetricDelete">取消</button>
+        <button v-if="metricDeleteReferences?.metrics.length" class="btn btn--primary"
+                @click="select(metrics.find(item => item.id === metricDeleteReferences.metrics[0].id)); closeMetricDelete()">查看关联指标</button>
+        <button v-else-if="metricDeleteReferences?.agents.length" class="btn btn--primary"
+                @click="closeMetricDelete(); navigate('admin/agents')">管理智能体</button>
+        <button v-else class="btn btn--danger"
+                :disabled="deleting || deleteReferencesLoading || !!deleteReferencesError || !metricDeleteReferences" @click="deleteMetric">
           {{ deleting ? '删除中…' : '确认删除' }}
         </button>
       </template>

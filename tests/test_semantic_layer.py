@@ -115,3 +115,54 @@ def test_semantic_model_requires_deleting_referencing_metrics_first(client, sour
     assert model["id"] not in {
         item["id"] for item in client.get("/api/semantic/models").get_json()["items"]
     }
+
+
+def test_disabled_model_references_are_visible_to_delete_dialog(client, source):
+    model = _model(client, source)
+    metric = client.post("/api/semantic/metrics", json={
+        "name": "disabled_model_metric", "model_id": model["id"],
+        "measure": "sales_amount", "status": "draft",
+    }).get_json()["item"]
+    assert client.patch(f"/api/semantic/models/{model['id']}", json={"enabled": False}).status_code == 200
+    assert metric["id"] not in {
+        item["id"] for item in client.get("/api/semantic/metrics").get_json()["items"]
+    }
+
+    references = client.get(f"/api/semantic/models/{model['id']}/references")
+    assert references.status_code == 200
+    assert references.get_json()["metrics"] == [{
+        "id": metric["id"], "name": "disabled_model_metric", "status": "draft",
+    }]
+    assert client.delete(f"/api/semantic/models/{model['id']}").status_code == 400
+
+
+def test_metric_delete_requires_removing_metric_and_agent_references(app, client, source):
+    model = _model(client, source)
+    base = client.post("/api/semantic/metrics", json={
+        "name": "base_sales", "model_id": model["id"],
+        "measure": "sales_amount", "status": "approved",
+    }).get_json()["item"]
+    derived_response = client.post("/api/semantic/metrics", json={
+        "name": "double_sales", "model_id": model["id"], "metric_type": "derived",
+        "expression": "base_sales * 2", "status": "approved",
+    })
+    assert derived_response.status_code == 201, derived_response.get_json()
+    derived = derived_response.get_json()["item"]
+    assert client.post("/api/semantic/compile", json={"metric": derived["id"]}).status_code == 200
+
+    database = app.extensions["meridian_db"]
+    database.put("agent_definitions", {
+        "id": "agent-using-metric", "workspace_id": "default", "name": "业绩助手",
+        "status": "published", "metric_ids": [base["id"]],
+    }, workspace_id="default")
+    references = client.get(f"/api/semantic/metrics/{base['id']}/references")
+    assert references.status_code == 200
+    assert [item["id"] for item in references.get_json()["metrics"]] == [derived["id"]]
+    assert [item["id"] for item in references.get_json()["agents"]] == ["agent-using-metric"]
+    assert client.delete(f"/api/semantic/metrics/{base['id']}").status_code == 400
+    assert client.post("/api/semantic/compile", json={"metric": derived["id"]}).status_code == 200
+
+    assert client.delete(f"/api/semantic/metrics/{derived['id']}").status_code == 200
+    assert client.delete(f"/api/semantic/metrics/{base['id']}").status_code == 400
+    database.patch("agent_definitions", "agent-using-metric", {"metric_ids": []}, workspace_id="default")
+    assert client.delete(f"/api/semantic/metrics/{base['id']}").status_code == 200

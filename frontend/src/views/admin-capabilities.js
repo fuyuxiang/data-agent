@@ -9,6 +9,7 @@
 import { Icon } from '../components/icons.js';
 import { EmptyState, Modal, Status, Tabs } from '../components/ui.js';
 import { actions, state, toast } from '../store.js';
+import { navigate } from '../router.js';
 
 const TOOL_RISK = {
   read: { label: '只读', tone: 'badge--success', hint: '可以自动执行' },
@@ -31,13 +32,19 @@ export const ModelsView = {
   name: 'ModelsView',
   components: { EmptyState, Icon, Modal, Status },
   setup() {
-    return { state, toast };
+    return { navigate, state, toast };
   },
   data() {
     return {
       providers: [], loading: true, editor: null, detail: null, removeTarget: null,
+      removeReferences: null, removeLoading: false, removeError: '',
       saving: false, deleting: false, testing: '', result: {},
     };
+  },
+  computed: {
+    canManageProviders() {
+      return state.workspaceRole === 'owner';
+    },
   },
   async mounted() {
     await this.load();
@@ -102,8 +109,32 @@ export const ModelsView = {
         this.testing = '';
       }
     },
+    async openRemove(provider) {
+      this.removeTarget = provider;
+      this.removeReferences = null;
+      this.removeError = '';
+      await this.loadRemoveReferences();
+    },
+    closeRemove() {
+      if (!this.deleting) this.removeTarget = null;
+    },
+    async loadRemoveReferences() {
+      const provider = this.removeTarget;
+      if (!provider) return;
+      this.removeLoading = true;
+      this.removeError = '';
+      try {
+        const response = await actions.get(`/api/providers/${provider.id}/references`);
+        if (this.removeTarget?.id === provider.id) this.removeReferences = response.agents || [];
+      } catch (error) {
+        if (this.removeTarget?.id === provider.id) this.removeError = error.message;
+      } finally {
+        if (this.removeTarget?.id === provider.id) this.removeLoading = false;
+      }
+    },
     async remove(provider) {
-      if (!provider || this.deleting) return;
+      if (!provider || this.deleting || this.removeLoading || !this.removeReferences
+          || this.removeReferences.length) return;
       this.deleting = true;
       try {
         await actions.remove(`/api/providers/${provider.id}`);
@@ -113,6 +144,7 @@ export const ModelsView = {
         toast('模型服务已删除', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+        await this.loadRemoveReferences();
       } finally {
         this.deleting = false;
       }
@@ -128,9 +160,11 @@ export const ModelsView = {
           </p>
         </div>
         <div class="page-head__actions">
-          <button class="btn btn--primary btn--sm" @click="create"><Icon name="plus" :size="14" />添加模型服务</button>
+          <button v-if="canManageProviders" class="btn btn--primary btn--sm" @click="create"><Icon name="plus" :size="14" />添加模型服务</button>
         </div>
       </header>
+
+      <p v-if="!canManageProviders" class="small muted" style="margin-bottom:16px">模型服务由工作空间所有者配置。</p>
 
       <div v-if="loading" class="stack">
         <div v-for="index in 3" :key="index" class="skeleton" style="height:80px"></div>
@@ -157,14 +191,14 @@ export const ModelsView = {
           </div>
           <div class="row" style="margin-top:12px">
             <button class="btn btn--sm" @click="detail = item"><Icon name="fileText" :size="14" />查看</button>
-            <button v-if="item.id !== 'environment-default' || state.user?.role === 'owner'"
+            <button v-if="canManageProviders && (item.id !== 'environment-default' || state.user?.role === 'owner')"
                     class="btn btn--sm" @click="edit(item)"><Icon name="edit" :size="14" />编辑</button>
-            <button class="btn btn--sm" :disabled="testing === item.id" @click="test(item)">
+            <button v-if="canManageProviders" class="btn btn--sm" :disabled="testing === item.id" @click="test(item)">
               <Icon name="play" :size="14" />{{ testing === item.id ? '测试中…' : '测试连接' }}
             </button>
             <span class="grow"></span>
-            <button v-if="item.id !== 'environment-default'" class="btn btn--sm"
-                    style="color:var(--danger)" @click="removeTarget = item"><Icon name="trash" :size="14" />删除</button>
+            <button v-if="canManageProviders && item.id !== 'environment-default'" class="btn btn--sm"
+                    style="color:var(--danger)" @click="openRemove(item)"><Icon name="trash" :size="14" />删除</button>
           </div>
         </article>
       </div>
@@ -180,17 +214,29 @@ export const ModelsView = {
       </dl>
       <template #footer>
         <button class="btn" @click="detail = null">关闭</button>
-        <button v-if="detail && (detail.id !== 'environment-default' || state.user?.role === 'owner')"
+        <button v-if="canManageProviders && detail && (detail.id !== 'environment-default' || state.user?.role === 'owner')"
                 class="btn btn--primary" @click="edit(detail)">编辑</button>
       </template>
     </Modal>
 
-    <Modal :open="!!removeTarget" title="删除模型服务" @close="removeTarget = null">
-      <p>确定删除「{{ removeTarget?.name }}」吗？使用此模型的智能体可能无法继续分析，请先为它们选择其他模型。</p>
+    <Modal :open="!!removeTarget" title="删除模型服务" @close="closeRemove">
+      <p v-if="removeLoading" class="small muted">正在检查智能体引用…</p>
+      <div v-else-if="removeError" class="stack">
+        <p class="small" style="color:var(--danger)">{{ removeError }}</p>
+        <button class="btn btn--sm" @click="loadRemoveReferences">重试检查</button>
+      </div>
+      <p v-else-if="removeReferences?.length" class="small">
+        「{{ removeTarget?.name }}」仍被智能体 {{ removeReferences.map(item => item.name).join('、') }} 使用。
+        请先为这些智能体选择其他模型，再删除模型服务。
+      </p>
+      <p v-else class="small">确定删除模型服务「{{ removeTarget?.name }}」吗？关联会话的模型选择会清除；后续分析需要有其他可用模型。</p>
       <template #footer>
-        <button class="btn" @click="removeTarget = null">取消</button>
-        <button class="btn btn--danger" :disabled="deleting" @click="remove(removeTarget)">
-          {{ deleting ? '删除中…' : '删除' }}
+        <button class="btn" :disabled="deleting" @click="closeRemove">取消</button>
+        <button v-if="removeReferences?.length" class="btn btn--primary"
+                @click="closeRemove(); navigate('admin/agents')">管理智能体</button>
+        <button v-else class="btn btn--danger" :disabled="deleting || removeLoading || !!removeError || !removeReferences"
+                @click="remove(removeTarget)">
+          {{ deleting ? '删除中…' : '确认删除' }}
         </button>
       </template>
     </Modal>

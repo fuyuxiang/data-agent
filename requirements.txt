@@ -1,4 +1,5 @@
 Flask>=3.0,<4
+Werkzeug>=3.1.9,<4
 flask-cors>=4.0,<7
 waitress>=3.0,<4
 pandas>=2.0,<4

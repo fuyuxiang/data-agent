@@ -22,6 +22,7 @@ const LOCAL_MYSQL_DEFAULTS = {
   database: 'dataagent',
   username: 'dataagent',
 };
+const DATABASE_PORTS = { mysql: '3306', postgresql: '5432', sqlserver: '1433' };
 
 export const DataView = {
   name: 'DataView',
@@ -42,6 +43,10 @@ export const DataView = {
       schemaError: '',
       preview: null,
       profile: null,
+      profileTable: '',
+      profileLoading: false,
+      profileError: '',
+      profileRequest: 0,
       busy: false,
       uploadOpen: false,
       dbOpen: false,
@@ -69,7 +74,7 @@ export const DataView = {
       const profile = this.profile || {};
       return [
         { label: '行数', value: profile.rows ?? '—' },
-        { label: '列数', value: profile.column_count ?? (this.active?.tables?.[0]?.columns ?? '—') },
+        { label: '列数', value: profile.column_count ?? (this.active?.tables?.find(item => item.name === this.profileTable)?.columns ?? '—') },
         { label: '缺失单元格', value: profile.missing_cells ?? '—' },
         { label: '重复行', value: profile.duplicate_rows ?? '—' },
       ];
@@ -108,6 +113,10 @@ export const DataView = {
       this.schemaError = '';
       this.preview = null;
       this.profile = null;
+      this.profileTable = source.tables?.[0]?.name || '';
+      this.profileLoading = false;
+      this.profileError = '';
+      this.profileRequest += 1;
       if (source.kind !== 'file' && source.kind !== 'http') await this.loadSchema();
     },
     async loadSchema() {
@@ -137,13 +146,39 @@ export const DataView = {
         toast(error.message, '预览失败', 'error');
       }
     },
-    async loadProfile(table) {
+    async loadProfile() {
+      if (!this.active) return;
+      const sourceId = this.active.id;
+      const table = this.profileTable;
+      const requestId = ++this.profileRequest;
+      this.profileLoading = true;
+      this.profileError = '';
+      this.profile = null;
       try {
         const query = table ? `?table=${encodeURIComponent(table)}` : '';
-        const response = await actions.get(`/api/sources/${this.active.id}/profile${query}`);
-        this.profile = response.profile || response;
+        const response = await actions.get(`/api/sources/${sourceId}/profile${query}`);
+        if (this.active?.id === sourceId && this.profileTable === table && this.profileRequest === requestId) {
+          this.profile = response.profile || response;
+        }
       } catch (error) {
-        toast(error.message, '画像失败', 'error');
+        if (this.active?.id === sourceId && this.profileRequest === requestId) {
+          this.profileError = error.message;
+        }
+      } finally {
+        if (this.active?.id === sourceId && this.profileRequest === requestId) this.profileLoading = false;
+      }
+    },
+    changeDatabaseDriver(event) {
+      const previous = this.dbForm.driver;
+      const driver = event.target.value;
+      this.dbForm.driver = driver;
+      if (this.dbForm.port === DATABASE_PORTS[previous]) this.dbForm.port = DATABASE_PORTS[driver];
+      if (previous === 'mysql' && driver !== 'mysql') {
+        for (const key of ['name', 'host', 'database', 'username']) {
+          if (this.dbForm[key] === LOCAL_MYSQL_DEFAULTS[key]) this.dbForm[key] = '';
+        }
+      } else if (driver === 'mysql' && !this.dbForm.host && !this.dbForm.database) {
+        Object.assign(this.dbForm, LOCAL_MYSQL_DEFAULTS);
       }
     },
     async remove(source) {
@@ -346,13 +381,16 @@ export const DataView = {
 
         <div v-else style="margin-top:16px">
           <div v-if="(active.tables || []).length > 1" class="row" style="margin-bottom:10px">
-            <select class="select input--sm" style="width:200px"
-                    @change="profile = null; loadProfile($event.target.value)">
+            <select v-model="profileTable" class="select input--sm" style="width:200px"
+                    @change="loadProfile">
               <option v-for="table in active.tables" :key="table.name" :value="table.name">{{ table.name }}</option>
             </select>
           </div>
-          <button v-if="!profile" class="btn btn--sm" @click="loadProfile()">运行数据质量检查</button>
-          <div v-else class="stack">
+          <button class="btn btn--sm" :disabled="profileLoading" @click="loadProfile">
+            {{ profileLoading ? '检查中…' : profile ? '重新检查' : '运行数据质量检查' }}
+          </button>
+          <p v-if="profileError" class="small" style="color:var(--danger);margin-top:10px">{{ profileError }}</p>
+          <div v-if="profile" class="stack" style="margin-top:12px">
             <p v-if="profile.sampled" class="small muted">
               数据库数据按最多 {{ profile.sample_rows || profile.rows }} 行样本检查
               <span v-if="profile.sample_truncated">（数据量较大，指标为样本结果）</span>。
@@ -388,13 +426,13 @@ export const DataView = {
     <Modal :open="dbOpen" title="连接数据库" :wide="true" @close="dbOpen = false">
       <div class="stack">
         <p class="xs faint" v-if="dbForm.driver === 'mysql' && dbForm.host === '127.0.0.1'">
-          已填入当前服务器的 MySQL 连接信息。数擎登录账号与数据库账号不同，请在下方填写 dataagent 数据库账号的密码。
+          已填入本地 MySQL 示例配置；连接其他数据库时请修改主机、库名和账号。数擎登录密码不能用于连接 MySQL。
         </p>
         <div class="grid grid--2" style="gap:12px">
           <label class="field"><span>名称<em> *</em></span>
             <input v-model.trim="dbForm.name" class="input" /></label>
           <label class="field"><span>类型</span>
-            <select v-model="dbForm.driver" class="select">
+            <select :value="dbForm.driver" class="select" @change="changeDatabaseDriver">
               <option value="mysql">MySQL</option>
               <option value="postgresql">PostgreSQL</option>
               <option value="sqlserver">SQL Server</option>

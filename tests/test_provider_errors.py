@@ -116,6 +116,31 @@ def test_delete_provider_clears_session_references(app, client):
     assert database.get("sessions", session["id"], workspace_id="default").get("provider_id") is None
 
 
+def test_provider_in_use_by_agent_cannot_be_deleted(app, client):
+    database = app.extensions["meridian_db"]
+    provider_id = "provider-bound-to-agent"
+    database.put("providers", {
+        "id": provider_id, "workspace_id": "default", "name": "业务模型",
+        "base_url": "https://model.example.test/v1", "model": "example-model",
+    }, workspace_id="default")
+    database.put("agent_definitions", {
+        "id": "agent-using-provider", "workspace_id": "default", "name": "销售助手",
+        "status": "published", "provider_id": provider_id,
+    }, workspace_id="default")
+
+    references = client.get(f"/api/providers/{provider_id}/references")
+    assert references.status_code == 200
+    assert references.get_json()["agents"] == [{
+        "id": "agent-using-provider", "name": "销售助手", "status": "published",
+    }]
+    blocked = client.delete(f"/api/providers/{provider_id}")
+    assert blocked.status_code == 400
+    assert database.get("providers", provider_id, workspace_id="default") is not None
+
+    database.patch("agent_definitions", "agent-using-provider", {"provider_id": None}, workspace_id="default")
+    assert client.delete(f"/api/providers/{provider_id}").status_code == 200
+
+
 def test_provider_resolution_ignores_broken_system_proxy_by_default(app, monkeypatch):
     from backend.services.models import resolve_provider
     from backend.services.security import SecretVault

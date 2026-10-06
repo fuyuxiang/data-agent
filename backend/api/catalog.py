@@ -428,16 +428,28 @@ def update_semantic_model(model_id: str):
     return ok(item=save_model(db(), body(), current["workspace_id"], current_user_id(), model_id))
 
 
+def _model_references(model_id: str, wid: str) -> list[dict]:
+    return [
+        {"id": item["id"], "name": item.get("label") or item.get("name"), "status": item.get("status")}
+        for item in db().list("semantic_metrics", workspace_id=wid, limit=5000)
+        if item.get("model_id") == model_id
+    ]
+
+
+@bp.get("/api/semantic/models/<model_id>/references")
+@api_errors
+def semantic_model_references(model_id: str):
+    current = require_workspace_record("semantic_models", model_id)
+    require_source_access(str(current.get("source_id") or ""), current["workspace_id"], action="delete")
+    return ok(metrics=_model_references(model_id, current["workspace_id"]))
+
+
 @bp.delete("/api/semantic/models/<model_id>")
 @api_errors
 def archive_semantic_model(model_id: str):
     current = require_workspace_record("semantic_models", model_id)
     require_source_access(str(current.get("source_id") or ""), current["workspace_id"], action="delete")
-    referenced = [
-        item for item in db().list("semantic_metrics", workspace_id=current["workspace_id"], limit=5000)
-        if item.get("model_id") == model_id
-    ]
-    if referenced:
+    if _model_references(model_id, current["workspace_id"]):
         raise ValueError("语义模型仍被指标引用，请先删除或迁移这些指标")
     if not db().archive("semantic_models", model_id):
         raise FileNotFoundError("语义模型不存在")
@@ -471,11 +483,36 @@ def update_semantic_metric(metric_id: str):
     return ok(item=save_metric(db(), body(), current["workspace_id"], current_user_id(), metric_id))
 
 
+def _metric_references(metric_id: str, wid: str) -> dict:
+    metrics = [
+        {"id": item["id"], "name": item.get("label") or item.get("name"), "status": item.get("status")}
+        for item in db().list("semantic_metrics", workspace_id=wid, limit=5000)
+        if metric_id in (item.get("dependency_metric_ids") or [])
+    ]
+    agents = [
+        {"id": item["id"], "name": item.get("name"), "status": item.get("status")}
+        for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
+        if metric_id in (item.get("metric_ids") or [])
+    ]
+    return {"metrics": metrics, "agents": agents}
+
+
+@bp.get("/api/semantic/metrics/<metric_id>/references")
+@api_errors
+def semantic_metric_references(metric_id: str):
+    current = require_workspace_record("semantic_metrics", metric_id)
+    require_workspace_access(current["workspace_id"], owner=True)
+    return ok(**_metric_references(metric_id, current["workspace_id"]))
+
+
 @bp.delete("/api/semantic/metrics/<metric_id>")
 @api_errors
 def archive_semantic_metric(metric_id: str):
     current = require_workspace_record("semantic_metrics", metric_id)
     require_workspace_access(current["workspace_id"], owner=True)
+    references = _metric_references(metric_id, current["workspace_id"])
+    if references["metrics"] or references["agents"]:
+        raise ValueError("指标仍被其他指标或智能体引用，请先迁移或移除这些引用")
     if not db().archive("semantic_metrics", metric_id):
         raise FileNotFoundError("语义指标不存在")
     return ok(archived=True)

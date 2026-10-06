@@ -27,11 +27,11 @@ test('用户端不出现内部技术概念', async ({ page }) => {
 test('指标中心是一等模块：可搜索、可看口径、可试算', async ({ page }) => {
   await page.goto('/#/metrics');
   await expect(page.locator('.page-head__title')).toHaveText('指标中心');
-  const rows = page.locator('.metric-layout button.card');
+  const rows = page.locator('.metric-layout article.card');
   await expect(rows.first()).toBeVisible();
   await expect(page.locator('.metric-layout')).toContainText('销售额');
 
-  await page.locator('.metric-layout button.card:has(b:text-is("销售额"))').click();
+  await page.locator('.metric-layout article.card:has(b:text-is("销售额"))').click();
   const main = page.locator('.definition').first();
   await expect(main).toContainText('业务定义');
   await expect(main).toContainText('计算方式');
