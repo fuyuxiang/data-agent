@@ -40,9 +40,12 @@ export const MetricsView = {
       trialing: false,
       editor: null,
       modelEditor: null,
+      modelDeleteTarget: null,
+      metricDeleteTarget: null,
       modelTables: [],
       modelColumns: [],
       saving: false,
+      deleting: false,
       loading: true,
     };
   },
@@ -143,6 +146,42 @@ export const MetricsView = {
     canEditModel(model) {
       return state.workspaceRole === 'owner'
         || !this.metrics.some(metric => metric.model_id === model.id && metric.status === 'approved');
+    },
+    modelMetrics(model) {
+      return this.metrics.filter(metric => metric.model_id === model.id);
+    },
+    async deleteModel() {
+      const model = this.modelDeleteTarget;
+      if (!model || this.deleting || this.modelMetrics(model).length) return;
+      this.deleting = true;
+      try {
+        await actions.remove(`/api/semantic/models/${model.id}`);
+        this.models = this.models.filter(item => item.id !== model.id);
+        this.modelDeleteTarget = null;
+        if (this.modelEditor?.id === model.id) this.modelEditor = null;
+        toast('语义模型已删除', '完成');
+      } catch (error) {
+        toast(error.message, '删除语义模型失败', 'error');
+      } finally {
+        this.deleting = false;
+      }
+    },
+    async deleteMetric() {
+      const metric = this.metricDeleteTarget;
+      if (!metric || this.deleting) return;
+      this.deleting = true;
+      try {
+        await actions.remove(`/api/semantic/metrics/${metric.id}`);
+        this.metrics = this.metrics.filter(item => item.id !== metric.id);
+        if (this.selected?.id === metric.id) this.selected = null;
+        if (this.editor?.id === metric.id) this.editor = null;
+        this.metricDeleteTarget = null;
+        toast('指标已删除', '完成');
+      } catch (error) {
+        toast(error.message, '删除指标失败', 'error');
+      } finally {
+        this.deleting = false;
+      }
     },
     newModel() {
       const source = this.sources.find(item => item.status === 'ready');
@@ -376,6 +415,8 @@ export const MetricsView = {
                             class="btn btn--sm" @click="editMetric(selected)">编辑</button>
                     <button v-if="selected.status === 'draft' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="publish(selected)">发布</button>
                     <button v-if="selected.status === 'approved' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="disable(selected)">停用</button>
+                    <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm"
+                            style="color:var(--danger)" @click="metricDeleteTarget = selected">删除指标</button>
                   </template>
                 </div>
               </div>
@@ -480,7 +521,11 @@ export const MetricsView = {
               <span class="badge">{{ (model.dimensions || []).length }} 个维度</span>
               <span class="badge">{{ (model.measures || []).length }} 个度量</span>
             </div>
-            <button v-if="admin && canEditModel(model)" class="btn btn--sm" style="margin-top:12px" @click="editModel(model)">编辑模型</button>
+            <div v-if="canAdmin" class="row" style="margin-top:12px">
+              <button v-if="canEditModel(model)" class="btn btn--sm" @click="editModel(model)">编辑模型</button>
+              <button class="btn btn--sm" style="color:var(--danger)"
+                      @click="modelDeleteTarget = model">删除模型</button>
+            </div>
           </article>
           <EmptyState v-if="!models.length" icon="database" title="还没有语义模型"
                       text="语义模型把物理表映射成业务维度与度量，是指标的基础。" />
@@ -510,6 +555,36 @@ export const MetricsView = {
         </div>
       </div>
     </div>
+
+    <Modal :open="!!modelDeleteTarget" title="删除语义模型" @close="modelDeleteTarget = null">
+      <template v-if="modelDeleteTarget">
+        <p v-if="modelMetrics(modelDeleteTarget).length" class="small">
+          「{{ modelDeleteTarget.name }}」仍被以下指标引用。请先删除或迁移这些指标，再删除模型：
+          {{ modelMetrics(modelDeleteTarget).map(item => item.label || item.name).join('、') }}。
+        </p>
+        <p v-else class="small">确定删除语义模型「{{ modelDeleteTarget.name }}」吗？删除后将不再出现在指标中心。</p>
+      </template>
+      <template #footer>
+        <button class="btn" :disabled="deleting" @click="modelDeleteTarget = null">取消</button>
+        <button v-if="modelDeleteTarget && modelMetrics(modelDeleteTarget).length" class="btn btn--primary"
+                @click="tab = 'metrics'; select(modelMetrics(modelDeleteTarget)[0]); modelDeleteTarget = null">查看关联指标</button>
+        <button v-else class="btn btn--danger" :disabled="deleting" @click="deleteModel">
+          {{ deleting ? '删除中…' : '确认删除' }}
+        </button>
+      </template>
+    </Modal>
+
+    <Modal :open="!!metricDeleteTarget" title="删除指标" @close="metricDeleteTarget = null">
+      <p v-if="metricDeleteTarget" class="small">
+        确定删除指标「{{ metricDeleteTarget.label || metricDeleteTarget.name }}」吗？历史分析记录会保留，但该指标将不再用于后续分析。
+      </p>
+      <template #footer>
+        <button class="btn" :disabled="deleting" @click="metricDeleteTarget = null">取消</button>
+        <button class="btn btn--danger" :disabled="deleting" @click="deleteMetric">
+          {{ deleting ? '删除中…' : '确认删除' }}
+        </button>
+      </template>
+    </Modal>
 
     <Modal :open="!!modelEditor" :title="modelEditor?.id ? '编辑语义模型' : '新建语义模型'" wide @close="modelEditor = null">
       <div v-if="modelEditor" class="stack">

@@ -95,3 +95,23 @@ def test_semantic_versions_are_immutable_and_model_changes_revoke_approval(app, 
     assert len(database.list("semantic_model_versions", workspace_id="default")) == 2
     metric_versions = database.list("semantic_metric_versions", workspace_id="default")
     assert {item["version"]: item["status"] for item in metric_versions} == {1: "approved", 2: "draft"}
+
+
+def test_semantic_model_requires_deleting_referencing_metrics_first(client, source):
+    model = _model(client, source)
+    metric_response = client.post("/api/semantic/metrics", json={
+        "name": "model_delete_guard", "model_id": model["id"],
+        "measure": "sales_amount", "status": "draft",
+    })
+    assert metric_response.status_code == 201
+    metric = metric_response.get_json()["item"]
+
+    blocked = client.delete(f"/api/semantic/models/{model['id']}")
+    assert blocked.status_code == 400
+    assert "指标引用" in blocked.get_json()["error"]
+
+    assert client.delete(f"/api/semantic/metrics/{metric['id']}").status_code == 200
+    assert client.delete(f"/api/semantic/models/{model['id']}").status_code == 200
+    assert model["id"] not in {
+        item["id"] for item in client.get("/api/semantic/models").get_json()["items"]
+    }
