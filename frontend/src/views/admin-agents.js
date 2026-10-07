@@ -92,6 +92,14 @@ export const AgentBuilderView = {
         this.documents = documents.items || [];
         this.mcpServers = mcp.items || [];
         this.providers = providers.items || [];
+        // The workbench composer reads the shared bootstrap state rather than
+        // this admin view's local list. Keep that state in sync after a draft
+        // is published or an existing agent is edited while the SPA remains
+        // open; otherwise the newly published agent only appears after a
+        // full page reload.
+        state.agents = this.agents
+          .filter(item => item.status === 'published')
+          .map(item => ({ ...item }));
       } catch (error) {
         toast(error.message, '加载失败', 'error');
       } finally {
@@ -172,6 +180,7 @@ export const AgentBuilderView = {
       try {
         await actions.remove(`/api/agents/${agent.id}`);
         this.agents = this.agents.filter(item => item.id !== agent.id);
+        state.agents = state.agents.filter(item => item.id !== agent.id);
         this.removeTarget = null;
         toast('智能体已删除', '完成');
       } catch (error) {

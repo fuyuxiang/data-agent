@@ -210,6 +210,32 @@ test('智能体发布会保存当前编辑，删除需要确认', async ({ page 
   await expect(page.locator('.file-tile').filter({ hasText: '已发布助手' })).toHaveCount(0);
 });
 
+test('发布智能体后无需刷新即可在分析页选择', async ({ page }) => {
+  // The bootstrap state was loaded by beforeEach. Create the draft afterwards
+  // so this covers the SPA path where the admin list refreshes without a full
+  // page reload.
+  const sources = await (await page.request.get('/api/sources')).json();
+  const created = await page.request.post('/api/agents', { data: {
+    name: '即时可选助手', source_ids: [sources.items[0].id], skill_ids: [],
+  } });
+  expect(created.ok()).toBeTruthy();
+  const agentId = (await created.json()).item.id;
+
+  await page.locator('.admin__nav-item', { hasText: '智能体' }).click();
+  const tile = page.locator('.file-tile').filter({ hasText: '即时可选助手' });
+  await tile.getByRole('button', { name: '编辑' }).click();
+  await page.locator('.modal__foot').getByRole('button', { name: '发布' }).click();
+  await expect.poll(async () => {
+    const agents = await (await page.request.get('/api/agents')).json();
+    return agents.items.find(item => item.id === agentId)?.status;
+  }).toBe('published');
+
+  await page.locator('.modal__head button[aria-label="关闭"]').click();
+  await page.locator('.sidebar .main-nav .nav-item', { hasText: '工作台' }).click();
+  await page.locator('.composer__scope[title="选择本次使用的智能体"]').click();
+  await expect(page.getByRole('dialog', { name: '选择智能体' })).toContainText('即时可选助手');
+});
+
 test('运行记录与评测是后台的运营视图', async ({ page }) => {
   await page.goto('/#/admin/runs');
   await expect(page.locator('.page-head__title')).toHaveText('运行记录');
