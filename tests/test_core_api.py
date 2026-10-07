@@ -36,6 +36,29 @@ def test_analysis_session_can_be_renamed_and_archived(client):
     assert client.get(f"/api/sessions/{session_id}").status_code == 404
 
 
+def test_analysis_can_be_cancelled_and_archived_individually(client):
+    session = client.post("/api/sessions", json={"name": "单条分析操作"}).get_json()["item"]
+    created = client.post("/api/analyses", json={
+        "session_id": session["id"], "objective": "等待确认的分析",
+    })
+    assert created.status_code == 201
+    run = created.get_json()["item"]
+
+    cancelled = client.post(f"/api/analyses/{run['id']}/control", json={"action": "cancel"})
+    assert cancelled.status_code == 200
+    assert cancelled.get_json()["item"]["execution_status"] == "cancelled"
+
+    archived = client.delete(f"/api/analyses/{run['id']}")
+    assert archived.status_code == 200
+    assert archived.get_json()["archived"] is True
+    assert client.get(f"/api/analyses/{run['id']}").status_code == 404
+    assert run["id"] not in {
+        item["id"] for item in client.get(f"/api/analyses?session_id={session['id']}").get_json()["items"]
+    }
+    messages = client.get(f"/api/sessions/{session['id']}").get_json()["messages"]
+    assert all(item.get("metadata", {}).get("run_id") != run["id"] for item in messages)
+
+
 def test_session_source_scope_prunes_missing_sources(client, source):
     created = client.post(
         "/api/sessions",

@@ -291,9 +291,39 @@ export const ConversationView = {
     async cancelClarification() {
       const run = this.pendingClarification;
       if (!run) return;
-      await actions.post(`/api/analyses/${run.id}/control`, { action: 'cancel' }).catch(() => {});
-      this.runs = this.runs.map(item => (item.id === run.id
-        ? { ...item, execution_status: 'cancelled' } : item));
+      await this.cancelRun(run);
+    },
+    isCancelable(run) {
+      return ['queued', 'running', 'waiting_job', 'waiting_input', 'waiting_approval', 'paused', 'cancelling']
+        .includes(run?.execution_status);
+    },
+    async cancelRun(run) {
+      if (!run || !this.isCancelable(run) || run.execution_status === 'cancelling') return;
+      try {
+        const response = await actions.post(`/api/analyses/${run.id}/control`, { action: 'cancel' });
+        this.runs = this.runs.map(item => (item.id === run.id
+          ? (response.item || { ...item, execution_status: 'cancelling' }) : item));
+        if (response.item?.execution_status === 'cancelled') this.stopPolling();
+      } catch (error) {
+        toast(error.message, '终止失败', 'error');
+      }
+    },
+    async deleteRun(run) {
+      if (!run || this.isCancelable(run)) return;
+      if (!window.confirm(`删除「${run.contract?.payload?.objective || '这条分析'}」？`)) return;
+      try {
+        await actions.remove(`/api/analyses/${run.id}`);
+        delete this.results[run.id];
+        delete this.tables[run.id];
+        delete this.artifacts[run.id];
+        delete this.feedback[run.id];
+        this.runs = this.runs.filter(item => item.id !== run.id);
+        this.activeRunId = this.runs.at(-1)?.id || '';
+        await this.refreshMessages();
+        toast('分析已删除', '完成');
+      } catch (error) {
+        toast(error.message, '删除失败', 'error');
+      }
     },
 
     /** 结果操作条：全站统一，不同页面不会出现两套动作。 */
@@ -425,6 +455,14 @@ export const ConversationView = {
           </div>
           <div v-else-if="turn.kind === 'run'" class="turn">
           <ExecutionStatus :run="runView(turn.run)" :title="runTitle(turn.run)" />
+          <div class="row" style="margin:10px 0 4px">
+            <button v-if="isCancelable(turn.run)" class="btn btn--sm btn--danger"
+                    :disabled="turn.run.execution_status === 'cancelling'"
+                    @click="cancelRun(turn.run)">
+              {{ turn.run.execution_status === 'cancelling' ? '正在终止…' : '终止分析' }}
+            </button>
+            <button v-else class="btn btn--sm" @click="deleteRun(turn.run)">删除分析</button>
+          </div>
           <ResultView v-if="results[turn.run.id]" :payload="results[turn.run.id]"
                       :can-export="canAnalyze"
                       :artifacts="artifacts[turn.run.id] || []" :tables="tables[turn.run.id] || []"

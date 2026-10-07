@@ -395,6 +395,17 @@ def get_analysis(run_id: str):
     return ok(item=_snapshot(_require_run(run_id)))
 
 
+@bp.delete("/api/analyses/<run_id>")
+@api_errors
+def archive_analysis(run_id: str):
+    run = _require_run(run_id)
+    if not _store().archive_run(
+        run_id, workspace_id=run["workspace_id"], session_id=run["session_id"],
+    ):
+        raise FileNotFoundError("分析任务不存在")
+    return ok(archived=True)
+
+
 @bp.get("/api/analyses/<run_id>/execution")
 @api_errors
 def get_analysis_execution(run_id: str):
@@ -717,7 +728,12 @@ def control_analysis(run_id: str):
     elif action == "cancel":
         if run["execution_status"] == "cancelled":
             return ok(item=_snapshot(run), idempotent=True)
-        updated = _store().update_status(run_id, "cancelling", stop_reason="cancel_requested")
+        if run["execution_status"] in {"waiting_input", "paused", "waiting_approval"} and not job:
+            updated = _store().update_status(
+                run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled",
+            )
+        else:
+            updated = _store().update_status(run_id, "cancelling", stop_reason="cancel_requested")
         if job:
             manager.cancel(job["id"])
     elif action == "resume":

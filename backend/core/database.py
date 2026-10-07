@@ -127,6 +127,7 @@ class Database:
             updated_at TEXT NOT NULL,
             started_at TEXT,
             finished_at TEXT,
+            archived_at TEXT,
             FOREIGN KEY(parent_run_id) REFERENCES agent_runs(id)
         );
         CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_updated
@@ -338,6 +339,15 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(3,?,?)",
                 ("durable governed agent runs, actions, jobs, evidence and publications", utcnow()),
+            )
+            run_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()
+            }
+            if "archived_at" not in run_columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN archived_at TEXT")
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(4,?,?)",
+                ("archive individual analysis runs without deleting audit evidence", utcnow()),
             )
         self._seed()
 
@@ -666,6 +676,15 @@ class Database:
             }
             for row in rows
         ]
+
+    def remove_messages_for_run(self, session_id: str, run_id: str) -> int:
+        """Remove the visible conversation turn for one analysis run."""
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE session_id=? AND json_extract(metadata, '$.run_id')=?",
+                (session_id, run_id),
+            )
+        return cursor.rowcount
 
     def replace_messages(self, session_id: str, messages: list[dict]) -> None:
         session_record = self.get("sessions", session_id)

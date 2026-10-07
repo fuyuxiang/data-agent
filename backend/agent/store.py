@@ -122,7 +122,7 @@ class RunStore:
         }
 
     def get_run(self, run_id: str, *, workspace_id: str | None = None) -> dict[str, Any] | None:
-        query = "SELECT * FROM agent_runs WHERE id=?"
+        query = "SELECT * FROM agent_runs WHERE id=? AND archived_at IS NULL"
         args: list[Any] = [run_id]
         if workspace_id is not None:
             query += " AND workspace_id=?"
@@ -132,7 +132,7 @@ class RunStore:
         return self._run(dict(row)) if row else None
 
     def list_runs(self, workspace_id: str, *, session_id: str | None = None, limit: int = 100) -> list[dict]:
-        query = "SELECT * FROM agent_runs WHERE workspace_id=?"
+        query = "SELECT * FROM agent_runs WHERE workspace_id=? AND archived_at IS NULL"
         args: list[Any] = [workspace_id]
         if session_id:
             query += " AND session_id=?"
@@ -142,6 +142,32 @@ class RunStore:
         with self.db.connect() as connection:
             rows = connection.execute(query, args).fetchall()
         return [self._run(dict(row)) for row in rows]
+
+    def archive_run(self, run_id: str, *, workspace_id: str, session_id: str) -> bool:
+        """Hide one completed run while retaining its governed audit trail."""
+        now = utcnow()
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT execution_status,session_id,archived_at FROM agent_runs "
+                "WHERE id=? AND workspace_id=?",
+                (run_id, workspace_id),
+            ).fetchone()
+            if not row or row["archived_at"]:
+                return False
+            if str(row["session_id"]) != str(session_id):
+                raise PermissionError("分析任务不属于当前会话")
+            if row["execution_status"] not in {"finished", "failed", "cancelled", "partial"}:
+                raise ValueError("分析仍在执行，请先终止分析")
+            connection.execute(
+                "UPDATE agent_runs SET archived_at=?,updated_at=?,version=version+1 WHERE id=?",
+                (now, now, run_id),
+            )
+        self.db.remove_messages_for_run(session_id, run_id)
+        self.db.audit(
+            "analysis.archived", workspace_id=workspace_id, actor=None,
+            object_type="agent_run", object_id=run_id,
+        )
+        return True
 
     def context(self, run_id: str, *, workspace_id: str | None = None) -> RunContext:
         run = self.get_run(run_id, workspace_id=workspace_id)
