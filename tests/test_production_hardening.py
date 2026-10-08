@@ -808,3 +808,77 @@ def test_job_manager_releases_capacity_when_handler_fails(app):
         assert second["status"] == "queued"
     finally:
         manager.shutdown()
+
+
+@pytest.mark.parametrize("handler_fails", [False, True])
+def test_job_cancellation_finishes_analysis_even_when_handler_raises(app, monkeypatch, handler_fails):
+    from backend.agent.store import RunStore
+    from backend.services import jobs
+
+    started = threading.Event()
+    release = threading.Event()
+    store = RunStore(app.extensions["meridian_db"])
+    run, _created = store.create_run(
+        workspace_id="default", session_id="session-cancelled-worker",
+        actor_id="user-cancelled-worker", source_scope=[], allowed_tool_ids=[],
+    )
+
+    def handler(_app, _spec, _progress, _cancel):
+        started.set()
+        release.wait(3)
+        if handler_fails:
+            raise InterruptedError("worker interrupted after cancellation")
+        return {"ok": True}
+
+    monkeypatch.setitem(jobs._HANDLERS, "cancelled_worker_test", handler)
+    manager = jobs.JobManager(app, max_workers=1, max_pending=0)
+    try:
+        job = manager.submit_spec(
+            workspace_id="default", session_id=run["session_id"], run_id=run["id"],
+            job_type="cancelled_worker_test", title="cancel test", spec={},
+        )
+        assert started.wait(1)
+        store.update_status(run["id"], "cancelling", stop_reason="cancel_requested")
+        assert manager.cancel(job["id"])
+        release.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and store.get_run(run["id"])["execution_status"] != "cancelled":
+            time.sleep(0.02)
+        assert store.get_run(run["id"])["execution_status"] == "cancelled"
+        assert app.extensions["meridian_db"].get("jobs", job["id"])["status"] == "cancelled"
+    finally:
+        release.set()
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("job_status", [None, "queued", "running", "cancelling"])
+def test_job_manager_reconciles_cancelled_runs_without_a_job(app, job_status):
+    from backend.agent.store import RunStore
+    from backend.core.database import utcnow
+    from backend.services.jobs import JobManager
+
+    store = RunStore(app.extensions["meridian_db"])
+    run, _created = store.create_run(
+        workspace_id="default", session_id="session-stale-cancel",
+        actor_id="user-stale-cancel", source_scope=[], allowed_tool_ids=[],
+    )
+    store.update_status(run["id"], "cancelling", stop_reason="cancel_requested")
+    if job_status:
+        with app.extensions["meridian_db"].transaction() as connection:
+            connection.execute(
+                "INSERT INTO typed_jobs(id,workspace_id,run_id,job_type,spec,spec_hash,"
+                "status,cancel_requested,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("cancelled-job", "default", run["id"], "analysis_run", "{}", "test",
+                 job_status, 1, utcnow(), utcnow()),
+            )
+
+    manager = JobManager(app, max_workers=1, max_pending=0)
+    try:
+        assert store.get_run(run["id"])["execution_status"] == "cancelled"
+        if job_status:
+            with app.extensions["meridian_db"].connect() as connection:
+                job = connection.execute("SELECT * FROM typed_jobs WHERE id='cancelled-job'").fetchone()
+            assert job["status"] == "cancelled"
+            assert job["error_code"] == "cancel_requested"
+    finally:
+        manager.shutdown()

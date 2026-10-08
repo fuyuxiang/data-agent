@@ -728,14 +728,16 @@ def control_analysis(run_id: str):
     elif action == "cancel":
         if run["execution_status"] == "cancelled":
             return ok(item=_snapshot(run), idempotent=True)
-        if run["execution_status"] in {"waiting_input", "paused", "waiting_approval"} and not job:
+        if not job:
             updated = _store().update_status(
                 run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled",
             )
         else:
             updated = _store().update_status(run_id, "cancelling", stop_reason="cancel_requested")
-        if job:
-            manager.cancel(job["id"])
+            if not manager.cancel(job["id"]):
+                updated = _store().update_status(
+                    run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled",
+                )
     elif action == "resume":
         if run["execution_status"] not in {"paused", "waiting_input"}:
             raise ValueError("只有已暂停或等待澄清的任务可继续；远程作业由调度器自动恢复")

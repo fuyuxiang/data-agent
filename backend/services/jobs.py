@@ -43,6 +43,35 @@ class JobManager:
         self._lock = threading.RLock()
         self._recover_orphans()
 
+    def _finalize_cancelled_run(self, run_id: str | None) -> None:
+        """Finish an analysis whose durable job has already disappeared."""
+        if not run_id:
+            return
+        from ..agent.store import RunStore
+
+        store = RunStore(self.db)
+        run = store.get_run(str(run_id))
+        if run and run.get("execution_status") not in {"finished", "failed", "cancelled"}:
+            store.update_status(
+                str(run_id), "cancelled", outcome="cancelled", stop_reason="user_cancelled",
+            )
+
+    def _reconcile_cancelled_runs(self) -> None:
+        """Mark cancelling runs complete when no active durable job remains."""
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """SELECT a.id
+                   FROM agent_runs a
+                   LEFT JOIN typed_jobs t
+                     ON t.run_id=a.id
+                    AND t.status IN ('queued','running','waiting_external','cancelling')
+                   WHERE a.execution_status='cancelling'
+                     AND a.archived_at IS NULL
+                     AND t.id IS NULL""",
+            ).fetchall()
+        for row in rows:
+            self._finalize_cancelled_run(row["id"])
+
     def _reserve(self, workspace_id: str) -> None:
         with self._lock:
             workspace_count = self._workspace_outstanding.get(workspace_id, 0)
@@ -66,12 +95,12 @@ class JobManager:
         """Requeue durable specs; external handlers must reconcile before resubmitting work."""
         with self.db.transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM typed_jobs WHERE status IN ('queued','running','waiting_external') "
+                "SELECT * FROM typed_jobs WHERE status IN ('queued','running','waiting_external','cancelling') "
                 "ORDER BY created_at LIMIT 5000",
             ).fetchall()
             for row in rows:
                 status = "cancelled" if row["cancel_requested"] else "queued" if row["job_type"] in _HANDLERS else "blocked"
-                error = None if status == "queued" else "handler_unavailable"
+                error = "cancel_requested" if status == "cancelled" else None if status == "queued" else "handler_unavailable"
                 connection.execute(
                     "UPDATE typed_jobs SET status=?, error_code=?, lease_owner=NULL, "
                     "lease_expires_at=NULL, updated_at=? WHERE id=?",
@@ -81,6 +110,7 @@ class JobManager:
             payload = dict(row)
             if payload.get("cancel_requested"):
                 self._mirror(payload["id"], status="cancelled", message="已取消")
+                self._finalize_cancelled_run(payload.get("run_id"))
             elif payload["job_type"] in _HANDLERS:
                 self._reserve(payload["workspace_id"])
                 cancel = threading.Event()
@@ -89,6 +119,7 @@ class JobManager:
                 self.executor.submit(self._run_spec, payload["id"], payload["workspace_id"], cancel, True)
             else:
                 self._mirror(payload["id"], status="blocked", message="任务处理器不可用", error="handler_unavailable")
+        self._reconcile_cancelled_runs()
 
     def submit_spec(
         self,
@@ -188,13 +219,25 @@ class JobManager:
                     result=result, finished_at=utcnow(),
                 )
                 self.db.job_event(job_id, status, final or {})
+                if status == "cancelled":
+                    self._finalize_cancelled_run(typed.get("run_id"))
             except Exception as exc:
-                self._finish_typed(job_id, "failed", None, type(exc).__name__)
-                final = self._mirror(
-                    job_id, status="failed", message="执行失败", error=str(exc),
-                    trace=traceback.format_exc(limit=12), finished_at=utcnow(),
-                )
-                self.db.job_event(job_id, "failed", final or {})
+                current = self._typed_job(job_id) or {}
+                if cancel.is_set() or current.get("cancel_requested"):
+                    self._finish_typed(job_id, "cancelled", None, "cancel_requested")
+                    final = self._mirror(
+                        job_id, status="cancelled", progress=0, message="已取消",
+                        finished_at=utcnow(),
+                    )
+                    self.db.job_event(job_id, "cancelled", final or {})
+                    self._finalize_cancelled_run(typed.get("run_id"))
+                else:
+                    self._finish_typed(job_id, "failed", None, type(exc).__name__)
+                    final = self._mirror(
+                        job_id, status="failed", message="执行失败", error=str(exc),
+                        trace=traceback.format_exc(limit=12), finished_at=utcnow(),
+                    )
+                    self.db.job_event(job_id, "failed", final or {})
             finally:
                 with self._lock:
                     self.cancel_flags.pop(job_id, None)

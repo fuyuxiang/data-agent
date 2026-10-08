@@ -36,7 +36,7 @@ def test_analysis_session_can_be_renamed_and_archived(client):
     assert client.get(f"/api/sessions/{session_id}").status_code == 404
 
 
-def test_analysis_can_be_cancelled_and_archived_individually(client):
+def test_analysis_can_be_cancelled_and_archived_individually(client, app):
     session = client.post("/api/sessions", json={"name": "单条分析操作"}).get_json()["item"]
     created = client.post("/api/analyses", json={
         "session_id": session["id"], "objective": "等待确认的分析",
@@ -47,6 +47,19 @@ def test_analysis_can_be_cancelled_and_archived_individually(client):
     cancelled = client.post(f"/api/analyses/{run['id']}/control", json={"action": "cancel"})
     assert cancelled.status_code == 200
     assert cancelled.get_json()["item"]["execution_status"] == "cancelled"
+
+    # A stale job mirror must not leave an analysis at "cancelling" forever.
+    stale = client.post("/api/analyses", json={
+        "session_id": session["id"], "objective": "没有对应后台任务的分析",
+    }).get_json()["item"]
+    from backend.agent.store import RunStore
+
+    RunStore(app.extensions["meridian_db"]).update_status(stale["id"], "running")
+    stale_cancelled = client.post(
+        f"/api/analyses/{stale['id']}/control", json={"action": "cancel"},
+    )
+    assert stale_cancelled.status_code == 200
+    assert stale_cancelled.get_json()["item"]["execution_status"] == "cancelled"
 
     archived = client.delete(f"/api/analyses/{run['id']}")
     assert archived.status_code == 200
