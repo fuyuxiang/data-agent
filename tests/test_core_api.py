@@ -371,6 +371,47 @@ def test_knowledge_document_upload_accepts_chinese_txt_filename(client):
     assert results and results[0]["document_name"] == "及格率解析"
 
 
+def test_knowledge_document_delete_removes_search_results_and_can_be_restored(client, app):
+    from pathlib import Path
+
+    uploaded = client.post(
+        "/api/knowledge/documents",
+        data={"file": (io.BytesIO("采购复核使用订单原始凭据。".encode()), "采购复核说明.md")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    document = uploaded.get_json()["item"]
+    document_id = document["id"]
+    stored = app.extensions["meridian_db"].get("knowledge_documents", document_id)
+    original_path = Path(stored["path"])
+    assert any(item["document_id"] == document_id for item in client.post(
+        "/api/knowledge/search", json={"query": "采购复核"},
+    ).get_json()["items"])
+
+    removed = client.delete(f"/api/knowledge/documents/{document_id}")
+    assert removed.status_code == 200
+    assert removed.get_json()["archived"] is True
+    assert original_path.is_file()
+    assert document_id not in {item["id"] for item in client.get(
+        "/api/knowledge/documents",
+    ).get_json()["items"]}
+    assert not any(item["document_id"] == document_id for item in client.post(
+        "/api/knowledge/search", json={"query": "采购复核"},
+    ).get_json()["items"])
+    assert any(item["id"] == document_id for item in client.get(
+        "/api/trash?collection=knowledge_documents",
+    ).get_json()["items"])
+
+    restored = client.post(f"/api/trash/knowledge_documents/{document_id}/restore")
+    assert restored.status_code == 200
+    assert document_id in {item["id"] for item in client.get(
+        "/api/knowledge/documents",
+    ).get_json()["items"]}
+    assert any(item["document_id"] == document_id for item in client.post(
+        "/api/knowledge/search", json={"query": "采购复核"},
+    ).get_json()["items"])
+
+
 def test_hybrid_knowledge_file_skills(client):
     metric = client.post(
         "/api/knowledge/entries",

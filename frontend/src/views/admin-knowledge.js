@@ -6,7 +6,7 @@
 
 import { Icon } from '../components/icons.js';
 import { EmptyState, Modal, SearchInput, Status, Switch, Tabs } from '../components/ui.js';
-import { actions, state, toast } from '../store.js';
+import { actions, canAdmin, state, toast } from '../store.js';
 
 const ENTRY_GROUPS = [
   { type: 'metric', title: '指标解释' },
@@ -18,7 +18,7 @@ export const KnowledgeView = {
   name: 'KnowledgeView',
   components: { EmptyState, Icon, Modal, SearchInput, Status, Switch, Tabs },
   setup() {
-    return { state, toast };
+    return { canAdmin, state, toast };
   },
   data() {
     return {
@@ -30,6 +30,9 @@ export const KnowledgeView = {
       searching: false,
       editor: null,
       uploadOpen: false,
+      documentDeleteTarget: null,
+      deletingDocument: false,
+      documentDeleteError: '',
       loading: true,
     };
   },
@@ -115,6 +118,31 @@ export const KnowledgeView = {
         toast('已移入回收站', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+      }
+    },
+    openDocumentDelete(document) {
+      if (!canAdmin.value || this.deletingDocument) return;
+      this.documentDeleteTarget = document;
+      this.documentDeleteError = '';
+    },
+    closeDocumentDelete() {
+      if (!this.deletingDocument) this.documentDeleteTarget = null;
+    },
+    async removeDocument() {
+      const document = this.documentDeleteTarget;
+      if (!document || !canAdmin.value || this.deletingDocument) return;
+      this.deletingDocument = true;
+      this.documentDeleteError = '';
+      try {
+        await actions.remove(`/api/knowledge/documents/${encodeURIComponent(document.id)}`);
+        this.documents = this.documents.filter(item => item.id !== document.id);
+        this.results = this.results.filter(item => item.document_id !== document.id);
+        this.documentDeleteTarget = null;
+        toast('知识文档已移入回收站', '完成');
+      } catch (error) {
+        this.documentDeleteError = error.message;
+      } finally {
+        this.deletingDocument = false;
       }
     },
     async search() {
@@ -228,7 +256,14 @@ export const KnowledgeView = {
               <p class="small muted">{{ item.format }} · {{ item.chunk_count || 0 }} 片段 · {{ item.characters || 0 }} 字符</p>
             </div>
           </div>
-          <Status :status="item.enabled === false ? 'disabled' : 'ready'" />
+          <div class="row">
+            <Status :status="item.enabled === false ? 'disabled' : 'ready'" />
+            <button v-if="canAdmin" class="btn btn--sm" style="color:var(--danger)"
+                    :aria-label="'删除文档 ' + item.name" :disabled="deletingDocument"
+                    @click="openDocumentDelete(item)">
+              <Icon name="trash" :size="14" />删除
+            </button>
+          </div>
         </article>
       </div>
 
@@ -255,6 +290,20 @@ export const KnowledgeView = {
         </div>
       </div>
     </div>
+
+    <Modal :open="!!documentDeleteTarget" title="删除知识文档" @close="closeDocumentDelete">
+      <p v-if="documentDeleteTarget" class="small">
+        确定删除知识文档「{{ documentDeleteTarget.name }}」吗？文档将移入回收站，
+        后续知识检索将不再使用它。可在回收站恢复。
+      </p>
+      <p v-if="documentDeleteError" class="small" style="color:var(--danger)">{{ documentDeleteError }}</p>
+      <template #footer>
+        <button class="btn" :disabled="deletingDocument" @click="closeDocumentDelete">取消</button>
+        <button class="btn btn--primary" :disabled="deletingDocument" @click="removeDocument">
+          {{ deletingDocument ? '删除中…' : '确认删除' }}
+        </button>
+      </template>
+    </Modal>
 
     <Modal :open="!!editor" :title="editor?.id ? '编辑知识条目' : '新增知识条目'" @close="editor = null">
       <div v-if="editor" class="stack">
