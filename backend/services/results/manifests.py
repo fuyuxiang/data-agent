@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import csv
-from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +12,8 @@ from ...agent.store import RunStore
 from ...core.database import Database, utcnow
 from ..validation.engine import Rule, ValidationEngine, outcome
 from .rendering import build_manifest_payload
+from ..query_results import read_result_frame
+from ..datasets import frame_records
 
 
 NUMBER_RE = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
@@ -82,7 +82,7 @@ def _evidence_cells(
             continue
         seen_results.add(result["id"])
         path = Path(str(result.get("path") or ""))
-        frame = pd.read_csv(path) if path.is_file() else pd.DataFrame(result.get("data") or [])
+        frame = read_result_frame(result) if path.is_file() else pd.DataFrame(result.get("data") or [])
         for row_index, row in frame.iterrows():
             row_labels = [
                 str(value).strip() for value in row.values
@@ -466,13 +466,8 @@ class ResultService:
         index = int(cell["row"])
         if index < 0 or index >= 200_000:
             raise FileNotFoundError("证据行不存在")
-        path = Path(str(result.get("path") or ""))
-        if path.is_file():
-            with path.open(encoding="utf-8-sig", newline="") as handle:
-                recorded_row = next(islice(csv.DictReader(handle), index, index + 1), None)
-        else:
-            data = result.get("data") or []
-            recorded_row = data[index] if index < len(data) else None
+        rows = frame_records(read_result_frame(result, offset=index, limit=1), 1)
+        recorded_row = rows[0] if rows else None
         column = str(cell.get("column") or "")
         if not isinstance(recorded_row, dict) or column not in recorded_row:
             raise FileNotFoundError("证据行不存在")

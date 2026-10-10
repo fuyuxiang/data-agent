@@ -689,6 +689,8 @@ def update_session(session_id: str):
     if allowed.get("provider_id") and allowed["provider_id"] != "environment-default":
         require_workspace_record("providers", str(allowed["provider_id"]), current["workspace_id"])
     item = db().patch("sessions", session_id, allowed)
+    if item is None:
+        raise ValueError("会话已进入回收站，请先恢复后重试")
     if {"agent_allow_mutations", "agent_allow_mcp"} & allowed.keys():
         db().audit(
             "session.agent_policy_updated", workspace_id=current["workspace_id"],
@@ -803,13 +805,15 @@ def usage_metrics():
 
 _TRASH_COLLECTIONS = {
     "sessions", "sources", "knowledge_documents", "knowledge_entries",
-    "artifacts", "saved_sessions", "agent_runs",
+    "artifacts", "saved_sessions", "agent_runs", "connectors", "mcp_servers",
 }
 
 
 def _trash_access(collection: str, item: dict, wid: str, role: str) -> bool:
     """Recycle-bin access retains the original resource's ownership and ACL."""
     actor = current_user_id()
+    if collection in {"connectors", "mcp_servers"}:
+        return role == "owner"
     if collection in {"knowledge_documents", "knowledge_entries"}:
         return role in {"owner", "editor"} and item.get("visibility") != "analysis_attachment"
     if collection == "sources":
@@ -873,6 +877,18 @@ def _analysis_restore_block_reason(item: dict, wid: str, role: str) -> str:
     return "原会话的归属已变更，无法恢复到其他成员的私有会话。"
 
 
+def _mcp_restore_block_reason(item: dict) -> str:
+    if item.get("transport") != "stdio":
+        return ""
+    try:
+        require_system_owner()
+    except PermissionError as exc:
+        return str(exc)
+    if not current_app.config.get("TESTING") and os.getenv("MERIDIAN_ENABLE_STDIO_MCP", "0") != "1":
+        return "stdio MCP 未在服务端启用"
+    return ""
+
+
 @bp.get("/api/trash")
 @api_errors
 def trash():
@@ -898,6 +914,8 @@ def trash():
             contract = store.latest_contract(item["id"]) if collection == "agent_runs" else None
             title = (contract or {}).get("payload", {}).get("objective") or item.get("name") or item.get("title")
             restore_reason = _analysis_restore_block_reason(item, wid, role) if collection == "agent_runs" else ""
+            if collection == "mcp_servers":
+                restore_reason = _mcp_restore_block_reason(item)
             items.append({
                 "id": item["id"], "collection": collection,
                 "title": str(title or item.get("filename") or "未命名内容")[:200],
@@ -923,12 +941,20 @@ def _restore_trash(collection: str, record_id: str):
     item, role = _trash_record(collection, record_id)
     if role not in {"owner", "editor", "analyst"}:
         raise PermissionError("当前成员只有只读权限")
+    if collection == "mcp_servers":
+        reason = _mcp_restore_block_reason(item)
+        if reason:
+            raise PermissionError(reason)
     if collection == "artifacts" and item.get("trash_id"):
         from ..services.lifecycle import restore_artifact
 
         restore_artifact(db(), workspace_id(), item["trash_id"])
     elif not db().restore(collection, record_id, workspace_id=workspace_id()):
         raise FileNotFoundError("回收站记录不存在")
+    if collection == "mcp_servers":
+        from ..services.mcp import get_mcp_manager
+
+        get_mcp_manager().remove_server(record_id)
     db().audit("trash.restored", workspace_id=workspace_id(), actor=current_user_id(),
                object_type=collection, object_id=record_id)
     return ok(restored=True)
@@ -953,6 +979,11 @@ def _delete_trash(collection: str, record_id: str):
 
         if agent_references(db(), workspace_id(), "source_ids", record_id):
             raise ValueError("数据源仍被智能体草稿或发布版本引用，请先解除引用再永久删除")
+    if collection == "mcp_servers":
+        from ..services.agent_definitions import agent_references
+
+        if agent_references(db(), workspace_id(), "mcp_server_ids", record_id):
+            raise ValueError("MCP 服务仍被智能体草稿或发布版本引用，请先解除引用再永久删除")
     if collection == "knowledge_documents":
         from ..services.knowledge import document_references
 
@@ -969,6 +1000,10 @@ def _delete_trash(collection: str, record_id: str):
     if collection == "artifacts" and item.get("trash_id"):
         db().delete("lifecycle_file_trash", item["trash_id"], workspace_id=workspace_id())
     db().delete(collection, record_id, workspace_id=workspace_id())
+    if collection == "mcp_servers":
+        from ..services.mcp import get_mcp_manager
+
+        get_mcp_manager().remove_server(record_id)
     db().audit("trash.deleted", workspace_id=workspace_id(), actor=current_user_id(),
                object_type=collection, object_id=record_id)
     return ok(deleted=True)

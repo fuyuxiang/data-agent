@@ -45,6 +45,11 @@ export const ConversationView = {
       runErrors: {},
       deleteTarget: null,
       deleteError: '',
+      resultErrors: {},
+      clarificationBusy: false,
+      generating: {},
+      sourceEpoch: 0,
+      loadError: '',
     };
   },
   computed: {
@@ -95,12 +100,12 @@ export const ConversationView = {
   async mounted() {
     await this.load();
     if (state.routeParams.ask && this.$refs.composer) {
-      this.$refs.composer.text = state.routeParams.ask;
-      this.$nextTick(() => this.$refs.composer.focus());
+      this.$refs.composer.setText(state.routeParams.ask, { focus: true });
     }
   },
   beforeUnmount() {
     this.disposed = true;
+    this.sourceEpoch += 1;
     this.stopPolling();
   },
   watch: {
@@ -112,6 +117,12 @@ export const ConversationView = {
     navigate,
     async load() {
       this.stopPolling();
+      this.sourceEpoch += 1;
+      this.sourceDrawer = { open: false, title: '', blocks: [] };
+      this.filePreview = null;
+      this.clarificationAnswer = '';
+      this.pollError = '';
+      this.loadError = '';
       const epoch = this.pollEpoch;
       this.loading = true;
       const sessionId = this.sessionId;
@@ -122,6 +133,7 @@ export const ConversationView = {
         ]);
         if (epoch !== this.pollEpoch || this.disposed) return;
         this.results = {};
+        this.resultErrors = {};
         this.tables = {};
         this.artifacts = {};
         this.feedback = {};
@@ -130,11 +142,19 @@ export const ConversationView = {
         this.runs = (runs.items || []).slice().reverse();
         this.activeRunId = this.runs.at(-1)?.id || '';
         await this.hydrate(epoch);
-        if (epoch === this.pollEpoch && this.running) this.startPolling();
+        if (epoch === this.pollEpoch) {
+          this.loading = false;
+          if (this.running) this.startPolling();
+        }
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        if (epoch === this.pollEpoch && !this.disposed) {
+          this.messages = [];
+          this.runs = [];
+          this.loadError = error.message;
+          toast(error.message, '加载失败', 'error');
+        }
       } finally {
-        if (!this.disposed) this.loading = false;
+        if (epoch === this.pollEpoch && !this.disposed) this.loading = false;
       }
     },
 
@@ -147,38 +167,72 @@ export const ConversationView = {
           if (epoch !== this.pollEpoch || this.disposed || !this.runs.some(item => item.id === run.id)) return;
           if (response.status !== 'published') continue;
           const payload = response.manifest?.payload || null;
-          const tables = await this.loadTables(payload);
+          const tables = await this.loadTables(payload, run.id);
           if (epoch !== this.pollEpoch || this.disposed || !this.runs.some(item => item.id === run.id)) return;
           this.results[run.id] = payload;
+          delete this.resultErrors[run.id];
           this.artifacts[run.id] = response.artifacts || [];
           this.tables[run.id] = tables;
-        } catch {
-          // 单次结果拉取失败不影响整页展示。
+        } catch (error) {
+          if (epoch === this.pollEpoch && !this.disposed) this.resultErrors[run.id] = error.message || '结果暂时无法读取';
         }
       }
     },
 
     /** 明细表按结果 id 分页取，成果清单里只带列名不带行。 */
-    async loadTables(payload) {
+    async loadTables(payload, runId) {
       const output = [];
-      for (const table of (payload?.tables || []).slice(0, 2)) {
+      const descriptors = payload?.tables || [];
+      for (const [index, table] of descriptors.entries()) {
         if (!table.result_id) continue;
+        const item = {
+          id: table.id, title: table.title, resultId: table.result_id,
+          columns: table.columns || [], rows: [], total: table.total_rows ?? null,
+          offset: 0, limit: 50, loading: false, error: '', paginated: index === 0,
+          sourceTotal: table.total_rows ?? null, completeness: table.completeness || 'unknown',
+        };
         try {
-          const response = await actions.get(
-            `/api/query-results/${table.result_id}?offset=0&limit=50`,
-          );
-          output.push({
-            id: table.id,
-            title: table.title,
-            columns: table.columns || [],
-            rows: response.result?.preview || response.result?.data || [],
-            total: response.result?.rows ?? (response.result?.preview || []).length,
-          });
-        } catch {
-          // 取不到明细就不渲染表格，不用空表占位。
+          const response = await actions.get(index === 0
+            ? `/api/analyses/${runId}/details?cursor=0&limit=50`
+            : `/api/query-results/${table.result_id}`);
+          item.rows = index === 0 ? (response.items || []) : (response.result?.preview || response.result?.data || []);
+          item.columns = response.columns || response.result?.columns || item.columns;
+          item.total = response.returned_total ?? response.total ?? response.result?.rows ?? item.total ?? item.rows.length;
+          item.sourceTotal = response.total ?? response.result?.total_rows ?? item.sourceTotal;
+          item.completeness = response.completeness || response.result?.completeness || item.completeness;
+          item.nextCursor = response.next_cursor ?? null;
+        } catch (error) {
+          item.error = error.message || '明细暂时无法读取';
         }
+        output.push(item);
       }
       return output;
+    },
+    async loadTablePage(runId, { table, offset }) {
+      if (table.loading) return;
+      const epoch = this.pollEpoch;
+      table.loading = true;
+      table.error = '';
+      try {
+        const response = await actions.get(table.paginated
+          ? `/api/analyses/${runId}/details?cursor=${offset}&limit=${table.limit || 50}`
+          : `/api/query-results/${table.resultId}`);
+        if (epoch !== this.pollEpoch || this.disposed) return;
+        table.rows = table.paginated ? (response.items || []) : (response.result?.preview || response.result?.data || []);
+        table.total = response.returned_total ?? response.total ?? response.result?.rows ?? table.total ?? table.rows.length;
+        table.sourceTotal = response.total ?? response.result?.total_rows ?? table.sourceTotal;
+        table.completeness = response.completeness || response.result?.completeness || table.completeness;
+        table.columns = response.columns || response.result?.columns || table.columns;
+        table.offset = offset;
+        table.nextCursor = response.next_cursor ?? null;
+      } catch (error) {
+        if (epoch === this.pollEpoch && !this.disposed) {
+          table.error = error.message || '加载失败，请重试';
+          table.failedOffset = offset;
+        }
+      } finally {
+        table.loading = false;
+      }
     },
 
     startPolling() {
@@ -227,12 +281,13 @@ export const ConversationView = {
     },
 
     async ask(payload) {
-      if (!this.sessionId || this.submitting) return;
+      if (!this.sessionId || this.submitting || this.running || !this.canAnalyze) return;
+      const sessionId = this.sessionId;
       this.submitting = true;
       this.stopPolling();
       try {
         const body = {
-          session_id: this.sessionId,
+          session_id: sessionId,
           objective: payload.text,
           source_ids: payload.sourceIds,
           agent_id: payload.agentId || undefined,
@@ -247,6 +302,7 @@ export const ConversationView = {
             throw error;
           }
         }
+        if (this.disposed || sessionId !== this.sessionId) return;
         this.$refs.composer?.reset();
         this.runs.push(created.item);
         this.activeRunId = created.item.id;
@@ -262,7 +318,9 @@ export const ConversationView = {
 
     async confirmClarification(choices = {}) {
       const run = this.pendingClarification;
-      if (!run) return;
+      if (!run || this.clarificationBusy || !this.canAnalyze) return;
+      const sessionId = this.sessionId;
+      this.clarificationBusy = true;
       try {
         const detail = await actions.get(`/api/analyses/${run.id}`);
         const revision = detail.item?.contract;
@@ -302,23 +360,32 @@ export const ConversationView = {
         const confirmed = await actions.post(`/api/analyses/${run.id}/contract/confirm`, {
           expected_version: revision.version, contract,
         });
+        if (this.disposed || sessionId !== this.sessionId) return;
         this.runs = this.runs.map(item => (item.id === run.id
           ? { ...item, execution_status: confirmed.item?.execution_status || 'queued' } : item));
         this.startPolling();
       } catch (error) {
         toast(error.message, '无法开始', 'error');
+      } finally {
+        this.clarificationBusy = false;
       }
     },
     async answerClarification() {
       const answer = this.clarificationAnswer.trim();
-      if (!this.pendingAnswer || !answer) return;
+      const run = this.pendingAnswer;
+      if (!run || !answer || this.clarificationBusy || !this.canAnalyze) return;
+      const sessionId = this.sessionId;
+      this.clarificationBusy = true;
       try {
-        await actions.post(`/api/analyses/${this.pendingAnswer.id}/clarifications`, { answer });
+        await actions.post(`/api/analyses/${run.id}/clarifications`, { answer });
+        if (this.disposed || sessionId !== this.sessionId) return;
         this.clarificationAnswer = '';
         await this.refreshMessages();
         this.startPolling();
       } catch (error) {
         toast(error.message, '无法提交补充说明', 'error');
+      } finally {
+        this.clarificationBusy = false;
       }
     },
 
@@ -326,6 +393,12 @@ export const ConversationView = {
       const run = this.pendingClarification;
       if (!run) return;
       await this.cancelRun(run);
+      if (this.runs.find(item => item.id === run.id)?.execution_status === 'cancelled') {
+        this.$nextTick(() => {
+          if (!this.$refs.composer) return;
+          this.$refs.composer.setText(run.contract?.payload?.objective || '', { focus: true });
+        });
+      }
     },
     isCancelable(run) {
       return ['queued', 'running', 'waiting_job', 'waiting_input', 'waiting_approval', 'paused', 'cancelling']
@@ -392,14 +465,21 @@ export const ConversationView = {
 
     /** 结果操作条：全站统一，不同页面不会出现两套动作。 */
     async generate(runId, kind, label) {
-      if (!runId) return;
+      const key = `${runId}:${kind}`;
+      if (!runId || this.generating[key] || !this.canAnalyze) return;
+      this.generating[key] = true;
+      const sessionId = this.sessionId;
       try {
         await actions.post(`/api/analyses/${runId}/artifacts`, { kinds: [kind] });
-        this.artifacts[runId] = await actions.get(`/api/analyses/${runId}/results`)
+        const artifacts = await actions.get(`/api/analyses/${runId}/results`)
           .then(response => response.artifacts || []);
+        if (this.disposed || sessionId !== this.sessionId) return;
+        this.artifacts[runId] = artifacts;
         toast(`${label}已生成，可在资料库查看`, '完成');
       } catch (error) {
         toast(error.message, `生成${label}失败`, 'error');
+      } finally {
+        delete this.generating[key];
       }
     },
 
@@ -420,10 +500,16 @@ export const ConversationView = {
     },
 
     /** 查看来源：默认隐藏的复杂度，只在用户点开时出现。 */
+    closeSourceDrawer() {
+      this.sourceEpoch += 1;
+      this.sourceDrawer.open = false;
+    },
     async openSource(runId) {
+      const epoch = ++this.sourceEpoch;
       const blocks = [];
       try {
         const detail = await actions.get(`/api/analyses/${runId}/execution`);
+        if (epoch !== this.sourceEpoch || this.disposed) return;
         for (const item of detail.item?.actions || []) {
           if (item.tool_id === 'query_metric') {
             blocks.push({ title: '使用的指标', body: String(item.arguments?.metric || '由指标编译器执行') });
@@ -443,16 +529,19 @@ export const ConversationView = {
           });
         }
       } catch (error) {
-        toast(error.message, '无法读取来源', 'error');
+        if (epoch === this.sourceEpoch && !this.disposed) toast(error.message, '无法读取来源', 'error');
         return;
       }
+      if (epoch !== this.sourceEpoch || this.disposed) return;
       if (!blocks.length) blocks.push({ title: '来源', body: '本次分析没有可展示的查询来源。' });
       this.sourceDrawer = { open: true, title: '查看来源', blocks };
     },
 
     openTimeline(runId) {
+      const epoch = ++this.sourceEpoch;
       actions.get(`/api/analyses/${runId}/execution`)
         .then(response => {
+          if (epoch !== this.sourceEpoch || this.disposed) return;
           const item = response.item;
           this.sourceDrawer = {
             open: true,
@@ -472,7 +561,9 @@ export const ConversationView = {
             ],
           };
         })
-        .catch(error => toast(error.message, '无法读取执行过程', 'error'));
+        .catch(error => {
+          if (epoch === this.sourceEpoch && !this.disposed) toast(error.message, '无法读取执行过程', 'error');
+        });
     },
 
     askFollowUp(text) {
@@ -480,6 +571,14 @@ export const ConversationView = {
     },
     previewFile(file) {
       this.filePreview = file;
+    },
+    async copySource(block) {
+      try {
+        await navigator.clipboard.writeText(block.body);
+        toast(`${block.title}已复制`, '复制');
+      } catch {
+        toast('浏览器未允许剪贴板访问，请选中文本复制', '复制失败', 'error');
+      }
     },
     markdown(value) {
       return renderMarkdown(value);
@@ -494,6 +593,8 @@ export const ConversationView = {
         hasData: Boolean((payload.tables || [])[0]?.result_id),
         hasChart: Boolean((payload.charts || []).length),
         hasAnalysis: Boolean(payload.kpis?.length),
+        hasConclusion: Boolean(payload.summary),
+        duration_seconds: run.duration_seconds,
         validated: payload.validation?.status === 'PASS',
       };
     },
@@ -504,6 +605,10 @@ export const ConversationView = {
   },
   template: `
     <div class="view__inner view__inner--reading" style="padding:24px 28px 0">
+      <div v-if="loadError" class="card row row--between" role="alert">
+        <p class="small muted">会话加载失败：{{ loadError }}</p>
+        <button class="btn btn--sm" @click="load">重新加载</button>
+      </div>
       <div v-if="pollError" class="card row row--between" style="margin-bottom:12px" role="status">
         <p class="small muted">连接暂时中断，正在重试。{{ pollError }}</p>
         <button class="btn btn--sm" @click="startPolling">重新连接</button>
@@ -535,34 +640,39 @@ export const ConversationView = {
           <ResultView v-if="results[turn.run.id]" :payload="results[turn.run.id]"
                       :can-export="canAnalyze"
                       :artifacts="artifacts[turn.run.id] || []" :tables="tables[turn.run.id] || []"
-                      @preview="previewFile" @source="openSource(turn.run.id)" />
+                      @preview="previewFile" @source="openSource(turn.run.id)"
+                      @table-page="loadTablePage(turn.run.id, $event)" />
+          <div v-if="resultErrors[turn.run.id]" class="card row row--between" role="alert">
+            <p class="small muted">结果加载失败：{{ resultErrors[turn.run.id] }}</p>
+            <button class="btn btn--sm" @click="hydrate()">重试加载结果</button>
+          </div>
           <div v-if="results[turn.run.id]" class="result-actions">
             <button class="btn btn--sm" @click="openSource(turn.run.id)"><Icon name="shield" :size="14" />查看来源</button>
             <button class="btn btn--sm" @click="openTimeline(turn.run.id)"><Icon name="history" :size="14" />执行过程</button>
-            <button v-if="canAnalyze" class="btn btn--sm" @click="generate(turn.run.id, 'report_docx', 'Word 报告')"><Icon name="fileText" :size="14" />生成报告</button>
-            <button v-if="canAnalyze" class="btn btn--sm" @click="generate(turn.run.id, 'report_pptx', 'PPT')"><Icon name="filePresentation" :size="14" />生成 PPT</button>
-            <button v-if="canAnalyze" class="btn btn--sm" @click="generate(turn.run.id, 'data_xlsx', 'Excel')"><Icon name="fileSpreadsheet" :size="14" />导出 Excel</button>
+            <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_docx']" @click="generate(turn.run.id, 'report_docx', 'Word 报告')"><Icon name="fileText" :size="14" />{{ generating[turn.run.id + ':report_docx'] ? '生成中…' : '生成报告' }}</button>
+            <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_pptx']" @click="generate(turn.run.id, 'report_pptx', 'PPT')"><Icon name="filePresentation" :size="14" />{{ generating[turn.run.id + ':report_pptx'] ? '生成中…' : '生成 PPT' }}</button>
+            <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':data_xlsx']" @click="generate(turn.run.id, 'data_xlsx', 'Excel')"><Icon name="fileSpreadsheet" :size="14" />{{ generating[turn.run.id + ':data_xlsx'] ? '生成中…' : '导出 Excel' }}</button>
             <button class="btn btn--sm" @click="navigate('library')"><Icon name="library" :size="14" />查看资料库</button>
             <span class="grow"></span>
-            <button class="icon-btn tip" data-tip="结果有帮助" @click="sendFeedback(turn.run.id, 'up')"><Icon name="thumbUp" :size="16" /></button>
-            <button class="icon-btn tip" data-tip="结果需要改进" @click="sendFeedback(turn.run.id, 'down')"><Icon name="thumbDown" :size="16" /></button>
+            <button class="icon-btn tip" data-tip="结果有帮助" aria-label="结果有帮助" :aria-pressed="feedback[turn.run.id] === 'up'" :disabled="!!feedback[turn.run.id]" @click="sendFeedback(turn.run.id, 'up')"><Icon name="thumbUp" :size="16" /></button>
+            <button class="icon-btn tip" data-tip="结果需要改进" aria-label="结果需要改进" :aria-pressed="feedback[turn.run.id] === 'down'" :disabled="!!feedback[turn.run.id]" @click="sendFeedback(turn.run.id, 'down')"><Icon name="thumbDown" :size="16" /></button>
           </div>
           </div>
         </template>
 
-        <ClarificationCard v-if="canAnalyze && pendingClarification" :contract="pendingClarification.contract"
+        <ClarificationCard v-if="canAnalyze && pendingClarification" :contract="pendingClarification.contract" :busy="clarificationBusy || !!runOperations[pendingClarification.id]"
                            @submit="confirmClarification" @cancel="cancelClarification" />
 
         <div v-if="canAnalyze && pendingAnswer" class="card" style="margin:16px 0">
           <h3 class="card__title">还需要你补充一点信息</h3>
           <p class="small muted">说明分析对象、时间或口径后，系统会继续当前任务。</p>
-          <textarea v-model.trim="clarificationAnswer" class="textarea" placeholder="输入补充说明"></textarea>
-          <button class="btn btn--primary btn--sm" :disabled="!clarificationAnswer.trim()"
-                  @click="answerClarification">继续分析</button>
+          <textarea v-model.trim="clarificationAnswer" :disabled="clarificationBusy" class="textarea" placeholder="输入补充说明" aria-label="补充说明"></textarea>
+          <button class="btn btn--primary btn--sm" :disabled="clarificationBusy || !clarificationAnswer.trim()"
+                  @click="answerClarification">{{ clarificationBusy ? '正在提交…' : '继续分析' }}</button>
         </div>
 
-        <EmptyState v-if="!messages.length && !runs.length" icon="chat" title="还没有提问"
-                    text="在上方输入你的业务问题，系统会自动选择合适的能力并给出可核验的结论。" />
+        <EmptyState v-if="!loadError && !messages.length && !runs.length" icon="chat" title="还没有提问"
+                    text="在下方输入你的业务问题，系统会自动选择合适的能力并给出可核验的结论。" />
       </div>
     </div>
 
@@ -572,7 +682,7 @@ export const ConversationView = {
       <button class="btn btn--sm" style="margin-top:10px" @click="navigate('trash', { collection: 'agent_runs' })"><Icon name="trash" :size="14" />恢复已删除分析</button>
     </div>
 
-    <Modal :open="!!deleteTarget" title="删除分析" @close="closeRunDelete">
+    <Modal :open="!!deleteTarget" title="删除分析" size="small" @close="closeRunDelete">
       <p v-if="deleteTarget" class="small">将「{{ deleteTarget.contract?.payload?.objective || '这条分析' }}」移入回收站？会话中的提问和回答将隐藏，资料库成果和执行记录会保留，可在回收站恢复。</p>
       <p v-if="deleteError" class="small" style="color:var(--danger)">{{ deleteError }}</p>
       <template #footer>
@@ -582,9 +692,12 @@ export const ConversationView = {
     </Modal>
 
     <Drawer :open="sourceDrawer.open" :title="sourceDrawer.title" subtitle="默认隐藏，需要时再深入"
-            @close="sourceDrawer.open = false">
-      <div v-for="block in sourceDrawer.blocks" :key="block.title" style="margin-bottom:18px">
-        <h3 class="small" style="margin-bottom:6px">{{ block.title }}</h3>
+            @close="closeSourceDrawer">
+      <div v-for="block in sourceDrawer.blocks" :key="block.title" class="source-block">
+        <div class="source-block__head">
+          <h3 class="small">{{ block.title }}</h3>
+          <button class="btn btn--sm" :aria-label="'复制' + block.title" @click="copySource(block)"><Icon name="copy" :size="13" />复制</button>
+        </div>
         <pre>{{ block.body }}</pre>
       </div>
     </Drawer>

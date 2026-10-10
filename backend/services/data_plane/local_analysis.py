@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .reviewed_analysis import METHODS
+from .reviewed_analysis import MAX_INPUT_BYTES, METHODS
 
 
 class LocalAnalysisRunner:
@@ -38,8 +38,10 @@ class LocalAnalysisRunner:
         if not filename or Path(filename).name != filename:
             raise ValueError("分析输入文件名无效")
         source = source_dir / filename
-        if not source.is_file() or source.is_symlink() or source.suffix not in {".csv", ".parquet"}:
-            raise ValueError("分析输入必须是受管的 CSV 或 Parquet 文件")
+        if not source.is_file() or source.is_symlink() or source.suffix not in {".csv", ".parquet", ".json"}:
+            raise ValueError("分析输入必须是受管的 CSV、Parquet 或精确 JSON 结果文件")
+        if source.stat().st_size > MAX_INPUT_BYTES:
+            raise ValueError("分析输入超过受限文件大小")
         method = str(spec.get("method") or "")
         if method not in METHODS or spec.get("code"):
             raise ValueError("仅允许固定的审核分析方法，不执行生成的 Python 代码")

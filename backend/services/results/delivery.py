@@ -21,6 +21,7 @@ from ...agent.store import RunStore
 from ...core.database import Database, utcnow
 from ..security import SecretVault
 from .manifests import ResultService
+from ..query_results import read_result_frame
 
 
 ARTIFACT_KINDS = (
@@ -206,7 +207,7 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
             raise PermissionError("成果明细路径无效")
         if int(result.get("rows") or 0) > 1_048_575:
             raise ValueError("明细行数超过 Excel 上限")
-        frame = pd.read_csv(result_path)
+        frame = read_result_frame(result)
         # Uploaded/source text is untrusted. Prevent spreadsheet clients from
         # interpreting source headers or data cells as formulas.
         frame.columns = [_safe_excel_text(str(column)) for column in frame.columns]

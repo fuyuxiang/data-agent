@@ -26,6 +26,7 @@ from .data_policy import policy_fingerprint
 from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefStore
 from .data_plane.factory import livy_adapter, local_analysis_runner, trino_adapter
 from .datasets import frame_records
+from .query_results import normalize_result_columns, write_result_frame
 from .jobs import register_job_handler
 from .knowledge import strip_reasoning
 from .models import resolve_provider
@@ -177,16 +178,16 @@ def materialize_trino_preview(
     if len(rows) > 300 or len(names) > 500:
         return None, None
     result_id = database.new_id("qry")
-    path = current_app.config["SETTINGS"].export_dir / f"{result_id}.csv"
-    frame = pd.DataFrame(rows, columns=names or None)
-    frame.to_csv(path, index=False)
+    path = current_app.config["SETTINGS"].export_dir / f"{result_id}.parquet"
+    frame = normalize_result_columns(pd.DataFrame(rows, columns=names or None))
+    path = write_result_frame(frame, path)
     result = database.put("query_results", {
         "id": result_id, "workspace_id": run["workspace_id"], "source_ids": source_ids,
         "actor_id": run["actor_id"],
         "policy_fingerprint": _result_policy_fingerprint(database, run, source_ids),
         "sql": "", "rows": len(frame), "returned_rows": len(frame), "total_rows": len(frame),
         "completeness": "complete", "accuracy": "exact", "columns": [str(value) for value in frame.columns],
-        "data": frame.where(pd.notna(frame), None).to_dict(orient="records"), "path": str(path),
+        "data": frame_records(frame, 300), "path": str(path),
         "warehouse_query_id": query["query_id"],
     }, workspace_id=run["workspace_id"])
     ref = _dataset_ref(database, run, result)

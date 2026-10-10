@@ -16,6 +16,8 @@ const BASE_TYPE = {
   scatter: 'scatter', bubble: 'scatter', density: 'line', boxplot: 'boxplot', violin: 'boxplot',
 };
 
+const numericValue = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+
 function tokens() {
   const style = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (style.getPropertyValue(name).trim() || fallback);
@@ -35,7 +37,7 @@ function baseOption(palette) {
     textStyle: { fontFamily: 'Inter, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif' },
     animationDuration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 320,
     animationDurationUpdate: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220,
-    tooltip: { backgroundColor: palette.surface, borderColor: palette.line, borderWidth: 1, padding: [8, 12], textStyle: { color: palette.text, fontSize: 12 } },
+    tooltip: { confine: true, backgroundColor: palette.surface, borderColor: palette.line, borderWidth: 1, padding: [8, 12], textStyle: { color: palette.text, fontSize: 12 }, extraCssText: 'max-width:320px;white-space:normal;overflow-wrap:anywhere;' },
   };
 }
 
@@ -80,7 +82,7 @@ function composition(spec, palette) {
   const series = spec.encoding?.series?.[0] || { values: [] };
   const data = (spec.encoding?.x || []).map((name, index) => ({
     name: String(name),
-    value: Number(series.values[index]) || 0,
+    value: numericValue(series.values[index]),
   }));
   const theme = baseOption(palette);
   if (['treemap', 'sunburst'].includes(spec.type)) {
@@ -90,7 +92,8 @@ function composition(spec, palette) {
     return { tooltip: { ...theme.tooltip, valueFormatter: formatValue }, series: [{ type: 'funnel', sort: 'descending', data, left: '10%', width: '80%', label: { color: palette.text } }] };
   }
   if (spec.type === 'gauge') {
-    return { series: [{ type: 'gauge', progress: { show: true }, detail: { valueAnimation: true, formatter: (value) => formatValue(value) }, data: [{ value: Number(series.values[0]) || 0, name: series.name }] }] };
+    const value = numericValue(series.values[0]);
+    return { series: [{ type: 'gauge', min: Math.min(0, value ?? 0), progress: { show: true }, detail: { valueAnimation: true, formatter: (value) => formatValue(value) }, data: [{ value, name: series.name }] }] };
   }
   return {
     tooltip: { ...theme.tooltip, trigger: 'item', valueFormatter: formatValue },
@@ -112,13 +115,14 @@ function heatmap(spec, palette) {
   if (columns.length < 3) return null;
   const xs = [...new Set(records.map(row => String(row[columns[0]])))];
   const ys = [...new Set(records.map(row => String(row[columns[1]])))];
-  const points = records.map(row => [xs.indexOf(String(row[columns[0]])), ys.indexOf(String(row[columns[1]])), Number(row[columns[2]]) || 0]);
+  const points = records.filter(row => row[columns[2]] != null && row[columns[2]] !== '' && Number.isFinite(Number(row[columns[2]])))
+    .map(row => [xs.indexOf(String(row[columns[0]])), ys.indexOf(String(row[columns[1]])), Number(row[columns[2]])]);
   return {
     tooltip: { ...baseOption(palette).tooltip, position: 'top' },
     grid: { left: 8, right: 16, top: 20, bottom: 56, containLabel: true },
     xAxis: { type: 'category', data: xs, splitArea: { show: true }, axisLabel: { color: palette.secondary, fontSize: 11 } },
     yAxis: { type: 'category', data: ys, splitArea: { show: true }, axisLabel: { color: palette.secondary, fontSize: 11 } },
-    visualMap: { min: 0, max: Math.max(1, ...points.map(point => point[2])), calculable: true, orient: 'horizontal', left: 'center', bottom: 0, textStyle: { color: palette.secondary, fontSize: 11 } },
+    visualMap: { min: Math.min(0, ...points.map(point => point[2])), max: Math.max(1, ...points.map(point => point[2])), calculable: true, orient: 'horizontal', left: 'center', bottom: 0, textStyle: { color: palette.secondary, fontSize: 11 } },
     series: [{ type: 'heatmap', data: points, label: { show: points.length < 60, color: palette.text, fontSize: 11 } }],
   };
 }
@@ -133,10 +137,10 @@ function boxplot(spec, palette) {
     return sorted[low] + (sorted[high] - sorted[low]) * (index - low);
   };
   const data = series.map(item => {
-    const values = item.values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    const values = item.values.filter(value => value != null && value !== '').map(Number).filter(Number.isFinite).sort((a, b) => a - b);
     return values.length
       ? [values[0], quantile(values, 0.25), quantile(values, 0.5), quantile(values, 0.75), values.at(-1)]
-      : [0, 0, 0, 0, 0];
+      : [null, null, null, null, null];
   });
   return {
     tooltip: baseOption(palette).tooltip,
@@ -149,25 +153,114 @@ function boxplot(spec, palette) {
 
 /** 数值展示：大数收敛成万/亿，避免坐标轴被一串零淹没。 */
 export function formatValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
   const number = Number(value);
   if (!Number.isFinite(number)) return String(value ?? '—');
   const abs = Math.abs(number);
   if (abs >= 1e8) return `${(number / 1e8).toFixed(2)} 亿`;
   if (abs >= 1e4) return `${(number / 1e4).toFixed(abs >= 1e6 ? 0 : 1)} 万`;
   if (Number.isInteger(number)) return number.toLocaleString('zh-CN');
-  return number.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+  return number.toLocaleString('zh-CN', { maximumSignificantDigits: 8 });
+}
+
+/** 保留服务端图形和数据，只补充缺失的主题、布局与长标签约束。 */
+function readableOption(option, palette) {
+  const output = { ...baseOption(palette), ...option };
+  output.tooltip = { ...baseOption(palette).tooltip, valueFormatter: formatValue, ...option.tooltip };
+  const series = Array.isArray(output.series) ? output.series : output.series ? [output.series] : [];
+  const mapAxes = (axes) => {
+    const styleAxis = axis => ({
+      ...axis,
+      axisLabel: {
+        color: palette.secondary, fontSize: 12, hideOverlap: true,
+        ...(axis.type === 'category' ? {
+          width: 104, overflow: 'truncate', interval: (axis.data?.length || 0) <= 12 ? 0 : 'auto',
+        } : { formatter: formatValue }),
+        ...axis.axisLabel,
+      },
+      axisLine: { ...axis.axisLine, lineStyle: { color: palette.line, ...axis.axisLine?.lineStyle } },
+      axisTick: { show: false, ...axis.axisTick },
+    });
+    return Array.isArray(axes) ? axes.map(styleAxis) : styleAxis(axes);
+  };
+  if (output.xAxis || output.yAxis) {
+    if (output.xAxis) output.xAxis = mapAxes(output.xAxis);
+    if (output.yAxis) output.yAxis = mapAxes(output.yAxis);
+    const gridDefaults = { left: 12, right: 20, top: 28, bottom: 48, containLabel: true };
+    output.grid = Array.isArray(output.grid)
+      ? output.grid.map(grid => ({ ...gridDefaults, ...grid })) : { ...gridDefaults, ...output.grid };
+    const xAxis = Array.isArray(output.xAxis) ? output.xAxis[0] : output.xAxis;
+    if (xAxis?.type === 'category' && xAxis.data?.length > 12 && !output.dataZoom && !Array.isArray(output.grid)) {
+      output.dataZoom = [{ type: 'slider', height: 18, bottom: 16, startValue: 0, endValue: 11 }, { type: 'inside' }];
+    }
+    output.tooltip = { ...baseOption(palette).tooltip, trigger: series.some(item => item.type === 'scatter') ? 'item' : 'axis', valueFormatter: formatValue, ...output.tooltip };
+  }
+  output.series = series.map(item => {
+    if (item.type === 'pie') return {
+      radius: ['0%', '62%'], center: ['50%', output.title?.show !== false && output.title?.text ? '54%' : '44%'], stillShowZeroSum: false, ...item,
+      label: { color: palette.secondary, fontSize: 12, width: 110, overflow: 'truncate', ...item.label },
+      labelLayout: { hideOverlap: true, ...item.labelLayout },
+    };
+    return item;
+  });
+  if (output.legend || series.length > 1 || series.some(item => item.type === 'pie')) {
+    const styleLegend = legend => ({
+      type: 'scroll', bottom: 0, left: 'center', itemWidth: 10, itemHeight: 10,
+      tooltip: { show: true },
+      textStyle: { color: palette.secondary, fontSize: 12, width: 140, overflow: 'truncate' },
+      ...legend,
+    });
+    output.legend = Array.isArray(output.legend) ? output.legend.map(styleLegend) : styleLegend(output.legend);
+  }
+  if (output.grid && !Array.isArray(output.grid)) {
+    // 底部组件各占一行，既不遮住缩放手柄，也不把图例挤到标题上。
+    const zoom = (Array.isArray(output.dataZoom) ? output.dataZoom : [output.dataZoom])
+      .find(item => item?.type === 'slider' && item.show !== false && item.orient !== 'vertical' && item.top == null);
+    let bottom = zoom ? (Number(zoom.bottom) || 0) + (Number(zoom.height) || 18) + 18 : 0;
+    const legends = Array.isArray(output.legend) ? output.legend : [output.legend];
+    const hasLegendData = series.some(item => item.name || (item.type === 'pie' && item.data?.some(point => point?.name)));
+    for (const legend of legends) {
+      if (!legend || legend.show === false || legend.top != null || legend.orient === 'vertical' || !hasLegendData) continue;
+      legend.bottom = Math.max(Number(legend.bottom) || 0, bottom + 4);
+      bottom = legend.bottom + 32;
+    }
+    const visualMaps = Array.isArray(output.visualMap) ? output.visualMap : [output.visualMap];
+    for (const visualMap of visualMaps) {
+      if (!visualMap || visualMap.show === false || visualMap.top != null || visualMap.orient !== 'horizontal') continue;
+      visualMap.bottom = Math.max(Number(visualMap.bottom) || 0, bottom + 4);
+      bottom = visualMap.bottom + 64;
+    }
+    output.grid.bottom = Math.max(Number(output.grid.bottom) || 0, bottom + 12);
+    const title = Array.isArray(output.title) ? output.title[0] : output.title;
+    if (title?.text && title.show !== false && title.bottom == null) {
+      output.grid.top = Math.max(Number(output.grid.top) || 0, 56);
+    }
+  }
+  return output;
 }
 
 export function buildOption(spec) {
   if (!spec) return null;
   const palette = tokens();
   if (spec.option) {
-    return { ...baseOption(palette), ...JSON.parse(JSON.stringify(spec.option)) };
+    const option = JSON.parse(JSON.stringify(spec.option));
+    const list = Array.isArray(option.series) ? option.series : [option.series];
+    if (spec.type === 'heatmap' && Array.isArray(spec.records) && spec.columns?.length >= 3
+        && list.length === 1 && list[0]?.type === 'heatmap'
+        && (!list[0].coordinateSystem || list[0].coordinateSystem === 'cartesian2d')) {
+      // 旧保存规格可能已把 null 写成 0；有原始记录时恢复其缺失语义和色域。
+      const data = heatmap(spec, palette);
+      list[0].data = data.series[0].data;
+      const range = { min: data.visualMap.min, max: data.visualMap.max };
+      option.visualMap = Array.isArray(option.visualMap)
+        ? option.visualMap.map(item => ({ ...item, ...range })) : { ...option.visualMap, ...range };
+    }
+    return readableOption(option, palette);
   }
-  if (spec.type === 'heatmap') return heatmap(spec, palette);
-  if (spec.type === 'boxplot' || spec.type === 'violin') return boxplot(spec, palette);
-  if (COMPOSITION.has(spec.type)) return composition(spec, palette);
-  return cartesian(spec, palette);
+  const option = spec.type === 'heatmap' ? heatmap(spec, palette)
+    : spec.type === 'boxplot' || spec.type === 'violin' ? boxplot(spec, palette)
+      : COMPOSITION.has(spec.type) ? composition(spec, palette) : cartesian(spec, palette);
+  return option ? readableOption(option, palette) : null;
 }
 
 export const ChartView = {
@@ -185,12 +278,15 @@ export const ChartView = {
         emitEmpty();
         return;
       }
+      root.value.classList.remove('is-empty');
       chart = chart || window.echarts.init(root.value);
       chart.setOption(option, true);
       chart.resize();
     };
     const emitEmpty = () => {
       if (root.value) {
+        chart?.dispose();
+        chart = null;
         root.value.innerHTML = '';
         root.value.classList.add('is-empty');
       }
@@ -220,12 +316,35 @@ export const ChartCard = {
   name: 'ChartCard',
   components: { ChartView },
   props: { spec: Object, note: String, tall: Boolean },
+  computed: {
+    emptyReason() {
+      if (this.spec?.option?.dataset) return '';
+      if (this.spec?.type === 'heatmap' && Array.isArray(this.spec.records) && this.spec.columns?.length >= 3) {
+        return this.spec?.records?.some(row => numericValue(row[this.spec.columns?.[2]]) !== null) ? '' : '暂无可绘制的数据';
+      }
+      const series = this.spec?.option?.series || this.spec?.encoding?.series || [];
+      const list = Array.isArray(series) ? series : [series];
+      const values = list.flatMap(item => item.data || item.values || []);
+      if (!values.length) return '暂无可绘制的数据';
+      const numbers = values.flatMap(item => {
+        const value = item && typeof item === 'object' && !Array.isArray(item) ? item.value : item;
+        return Array.isArray(value) ? value : [value];
+      }).map(numericValue).filter(value => value !== null);
+      if (!numbers.length && !list.some(item => ['graph', 'sankey', 'treemap', 'sunburst'].includes(item.type))) return '暂无可绘制的数据';
+      if (['pie', 'donut', 'rose'].includes(this.spec?.type)
+        && numbers.length && numbers.every(value => value === 0)) {
+        return '各类目数值均为 0，暂无构成比例';
+      }
+      return '';
+    },
+  },
   template: `
     <figure class="chart-card" :class="{ 'chart-card--tall': tall }">
       <figcaption class="chart-card__head">
         <span class="chart-card__title">{{ spec?.title || '图表' }}</span>
         <span v-if="note" class="chart-card__note">{{ note }}</span>
       </figcaption>
-      <ChartView :spec="spec" />
+      <div v-if="emptyReason" class="empty" style="padding:40px 16px"><p class="small muted">{{ emptyReason }}</p></div>
+      <ChartView v-else :spec="spec" />
     </figure>`,
 };

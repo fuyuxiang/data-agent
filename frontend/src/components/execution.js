@@ -14,7 +14,7 @@ const STEPS = [
   { key: 'queried', label: '已查询数据', done: (run) => run.hasData },
   { key: 'analyzed', label: '已完成分析', done: (run) => run.hasChart || run.hasAnalysis },
   { key: 'validated', label: '已核验结果', done: (run) => run.validated },
-  { key: 'delivered', label: '已生成结论', done: (run) => ['finished', 'partial'].includes(run.execution_status) },
+  { key: 'delivered', label: '已生成结论', done: (run) => run.hasConclusion || run.execution_status === 'finished' },
 ];
 
 const STOP_LABELS = {
@@ -71,7 +71,8 @@ export const ExecutionStatus = {
       if (this.status === 'failed') return '分析未完成';
       if (this.status === 'cancelled') return '分析已取消';
       if (this.status === 'cancelling') return '正在终止分析';
-      if (this.status === 'finished' || this.status === 'partial') {
+      if (this.status === 'partial') return '分析部分完成';
+      if (this.status === 'finished') {
         return this.run.quality_status === 'passed' ? '分析已完成并通过核验' : '分析已完成';
       }
       if (this.status === 'waiting_input') return '等待你的确认';

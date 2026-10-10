@@ -32,15 +32,15 @@
   /* 文字 */
   --text-primary: #161b26;
   --text-secondary: #5f697b;
-  --text-tertiary: #8d96a8;
+  --text-tertiary: #667085;
   --text-inverse: #ffffff;
 
   /* 状态 */
-  --success: #18a36b;
+  --success: #087b51;
   --success-soft: #e6f6ef;
-  --warning: #e7a23b;
+  --warning: #a66b15;
   --warning-soft: #fdf3e3;
-  --danger: #e25757;
+  --danger: #c73c42;
   --danger-soft: #fdeded;
   --info: #4f6bff;
   --info-soft: #eef1ff;
@@ -73,7 +73,7 @@
   --overlay-command: rgba(7, 16, 29, 0.45);
   --halo-brand: 0 6px 18px rgba(79, 107, 255, 0.28);
   --pulse-brand: rgba(79, 107, 255, 0.35);
-  --sidebar-muted: rgba(255, 255, 255, 0.34);
+  --sidebar-muted: rgba(255, 255, 255, 0.56);
 
   /* 字体 */
   --font-sans: Inter, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
@@ -126,7 +126,7 @@
 
   --text-primary: #e8ecf4;
   --text-secondary: #9aa5ba;
-  --text-tertiary: #6d7789;
+  --text-tertiary: #909bb2;
 
   --success: #2fbf85;
   --success-soft: rgba(47, 191, 133, 0.14);

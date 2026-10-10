@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +32,11 @@ def load_settings(database: Database, workspace_id: str) -> dict:
     item = database.get("lifecycle_settings", f"lifecycle_{workspace_id}")
     return {
         "retention_preset": str((item or {}).get("retention_preset") or "forever"),
-        "retention_custom_days": int((item or {}).get("retention_custom_days") or 30),
+        "retention_custom_days": int((item or {}).get("retention_custom_days", 30)),
     }
 
 
-def save_settings(database: Database, workspace_id: str, payload: dict) -> dict:
+def save_settings(database: Database, workspace_id: str, payload: dict, *, actor: str = "system") -> dict:
     preset = str(payload.get("retention_preset") or "forever")
     if preset not in {"7", "14", "forever", "custom"}:
         raise ValueError("保留策略无效")
@@ -42,18 +44,130 @@ def save_settings(database: Database, workspace_id: str, payload: dict) -> dict:
         days = int(payload.get("retention_custom_days", 30))
     except (TypeError, ValueError) as exc:
         raise ValueError("自定义保留天数必须是整数") from exc
-    if not 0 <= days <= 3650:
-        raise ValueError("自定义保留天数必须在 0 到 3650 之间")
+    if isinstance(payload.get("retention_custom_days"), bool) or str(payload.get("retention_custom_days", 30)) != str(days):
+        raise ValueError("自定义保留天数必须是整数")
+    if not 1 <= days <= 3650:
+        raise ValueError("自定义保留天数必须在 1 到 3650 之间")
     database.put(
         "lifecycle_settings",
         {"id": f"lifecycle_{workspace_id}", "workspace_id": workspace_id, "retention_preset": preset, "retention_custom_days": days},
         workspace_id=workspace_id,
     )
-    return {"retention_preset": preset, "retention_custom_days": days}
+    result = {"retention_preset": preset, "retention_custom_days": days}
+    database.audit("lifecycle.settings.updated", workspace_id=workspace_id, actor=actor,
+                   object_type="lifecycle_settings", object_id=f"lifecycle_{workspace_id}", detail=result)
+    return result
+
+
+def expire_retention(database: Database, workspace_id: str, *, now: datetime | None = None) -> dict:
+    """Soft-archive inactive content; files, messages and audit evidence remain recoverable.
+
+    Use database timestamps rather than payload timestamps so restoring an item
+    starts a new retention period. Check and archive in one write transaction to
+    avoid racing a new message, task or edit in another application worker.
+    """
+    instant = now or datetime.now(timezone.utc)
+    summary = {"sessions": 0, "artifacts": 0, "saved_sessions": 0}
+    with database.transaction() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT payload FROM records WHERE collection='lifecycle_settings' "
+            "AND id=? AND workspace_id=? AND archived_at IS NULL",
+            (f"lifecycle_{workspace_id}", workspace_id),
+        ).fetchone()
+        policy = json.loads(row["payload"]) if row else DEFAULT_SETTINGS
+        preset = str(policy.get("retention_preset") or "forever")
+        if preset == "forever":
+            return summary
+        days = int(policy.get("retention_custom_days", 30)) if preset == "custom" else int(preset)
+        if not 1 <= days <= 3650:
+            return summary
+        cutoff = (instant - timedelta(days=days)).isoformat()
+        archived_at = instant.isoformat(timespec="seconds")
+        candidates = connection.execute(
+            """SELECT r.collection,r.id FROM records r
+               WHERE r.workspace_id=? AND r.archived_at IS NULL
+                 AND r.collection IN ('sessions','artifacts','saved_sessions')
+                 AND julianday(r.updated_at) <= julianday(?)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM agent_runs a WHERE a.workspace_id=r.workspace_id
+                     AND (a.session_id=r.id OR a.id=json_extract(r.payload,'$.run_id'))
+                     AND (a.execution_status NOT IN ('finished','failed','cancelled','partial')
+                          OR julianday(a.updated_at)>julianday(?)))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages m WHERE r.collection='sessions'
+                     AND m.session_id=r.id AND m.workspace_id=r.workspace_id
+                     AND julianday(m.created_at)>julianday(?))
+               ORDER BY r.updated_at LIMIT 500""",
+            (workspace_id, cutoff, cutoff, cutoff),
+        ).fetchall()
+        for item in candidates:
+            connection.execute(
+                "UPDATE records SET archived_at=?,updated_at=? "
+                "WHERE collection=? AND id=? AND workspace_id=? AND archived_at IS NULL",
+                (archived_at, archived_at, item["collection"], item["id"], workspace_id),
+            )
+            summary[item["collection"]] += 1
+            connection.execute(
+                "INSERT INTO audit_log(workspace_id,event_type,actor,object_type,object_id,detail,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (workspace_id, "lifecycle.retention.archived", "system", item["collection"], item["id"],
+                 json.dumps({"retention_days": days}, ensure_ascii=False), archived_at),
+            )
+    return summary
+
+
+class RetentionWorker:
+    """Apply persisted workspace policies once a minute while the service is running."""
+
+    def __init__(self, app):
+        self.app = app
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="workspace-retention", daemon=True)
+
+    def sweep(self) -> None:
+        database = self.app.extensions["meridian_db"]
+        with database.connect() as connection:
+            workspaces = connection.execute(
+                "SELECT DISTINCT workspace_id FROM records WHERE collection='lifecycle_settings' AND archived_at IS NULL",
+            ).fetchall()
+        for item in workspaces:
+            try:
+                expire_retention(database, item["workspace_id"])
+            except Exception:
+                self.app.logger.exception("Failed to apply retention for workspace %s", item["workspace_id"])
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.sweep()
+            except Exception:
+                self.app.logger.exception("Failed to check workspace retention policies")
+            self._stop.wait(60)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=3)
 
 
 def _files(root: Path) -> list[Path]:
     return [path for path in root.rglob("*") if path.is_file()] if root.is_dir() else []
+
+
+def _registered_paths(database: Database, collections: tuple[str, ...]) -> set[str]:
+    # Storage roots are shared. Archived records and other workspaces still own
+    # their files; treating those files as unknown would break restore/delivery.
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT collection,json_extract(payload,'$.path') AS path FROM records "
+            "WHERE json_type(payload,'$.path')='text'",
+        ).fetchall()
+    return {str(Path(item["path"]).resolve()) for item in rows
+            if item["collection"] in collections and item["path"]}
 
 
 def report(database: Database, workspace_id: str) -> dict:
@@ -95,8 +209,7 @@ def workspace_preview(database: Database, workspace_id: str) -> dict:
 
 
 def uploads_preview(database: Database, workspace_id: str) -> dict:
-    active_sources = database.list("sources", workspace_id=workspace_id, limit=5000)
-    registered = {str(Path(item["path"]).resolve()) for item in active_sources if item.get("path")}
+    registered = _registered_paths(database, ("sources", "knowledge_documents"))
     categories = {
         "registered_uploads": {"files": 0, "bytes": 0}, "knowledge": {"files": 0, "bytes": 0},
         "parsed_excel_cache": {"files": 0, "bytes": 0}, "unknown_uploads": {"files": 0, "bytes": 0},
@@ -157,6 +270,8 @@ def recycle_upload(database: Database, workspace_id: str, category: str, relativ
     source = (settings().upload_dir / _relative(relative_path)).resolve()
     if not _within(source, settings().upload_dir):
         raise ValueError("上传文件路径无效")
+    if str(source) in _registered_paths(database, ("sources", "knowledge_documents")):
+        raise ValueError("文件仍属于已注册或回收站中的数据，不能按未知上传回收")
     item = _move_to_trash(database, workspace_id, "uploads", source, {"category": category})
     return {"trash_id": item["id"], "filename": item["filename"], "bytes": item["size_bytes"]}
 
@@ -188,7 +303,7 @@ def restore_file_trash(database: Database, workspace_id: str, trash_id: str, kin
 
 def artifact_preview(database: Database, workspace_id: str) -> dict:
     active = database.list("artifacts", workspace_id=workspace_id, limit=5000)
-    registered_paths = {str(Path(item["path"]).resolve()) for item in active if item.get("path")}
+    registered_paths = _registered_paths(database, ("artifacts", "query_results"))
     missing = [item["id"] for item in active if item.get("path") and not Path(item["path"]).is_file()]
     unknown = []
     for path in _files(settings().export_dir):
@@ -216,6 +331,8 @@ def recycle_unregistered_artifact(database: Database, workspace_id: str, artifac
     source = (settings().export_dir / _relative(relative_path)).resolve()
     if not _within(source, settings().export_dir):
         raise ValueError("产物路径无效")
+    if str(source) in _registered_paths(database, ("artifacts", "query_results")):
+        raise ValueError("文件仍属于已注册或回收站中的成果，不能按未知产物回收")
     item = _move_to_trash(database, workspace_id, "artifacts", source, {"artifact_type": artifact_type})
     return {"trash_id": item["id"], "filename": item["filename"], "bytes": item["size_bytes"]}
 

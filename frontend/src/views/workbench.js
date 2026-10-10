@@ -32,12 +32,11 @@ export const WorkbenchView = {
   mounted() {
     const agent = state.agents.find(item => item.id === state.routeParams.agent);
     if (agent) this.$refs.composer.agentId = agent.id;
-    if (state.routeParams.ask) this.$refs.composer.text = state.routeParams.ask;
     if (state.routeParams.file) {
       this.$refs.composer.scopeExplicit = true;
       this.$refs.composer.sourceIds = [];
     }
-    if (agent || state.routeParams.ask) this.$nextTick(() => this.$refs.composer.focus());
+    if (agent || state.routeParams.ask) this.$refs.composer.setText(state.routeParams.ask || '', { focus: true });
   },
   computed: {
     greeting() {
@@ -76,11 +75,10 @@ export const WorkbenchView = {
   },
   methods: {
     suggest(text) {
-      this.$refs.composer.text = text;
-      this.$nextTick(() => this.$refs.composer.focus());
+      this.$refs.composer.setText(text, { focus: true });
     },
     async submit(payload) {
-      if (this.submitting) return;
+      if (this.submitting || !this.canAnalyze) return;
       this.submitting = true;
       try {
         if (!this.sessionReady) {
@@ -125,6 +123,7 @@ export const WorkbenchView = {
       }
     },
     async seed() {
+      if (this.seeding) return;
       this.seeding = true;
       try {
         await loadDemo();

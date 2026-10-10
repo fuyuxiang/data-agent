@@ -34,6 +34,7 @@ export const DataView = {
     return {
       sources: [],
       loading: true,
+      loadError: '',
       query: '',
       kind: '',
       active: null,
@@ -41,7 +42,12 @@ export const DataView = {
       schema: null,
       schemaLoading: false,
       schemaError: '',
+      schemaRequest: 0,
       preview: null,
+      previewTable: '',
+      previewLoading: false,
+      previewError: '',
+      previewRequest: 0,
       profile: null,
       profileTable: '',
       profileLoading: false,
@@ -90,17 +96,23 @@ export const DataView = {
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.schemaRequest += 1;
+    this.previewRequest += 1;
+    this.profileRequest += 1;
+  },
   methods: {
     kindLabel(item) {
       return `${item.kind} 数据源`;
     },
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/sources');
         this.sources = response.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -111,7 +123,12 @@ export const DataView = {
       this.schema = null;
       this.schemaLoading = false;
       this.schemaError = '';
+      this.schemaRequest += 1;
       this.preview = null;
+      this.previewTable = source.tables?.[0]?.name || '';
+      this.previewLoading = false;
+      this.previewError = '';
+      this.previewRequest += 1;
       this.profile = null;
       this.profileTable = source.tables?.[0]?.name || '';
       this.profileLoading = false;
@@ -122,28 +139,40 @@ export const DataView = {
     async loadSchema() {
       if (!this.active || this.schemaLoading) return;
       const sourceId = this.active.id;
+      const requestId = ++this.schemaRequest;
       this.schemaLoading = true;
       this.schemaError = '';
       try {
         const response = await actions.get(`/api/sources/${sourceId}/schema`);
-        if (this.active?.id === sourceId) this.schema = response.schema || response;
+        if (this.active?.id === sourceId && this.schemaRequest === requestId) this.schema = response.schema || response;
       } catch (error) {
-        if (this.active?.id === sourceId) {
+        if (this.active?.id === sourceId && this.schemaRequest === requestId) {
           this.schemaError = error.message;
           toast(error.message, '读取结构失败', 'error');
         }
       } finally {
-        if (this.active?.id === sourceId) this.schemaLoading = false;
+        if (this.active?.id === sourceId && this.schemaRequest === requestId) this.schemaLoading = false;
       }
     },
-    async loadPreview(table) {
+    async loadPreview() {
+      if (!this.active) return;
+      const sourceId = this.active.id;
+      const table = this.previewTable;
+      const requestId = ++this.previewRequest;
+      this.previewLoading = true;
+      this.previewError = '';
+      this.preview = null;
       try {
         const response = await actions.get(
-          `/api/sources/${this.active.id}/preview?limit=50${table ? `&table=${encodeURIComponent(table)}` : ''}`,
+          `/api/sources/${sourceId}/preview?limit=50${table ? `&table=${encodeURIComponent(table)}` : ''}`,
         );
-        this.preview = response.preview || response;
+        if (this.active?.id === sourceId && this.previewRequest === requestId) {
+          this.preview = response.preview || response;
+        }
       } catch (error) {
-        toast(error.message, '预览失败', 'error');
+        if (this.active?.id === sourceId && this.previewRequest === requestId) this.previewError = error.message;
+      } finally {
+        if (this.active?.id === sourceId && this.previewRequest === requestId) this.previewLoading = false;
       }
     },
     async loadProfile() {
@@ -194,7 +223,7 @@ export const DataView = {
     async upload(event) {
       const file = event.target.files?.[0];
       event.target.value = '';
-      if (!file) return;
+      if (!file || this.busy) return;
       this.busy = true;
       try {
         const form = new FormData();
@@ -220,6 +249,7 @@ export const DataView = {
       }
     },
     async connectDatabase() {
+      if (this.busy) return;
       const required = [
         ['名称', this.dbForm.name],
         ['主机', this.dbForm.host],
@@ -251,6 +281,7 @@ export const DataView = {
       }
     },
     async connectHttp() {
+      if (this.busy || !this.form.name || !this.form.url) return;
       this.busy = true;
       try {
         await actions.post('/api/sources/http', { ...this.form, workspace_id: state.workspaceId });
@@ -275,8 +306,8 @@ export const DataView = {
           <button class="btn btn--sm" @click="httpOpen = true"><Icon name="link" :size="14" />API 数据源</button>
           <button class="btn btn--sm" @click="dbOpen = true"><Icon name="database" :size="14" />连接数据库</button>
           <label class="btn btn--primary btn--sm">
-            <Icon name="upload" :size="14" />上传文件
-            <input type="file" hidden accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload" />
+            <Icon name="upload" :size="14" />{{ busy ? '接入中…' : '上传文件' }}
+            <input type="file" hidden :disabled="busy" accept=".csv,.tsv,.xlsx,.xls,.json,.parquet" @change="upload" />
           </label>
         </div>
       </header>
@@ -288,16 +319,16 @@ export const DataView = {
           <button v-for="item in kinds" :key="item" :class="{ active: kind === item }" @click="kind = item">{{ item }}</button>
         </div>
         <span class="toolbar__spacer"></span>
-        <span class="small faint">{{ filtered.length }} 个数据源</span>
+        <span v-if="!loading && !loadError" class="small faint">{{ filtered.length }} 个数据源</span>
       </div>
 
       <div v-if="loading" class="grid grid--3">
         <div v-for="index in 6" :key="index" class="skeleton" style="height:120px"></div>
       </div>
 
-      <EmptyState v-else-if="!filtered.length" icon="database" title="还没有数据源"
-                  text="上传一个文件，或连接数据库和 API。也可以在工作台一键载入演示数据。" />
-
+      <div v-else-if="loadError" class="card stack"><p class="small" role="alert" style="color:var(--danger)">{{ loadError }}</p><button class="btn btn--sm" @click="load">重新加载数据源</button></div>
+      <EmptyState v-else-if="!filtered.length" icon="database" :title="query || kind ? '没有匹配的数据源' : '还没有数据源'"
+                  :text="query || kind ? '调整关键词或数据源类型后重试。' : '上传一个文件，或连接数据库和 API。也可以在工作台一键载入演示数据。'" />
       <div v-else class="grid grid--3">
         <article v-for="item in filtered" :key="item.id" class="card card--interactive file-tile"
                  @click="open(item)">
@@ -328,7 +359,7 @@ export const DataView = {
       </div>
     </div>
 
-    <Drawer :open="!!active" :title="active?.name || ''" :subtitle="active?.description" width="640"
+    <Drawer :open="!!active" :title="active?.name || ''" :subtitle="active?.description" :width="800"
             @close="active = null">
       <div v-if="active">
         <Tabs v-model="detailTab" :items="detailTabs" />
@@ -369,14 +400,19 @@ export const DataView = {
 
         <div v-else-if="detailTab === 'preview'" style="margin-top:16px">
           <div class="row" style="margin-bottom:10px">
-            <select v-if="(active.tables || []).length > 1" class="select input--sm" style="width:200px"
-                    @change="loadPreview($event.target.value)">
+            <select v-if="(active.tables || []).length > 1" v-model="previewTable" class="select input--sm" style="width:200px"
+                    aria-label="预览数据表" @change="loadPreview">
               <option v-for="table in active.tables" :key="table.name" :value="table.name">{{ table.name }}</option>
             </select>
-            <button class="btn btn--sm" @click="loadPreview((active.tables || [])[0]?.name)">加载预览</button>
+            <button class="btn btn--sm" :disabled="previewLoading" @click="loadPreview">{{ previewLoading ? '加载中…' : preview ? '重新加载预览' : '加载预览' }}</button>
           </div>
-          <DataTable v-if="preview" :rows="preview.data || preview.rows || []" max-height="420px" />
-          <EmptyState v-else icon="table" title="还没有预览" text="点击「加载预览」查看前 50 行数据。" />
+          <p v-if="previewError" class="small" role="alert" style="color:var(--danger);margin-bottom:10px">{{ previewError }}，可以重新加载。</p>
+          <p v-if="previewLoading" class="small muted" role="status">正在读取当前数据表…</p>
+          <template v-else-if="preview">
+            <p class="xs muted" style="margin-bottom:10px">{{ previewTable || '当前数据表' }} · 展示前 {{ (preview.data || preview.rows || []).length }} 行（最多 50 行）</p>
+            <DataTable :rows="preview.data || preview.rows || []" :columns="preview.columns || []" max-height="min(60vh, 560px)" />
+          </template>
+          <EmptyState v-else-if="!previewError" icon="table" title="还没有预览" text="点击「加载预览」查看前 50 行数据。" />
         </div>
 
         <div v-else style="margin-top:16px">
@@ -407,7 +443,7 @@ export const DataView = {
       </div>
     </Drawer>
 
-    <Modal :open="httpOpen" title="接入 API 数据源" @close="httpOpen = false">
+    <Modal :open="httpOpen" title="接入 API 数据源" @close="!busy && (httpOpen = false)">
       <div class="stack">
         <label class="field"><span>名称<em> *</em></span>
           <input v-model.trim="form.name" class="input" placeholder="订单接口" /></label>
@@ -418,12 +454,12 @@ export const DataView = {
         <p class="xs faint">出站域名必须已在部署白名单内，否则会被拒绝。</p>
       </div>
       <template #footer>
-        <button class="btn" @click="httpOpen = false">取消</button>
-        <button class="btn btn--primary" :disabled="busy || !form.name || !form.url" @click="connectHttp">接入</button>
+        <button class="btn" :disabled="busy" @click="httpOpen = false">取消</button>
+        <button class="btn btn--primary" :disabled="busy || !form.name || !form.url" @click="connectHttp">{{ busy ? '接入中…' : '接入' }}</button>
       </template>
     </Modal>
 
-    <Modal :open="dbOpen" title="连接数据库" :wide="true" @close="dbOpen = false">
+    <Modal :open="dbOpen" title="连接数据库" :wide="true" @close="!busy && (dbOpen = false)">
       <div class="stack">
         <p class="xs faint" v-if="dbForm.driver === 'mysql' && dbForm.host === '127.0.0.1'">
           已填入本地 MySQL 示例配置；连接其他数据库时请修改主机、库名和账号。数擎登录密码不能用于连接 MySQL。
@@ -451,9 +487,9 @@ export const DataView = {
         <p class="xs faint">凭据会加密存储，查询始终只读。</p>
       </div>
       <template #footer>
-        <button class="btn" @click="dbOpen = false">取消</button>
+        <button class="btn" :disabled="busy" @click="dbOpen = false">取消</button>
         <button class="btn btn--primary" :disabled="busy"
-                @click="connectDatabase">连接</button>
+                @click="connectDatabase">{{ busy ? '连接中…' : '连接' }}</button>
       </template>
     </Modal>`,
 };

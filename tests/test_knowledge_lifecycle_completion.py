@@ -201,20 +201,27 @@ function view(actions = {}) {
   return { ...context.KnowledgeView.data(), ...context.KnowledgeView.methods };
 }
 for (const mutation of ['removeDocument', 'removeEntry', 'toggle', 'toggleDocument']) {
-  let finishSearch;
-  const item = { id: 'deleted', name: '采购复核', enabled: true, references: [] };
-  const v = view({ post: () => new Promise(resolve => { finishSearch = resolve; }) });
-  Object.assign(v, { searchQuery: '采购', entries: [item], documents: [item],
-    entryDeleteTarget: item, documentDeleteTarget: item, documentReferencesChecked: true,
-    results: [{ document_id: item.id }, { document_id: 'retained' }] });
-  const pendingSearch = v.search();
-  await v[mutation](item);
-  assert.equal(v.results.length, 1, mutation);
-  assert.equal(v.results[0].document_id, 'retained', mutation);
-  finishSearch({ items: [{ document_id: item.id }] });
-  await pendingSearch;
-  assert.equal(v.results[0].document_id, 'retained', mutation);
-  assert.equal(v.searching, false, mutation);
+  for (const hasPendingSearch of [false, true]) {
+    let finishSearch;
+    const item = { id: 'deleted', name: '采购复核', enabled: true, references: [] };
+    const v = view({ post: () => new Promise(resolve => { finishSearch = resolve; }) });
+    Object.assign(v, { searchQuery: '采购', entries: [item], documents: [item],
+      entryDeleteTarget: item, documentDeleteTarget: item, documentReferencesChecked: true,
+      results: [{ document_id: item.id }, { document_id: 'retained' }] });
+    const pendingSearch = hasPendingSearch ? v.search() : null;
+    if (hasPendingSearch) assert.equal(v.results.length, 0, 'a new search clears stale results');
+    await v[mutation](item);
+    if (hasPendingSearch) {
+      assert.equal(v.results.length, 0, mutation);
+      finishSearch({ items: [{ document_id: item.id }] });
+      await pendingSearch;
+      assert.equal(v.results.length, 0, 'a late search cannot restore removed or disabled content');
+    } else {
+      assert.equal(v.results.length, 1, mutation);
+      assert.equal(v.results[0].document_id, 'retained', mutation);
+    }
+    assert.equal(v.searching, false, mutation);
+  }
 }
 for (const [target, open, remove, close, deleting, error] of [
   ['entryDeleteTarget', 'openEntryDelete', 'removeEntry', 'closeEntryDelete', 'deletingEntry', 'entryDeleteError'],

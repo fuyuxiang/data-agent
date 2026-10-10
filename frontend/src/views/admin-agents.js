@@ -46,11 +46,15 @@ export const AgentBuilderView = {
       mcpServers: [],
       providers: [],
       loading: true,
+      loadError: '',
       editing: null,
       section: 'basic',
       saving: false,
+      publishing: false,
+      deleting: false,
       testLog: [],
       testing: false,
+      testVersion: 0,
       testQuestion: '',
       removeTarget: null,
     };
@@ -98,16 +102,20 @@ export const AgentBuilderView = {
       set(value) {
         if (!this.draft) return;
         this.draft.suggested_questions = String(value || '')
-          .split('\n').map(item => item.trim()).filter(Boolean).slice(0, 8);
+          .split('\n');
       },
     },
   },
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.testVersion += 1;
+  },
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const [agents, sources, skills, metrics, documents, mcp, providers, published] = await Promise.all([
           actions.get('/api/agents'),
@@ -129,7 +137,7 @@ export const AgentBuilderView = {
         // The workbench always receives the live configuration, never a draft.
         state.agents = copyConfiguration(published.items || []);
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -143,11 +151,13 @@ export const AgentBuilderView = {
       };
     },
     create() {
+      this.resetTest();
       this.editing = { ...this.blank(), isNew: true };
       this.section = 'basic';
       this.testLog = [];
     },
     edit(agent) {
+      this.resetTest();
       const configuration = copyConfiguration(agent);
       this.editing = {
         ...this.blank(),
@@ -162,6 +172,22 @@ export const AgentBuilderView = {
       };
       this.section = 'basic';
       this.testLog = [];
+    },
+    resetTest() {
+      this.testVersion += 1;
+      this.testing = false;
+      this.testQuestion = '';
+    },
+    closeEditor() {
+      if (this.saving || this.publishing) return;
+      this.resetTest();
+      this.editing = null;
+    },
+    testKeydown(event) {
+      if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        this.test();
+      }
     },
     toggle(list, id) {
       const index = list.indexOf(id);
@@ -178,11 +204,19 @@ export const AgentBuilderView = {
       return !agent.published_version || this.canPublish(agent);
     },
     async save({ silent = false } = {}) {
+      if (!this.editing || this.saving) return null;
+      if (!this.editing.name?.trim()) {
+        this.section = 'basic';
+        toast('请填写智能体名称', '信息未填完整', 'error');
+        return null;
+      }
       this.saving = true;
       try {
+        const payload = copyConfiguration(this.editing);
+        payload.suggested_questions = (payload.suggested_questions || []).map(item => item.trim()).filter(Boolean).slice(0, 8);
         const response = this.editing.isNew
-          ? await actions.post('/api/agents', this.editing)
-          : await actions.patch(`/api/agents/${this.editing.id}`, this.editing);
+          ? await actions.post('/api/agents', payload)
+          : await actions.patch(`/api/agents/${this.editing.id}`, payload);
         this.editing = { ...copyConfiguration(response.item), isNew: false };
         if (!silent) toast(response.item.published_version ? '草稿已保存，线上版本继续可用；发布后生效' : '智能体草稿已保存', '完成');
         await this.load();
@@ -195,8 +229,10 @@ export const AgentBuilderView = {
       }
     },
     async publish() {
-      if (!await this.save({ silent: true })) return;
+      if (this.publishing || this.saving || !this.editing) return;
+      this.publishing = true;
       try {
+        if (!await this.save({ silent: true })) return;
         await actions.post(`/api/agents/${this.editing.id}/publish`);
         toast('智能体已发布，用户端现在可以使用', '完成');
         await this.load();
@@ -204,9 +240,13 @@ export const AgentBuilderView = {
         if (refreshed) this.edit(refreshed);
       } catch (error) {
         toast(error.message, '发布失败', 'error');
+      } finally {
+        this.publishing = false;
       }
     },
     async remove(agent) {
+      if (!agent || this.deleting) return;
+      this.deleting = true;
       try {
         await actions.remove(`/api/agents/${agent.id}`);
         this.agents = this.agents.filter(item => item.id !== agent.id);
@@ -215,6 +255,8 @@ export const AgentBuilderView = {
         toast('智能体已删除', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+      } finally {
+        this.deleting = false;
       }
     },
     /** 使用当前表单配置创建真实分析任务，并显示它的结果。 */
@@ -222,8 +264,10 @@ export const AgentBuilderView = {
       const question = this.testQuestion.trim();
       if (!question || this.testing || !this.editing) return;
       this.testing = true;
+      const version = ++this.testVersion;
       this.testLog.push({ role: 'user', text: question });
       this.testQuestion = '';
+      let entry = null;
       try {
         const preview = copyConfiguration(this.editing);
         if (preview.source_scope_mode === 'authorized') {
@@ -235,7 +279,8 @@ export const AgentBuilderView = {
           agent_preview: preview,
           execution_mode: 'quick',
         });
-        const entry = {
+        if (version !== this.testVersion) return;
+        entry = {
           role: 'assistant',
           text: '正在使用当前配置分析…',
           runId: created.item.id,
@@ -244,10 +289,13 @@ export const AgentBuilderView = {
         this.testLog.push(entry);
         for (let attempt = 0; attempt < 30; attempt += 1) {
           await new Promise(resolve => setTimeout(resolve, 2000));
+          if (version !== this.testVersion) return;
           const detail = await actions.get(`/api/analyses/${entry.runId}`);
+          if (version !== this.testVersion) return;
           const run = detail.item || {};
           if (['finished', 'failed', 'cancelled'].includes(run.execution_status)) {
             const result = await actions.get(`/api/analyses/${entry.runId}/results`);
+            if (version !== this.testVersion) return;
             entry.text = result.manifest?.payload?.summary
               || (run.execution_status === 'finished' ? '分析已完成，请在对话中查看完整结果。'
                 : `分析未完成：${run.stop_reason || run.execution_status}`);
@@ -256,9 +304,13 @@ export const AgentBuilderView = {
         }
         entry.text = '任务仍在运行，可在对话中查看进度和结果。';
       } catch (error) {
-        this.testLog.push({ role: 'assistant', text: `测试失败：${error.message}` });
+        if (version === this.testVersion) {
+          if (entry) entry.text = `测试进度读取失败：${error.message}。可打开完整分析查看任务状态。`;
+          else this.testLog.push({ role: 'assistant', text: `测试失败：${error.message}` });
+          if (!this.testQuestion) this.testQuestion = question;
+        }
       } finally {
-        this.testing = false;
+        if (version === this.testVersion) this.testing = false;
       }
     },
   },
@@ -280,6 +332,8 @@ export const AgentBuilderView = {
       <div v-if="loading" class="grid grid--2">
         <div v-for="index in 4" :key="index" class="skeleton" style="height:150px"></div>
       </div>
+
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>智能体加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <EmptyState v-else-if="!agents.length" icon="robot" title="还没有智能体"
                   text="创建第一个智能体，绑定它需要的技能、数据和知识。" />
@@ -315,16 +369,16 @@ export const AgentBuilderView = {
       </div>
     </div>
 
-    <Modal :open="!!removeTarget" title="删除智能体" @close="removeTarget = null">
+    <Modal :open="!!removeTarget" size="small" title="删除智能体" @close="!deleting && (removeTarget = null)">
       <p>确定删除「{{ removeTarget?.name }}」吗？它将不再出现在智能体列表中，已有分析记录仍可查看。</p>
       <template #footer>
-        <button class="btn" @click="removeTarget = null">取消</button>
-        <button class="btn btn--danger" @click="remove(removeTarget)">删除</button>
+        <button class="btn" :disabled="deleting" @click="removeTarget = null">取消</button>
+        <button class="btn btn--danger" :disabled="deleting" @click="remove(removeTarget)">{{ deleting ? '删除中…' : '删除' }}</button>
       </template>
     </Modal>
 
-    <Modal :open="!!editing" :title="editing ? (editing.isNew ? '新建智能体' : editing.name) : ''" wide
-           @close="editing = null">
+    <Modal :open="!!editing" :title="editing ? (editing.isNew ? '新建智能体' : editing.name) : ''" size="editor"
+           @close="closeEditor">
       <div v-if="draft" class="builder">
         <nav class="builder__rail">
           <button v-for="item in sections" :key="item.key" class="admin__nav-item"
@@ -483,10 +537,10 @@ export const AgentBuilderView = {
                       @click="navigate('conversation', { id: item.sessionId })">查看完整分析</button>
             </div>
           </div>
-          <div class="row" style="margin-top:10px">
+          <div class="row" style="margin-top:10px;flex-wrap:nowrap">
             <input v-model="testQuestion" class="input input--sm" placeholder="测试问题"
-                   @keyup.enter="test" />
-            <button class="btn btn--primary btn--sm" :disabled="testing || !testQuestion.trim()" @click="test">
+                   aria-label="测试问题" @keydown="testKeydown" />
+            <button class="btn btn--primary btn--sm" aria-label="发送测试问题" :disabled="testing || !testQuestion.trim()" @click="test">
               <Icon name="send" :size="14" />
             </button>
           </div>
@@ -494,10 +548,10 @@ export const AgentBuilderView = {
       </div>
 
       <template #footer>
-        <button class="btn" @click="editing = null">关闭</button>
-        <button class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
-        <button v-if="!editing?.isNew && canPublish(editing)" class="btn btn--primary" :disabled="saving"
-                @click="publish">{{ editing?.published_version ? '发布新版本' : '发布' }}</button>
+        <button class="btn" :disabled="saving || publishing" @click="closeEditor">关闭</button>
+        <button class="btn" :disabled="saving || publishing" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+        <button v-if="!editing?.isNew && canPublish(editing)" class="btn btn--primary" :disabled="saving || publishing"
+                @click="publish">{{ publishing ? '发布中…' : editing?.published_version ? '发布新版本' : '发布' }}</button>
       </template>
     </Modal>`,
 };

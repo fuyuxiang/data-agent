@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,62 @@ MAX_COLUMNS = 500
 MAX_CELLS = 2_000_000
 MAX_DECODED_BYTES = 512 * 1024 * 1024
 MAX_VALUE_BYTES = 4 * 1024 * 1024
+MAX_INPUT_BYTES = 50 * 1024 * 1024
+
+
+def _finite_input_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Ignore nonfinite numeric samples while preserving textual business data."""
+    copied = False
+    for column in frame.select_dtypes(include=["number", "object"]).columns:
+        if pd.api.types.is_object_dtype(frame[column].dtype):
+            invalid = frame[column].map(
+                lambda value: pd.api.types.is_float(value) and not math.isfinite(value),
+            )
+        else:
+            invalid = frame[column].isin([math.inf, -math.inf])
+        if invalid.any():
+            if not copied:
+                frame = frame.copy()
+                copied = True
+            frame[column] = frame[column].mask(invalid, None)
+    return frame
+
+
+def _read_json_input(path: Path) -> pd.DataFrame:
+    """Decode exact result records without turning business strings into numbers."""
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON numeric value: {value}")
+
+    payload = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid bounded JSON result")
+    columns, records = payload.get("columns"), payload.get("data")
+    if (not isinstance(columns, list) or not all(isinstance(column, str) and column for column in columns)
+            or len(columns) != len(set(columns)) or len(columns) > MAX_COLUMNS
+            or not isinstance(records, list) or len(records) > MAX_ROWS
+            or len(records) * len(columns) > MAX_CELLS):
+        raise ValueError("invalid or oversized bounded JSON result")
+    names = set(columns)
+    if any(not isinstance(row, dict) or not set(row).issubset(names) for row in records):
+        raise ValueError("invalid bounded JSON result rows")
+    frame = pd.DataFrame(records, columns=columns, dtype=object)
+    for column in columns:
+        values = [value for value in frame[column] if value is not None]
+        if not values:
+            continue
+        # Mixed SQLite fields remain mixed. Only homogeneous native JSON
+        # numeric fields become numeric columns for reviewed statistical methods.
+        if all(isinstance(value, bool) for value in values):
+            frame[column] = pd.array(frame[column], dtype="boolean")
+        elif all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+            lower, upper = min(values), max(values)
+            if -(2**63) <= lower and upper < 2**63:
+                frame[column] = pd.array(frame[column], dtype="Int64")
+            elif 0 <= lower and upper < 2**64:
+                frame[column] = pd.array(frame[column], dtype="UInt64")
+        elif all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+            frame[column] = pd.array(frame[column], dtype="Float64")
+    return frame
 
 
 def _json_safe(value: Any) -> Any:
@@ -209,12 +266,17 @@ def main() -> int:
         raise ValueError("unsupported reviewed method or parameters")
     if not source.is_file() or source.is_symlink() or target.name != "result.parquet":
         raise ValueError("invalid analysis paths")
+    if source.stat().st_size > MAX_INPUT_BYTES:
+        raise ValueError("bounded input exceeds the file byte limit")
     if source.suffix == ".parquet":
         frame = pd.read_parquet(source)
     elif source.suffix == ".csv":
         frame = pd.read_csv(source)
+    elif source.suffix == ".json":
+        frame = _read_json_input(source)
     else:
         raise ValueError("unsupported bounded input")
+    frame = _finite_input_frame(frame)
     _validate_frame(frame, "input")
     result, metrics = _reviewed_method(frame, method, params)
     result = _parquet_safe_frame(result)

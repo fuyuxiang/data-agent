@@ -5,17 +5,21 @@
  * 所有后端调用集中在这里，页面只调用动作，不直接碰 fetch。
  */
 
-import { api, download, get, patch, post, rememberWorkspace, remove, withWorkspace } from './api.js';
+import { api, download, get, patch, post, put, rememberWorkspace, remove, withWorkspace } from './api.js';
 
 const { computed, reactive } = Vue;
 
 export const state = reactive({
+  // Only workspace data loading sets ready; authentication has its own flags.
   ready: false,
   authChecking: true,
   authRequired: false,
   authMode: 'login',
   authError: '',
   authNotice: '',
+  authSubmitting: false,
+  authCodeSending: false,
+  bootstrapError: '',
   bootstrapRequired: false,
   registrationOpen: false,
   emailCodeRequired: false,
@@ -103,6 +107,7 @@ export const readySources = computed(
 
 export async function bootstrap({ quiet = false } = {}) {
   if (!quiet) state.authChecking = true;
+  state.bootstrapError = '';
   try {
     const identity = await get('/api/auth/me');
     state.user = identity.user;
@@ -114,7 +119,8 @@ export async function bootstrap({ quiet = false } = {}) {
       state.authMode = identity.bootstrap_required
         ? 'bootstrap'
         : new URLSearchParams(location.search).has('invite') ? 'register' : 'login';
-      state.ready = true;
+      state.ready = false;
+      state.workspaceRole = '';
       return;
     }
     state.authRequired = false;
@@ -139,8 +145,10 @@ export async function bootstrap({ quiet = false } = {}) {
   } catch (error) {
     if (error?.status === 401) {
       state.authRequired = true;
-      state.ready = true;
+      state.ready = false;
+      state.workspaceRole = '';
     } else {
+      state.bootstrapError = error?.message || '工作空间暂时无法加载';
       fail(error);
     }
   } finally {
@@ -149,6 +157,8 @@ export async function bootstrap({ quiet = false } = {}) {
 }
 
 export async function submitAuth() {
+  if (state.authSubmitting) return;
+  state.authSubmitting = true;
   state.authError = '';
   state.authNotice = '';
   try {
@@ -173,16 +183,26 @@ export async function submitAuth() {
     }
     state.authRequired = false;
     state.authChecking = true;
+    state.ready = false;
+    state.workspaceRole = '';
     state.authForm.password = '';
     state.authForm.bootstrapToken = '';
     state.authForm.code = '';
     await bootstrap();
   } catch (error) {
     state.authError = error?.message || '认证失败';
+  } finally {
+    state.authSubmitting = false;
   }
 }
 
 export async function sendAuthCode() {
+  if (state.authCodeSending) return;
+  if (!state.authForm.email.trim()) {
+    state.authError = '请先填写企业邮箱';
+    return;
+  }
+  state.authCodeSending = true;
   state.authError = '';
   state.authNotice = '';
   try {
@@ -190,6 +210,8 @@ export async function sendAuthCode() {
     state.authNotice = response.message || '验证码已发送，请检查邮箱';
   } catch (error) {
     state.authError = error?.message || '验证码发送失败';
+  } finally {
+    state.authCodeSending = false;
   }
 }
 
@@ -199,6 +221,8 @@ export async function logout() {
   state.user = null;
   state.authRequired = true;
   state.authMode = 'login';
+  state.ready = false;
+  state.workspaceRole = '';
 }
 
 state.authForm = reactive({ email: '', name: '', username: '', password: '', bootstrapToken: '', code: '' });
@@ -245,6 +269,7 @@ export async function loadDemo() {
 export const actions = {
   get: (path) => get(path),
   post: (path, body) => post(path, body),
+  put: (path, body) => put(path, body),
   patch: (path, body) => patch(path, body),
   remove: (path, body) => remove(path, body),
   download,

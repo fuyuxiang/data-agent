@@ -14,6 +14,8 @@ import { actions, state, toast } from '../store.js';
 /** 技能编辑器用「每行一项」而不是多选框，触发场景和工具列表通常很长。 */
 const splitLines = (value) => String(value || '')
   .split('\n').map(item => item.trim()).filter(Boolean);
+const editingLines = value => String(value || '').split('\n');
+const editorSignature = editor => JSON.stringify(editor);
 
 const SECTION_TABS = [
   { key: 'basic', label: '基本信息', icon: 'fileText' },
@@ -41,9 +43,18 @@ export const SkillsView = {
       category: '',
       statusFilter: '',
       loading: true,
+      loadError: '',
       editor: null,
+      savedEditorSignature: '',
+      openingSkill: null,
+      detailLoading: false,
+      detailError: '',
       section: 'basic',
       saving: false,
+      publishing: false,
+      generating: false,
+      opening: 0,
+      testVersion: 0,
       aiOpen: false,
       aiPrompt: '',
       aiDraft: null,
@@ -68,44 +79,68 @@ export const SkillsView = {
     sectionTabs() {
       return SECTION_TABS;
     },
+    editorDirty() {
+      return !!this.editor && editorSignature(this.editor) !== this.savedEditorSignature;
+    },
     triggerText: {
       get() { return (this.editor?.triggers || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.triggers = splitLines(value); },
+      set(value) { if (this.editor) this.editor.triggers = editingLines(value); },
     },
     exampleText: {
       get() { return (this.editor?.example_questions || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.example_questions = splitLines(value); },
+      set(value) { if (this.editor) this.editor.example_questions = editingLines(value); },
     },
     resourceText: {
       get() { return (this.editor?.source_ids || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.source_ids = splitLines(value); },
+      set(value) { if (this.editor) this.editor.source_ids = editingLines(value); },
     },
     mcpText: {
       get() { return (this.editor?.mcp_server_ids || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.mcp_server_ids = splitLines(value); },
+      set(value) { if (this.editor) this.editor.mcp_server_ids = editingLines(value); },
     },
     toolText: {
       get() { return (this.editor?.allowed_tools || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.allowed_tools = splitLines(value); },
+      set(value) { if (this.editor) this.editor.allowed_tools = editingLines(value); },
     },
     inputText: {
       get() { return (this.editor?.inputs || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.inputs = splitLines(value); },
+      set(value) { if (this.editor) this.editor.inputs = editingLines(value); },
     },
     outputText: {
       get() { return (this.editor?.outputs || []).join('\n'); },
-      set(value) { if (this.editor) this.editor.outputs = splitLines(value); },
+      set(value) { if (this.editor) this.editor.outputs = editingLines(value); },
     },
   },
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.opening += 1;
+    this.testVersion += 1;
+  },
+  watch: {
+    testQuestion: {
+      flush: 'sync',
+      handler() { this.invalidateTest(); },
+    },
+    editor: {
+      deep: true,
+      flush: 'sync',
+      handler() { this.invalidateTest(); },
+    },
+  },
   methods: {
+    invalidateTest() {
+      this.testVersion += 1;
+      this.testing = false;
+      this.testResult = null;
+    },
     sourceHint() {
       return state.sources.map(item => item.id).join(String.fromCharCode(10));
     },
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/skills');
         this.items = response.items || [];
@@ -113,7 +148,7 @@ export const SkillsView = {
         this.categories = response.categories || [];
         this.canManage = !!response.can_manage;
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -126,27 +161,65 @@ export const SkillsView = {
       };
     },
     create() {
+      this.closeEditor();
       this.editor = { ...this.blank(), isNew: true };
       this.section = 'basic';
     },
     async open(skill) {
+      const opening = ++this.opening;
+      this.testVersion += 1;
+      this.testing = false;
+      this.editor = null;
+      this.openingSkill = skill;
+      this.detailLoading = true;
+      this.detailError = '';
       this.section = 'basic';
       this.testResult = null;
       this.testQuestion = (skill.example_questions || [])[0] || '';
       try {
         const response = await actions.get(`/api/skills/${skill.id}`);
+        if (opening !== this.opening) return;
         this.editor = { ...response.item, isNew: false };
+        this.savedEditorSignature = editorSignature(this.editor);
+        this.openingSkill = null;
       } catch (error) {
-        toast(error.message, '无法打开技能', 'error');
+        if (opening === this.opening) this.detailError = error.message;
+      } finally {
+        if (opening === this.opening) this.detailLoading = false;
       }
     },
+    closeEditor() {
+      if (this.saving || this.publishing) return;
+      this.opening += 1;
+      this.testVersion += 1;
+      this.testing = false;
+      this.testResult = null;
+      this.testQuestion = '';
+      this.editor = null;
+      this.savedEditorSignature = '';
+      this.openingSkill = null;
+      this.detailLoading = false;
+      this.detailError = '';
+    },
     async save({ silent = false } = {}) {
+      if (!this.editor || this.saving) return null;
+      if (!this.editor.name?.trim() || !this.editor.description?.trim()) {
+        this.section = 'basic';
+        toast('请填写技能名称和描述', '信息未填完整', 'error');
+        return null;
+      }
+      this.invalidateTest();
       this.saving = true;
       try {
+        const payload = { ...this.editor };
+        for (const key of ['triggers', 'example_questions', 'source_ids', 'mcp_server_ids', 'allowed_tools', 'inputs', 'outputs']) {
+          payload[key] = splitLines((payload[key] || []).join('\n'));
+        }
         const response = this.editor.isNew
-          ? await actions.post('/api/skills', this.editor)
-          : await actions.patch(`/api/skills/${this.editor.id}`, this.editor);
+          ? await actions.post('/api/skills', payload)
+          : await actions.patch(`/api/skills/${this.editor.id}`, payload);
         this.editor = { ...response.item, isNew: false };
+        this.savedEditorSignature = editorSignature(this.editor);
         if (!silent) toast('技能已保存', '完成');
         await this.load();
         return response.item;
@@ -158,14 +231,18 @@ export const SkillsView = {
       }
     },
     async publish() {
-      if (!await this.save({ silent: true })) return;
+      if (this.publishing || this.saving || !this.editor) return;
+      this.publishing = true;
       try {
+        if (!await this.save({ silent: true })) return;
         await actions.post(`/api/skills/${this.editor.id}/publish`);
         toast('技能已发布，可以被智能体绑定', '完成');
         await this.load();
         await this.open({ id: this.editor.id });
       } catch (error) {
         toast(error.message, '发布失败', 'error');
+      } finally {
+        this.publishing = false;
       }
     },
     async clone(skill) {
@@ -186,14 +263,21 @@ export const SkillsView = {
       }
     },
     async generate() {
+      if (this.generating || this.aiPrompt.trim().length < 8) return;
+      this.generating = true;
+      this.aiDraft = null;
       try {
         const response = await actions.post('/api/skills/generate', { description: this.aiPrompt });
         this.aiDraft = response.draft;
       } catch (error) {
         toast(error.message, '生成失败', 'error');
+      } finally {
+        this.generating = false;
       }
     },
     adoptDraft() {
+      this.closeEditor();
+      this.section = 'basic';
       this.editor = {
         ...this.blank(),
         ...this.aiDraft,
@@ -207,15 +291,25 @@ export const SkillsView = {
       this.aiPrompt = '';
     },
     async test() {
+      if (this.testing || !this.editor || this.editor.isNew || this.editorDirty || this.saving || this.publishing) return;
+      const editor = this.editor;
+      const signature = editorSignature(editor);
+      const question = this.testQuestion;
+      const version = ++this.testVersion;
+      const isCurrent = () => version === this.testVersion
+        && this.editor?.id === editor.id && editorSignature(this.editor) === signature
+        && this.testQuestion === question;
       this.testing = true;
+      this.testResult = null;
       try {
-        this.testResult = await actions.post(`/api/skills/${this.editor.id}/test`, {
-          question: this.testQuestion,
+        const result = await actions.post(`/api/skills/${editor.id}/test`, {
+          question,
         });
+        if (isCurrent()) this.testResult = result;
       } catch (error) {
-        toast(error.message, '测试失败', 'error');
+        if (isCurrent()) toast(error.message, '测试失败', 'error');
       } finally {
-        this.testing = false;
+        if (version === this.testVersion) this.testing = false;
       }
     },
     async exportPackage(skill) {
@@ -287,6 +381,8 @@ export const SkillsView = {
         <div v-for="index in 6" :key="index" class="skeleton" style="height:180px"></div>
       </div>
 
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>技能加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+
       <EmptyState v-else-if="!filtered.length" icon="layers" title="没有匹配的技能"
                   text="调整筛选条件，或新建一个技能。" />
 
@@ -325,7 +421,7 @@ export const SkillsView = {
       </div>
     </div>
 
-    <Modal :open="aiOpen" title="用一句话创建技能" @close="aiOpen = false">
+    <Modal :open="aiOpen" title="用一句话创建技能" @close="!generating && (aiOpen = false)">
       <p class="small muted" style="margin-bottom:12px">
         描述这个技能要完成什么任务，系统会生成名称、说明、触发场景、示例问题和所需能力，保存前你可以自由修改。
       </p>
@@ -350,17 +446,19 @@ export const SkillsView = {
       </div>
 
       <template #footer>
-        <button class="btn" @click="aiOpen = false">取消</button>
-        <button v-if="aiDraft" class="btn" @click="aiDraft = null; generate()">重新生成</button>
-        <button v-else class="btn btn--primary" :disabled="aiPrompt.trim().length < 8" @click="generate">
-          生成草稿
+        <button class="btn" :disabled="generating" @click="aiOpen = false">取消</button>
+        <button v-if="aiDraft" class="btn" :disabled="generating" @click="generate">重新生成</button>
+        <button v-else class="btn btn--primary" :disabled="generating || aiPrompt.trim().length < 8" @click="generate">
+          {{ generating ? '生成中…' : '生成草稿' }}
         </button>
         <button v-if="aiDraft" class="btn btn--primary" @click="adoptDraft">载入到编辑器</button>
       </template>
     </Modal>
 
-    <Modal :open="!!editor" :title="editor ? (editor.isNew ? '新建技能' : editor.name) : ''" wide
-           @close="editor = null">
+    <Modal :open="!!editor || !!openingSkill" :title="editor ? (editor.isNew ? '新建技能' : editor.name) : openingSkill?.name || '技能详情'" size="editor"
+           @close="closeEditor">
+      <div v-if="detailLoading" class="stack"><p class="small muted" role="status">正在读取技能配置…</p><div class="skeleton" style="height:120px"></div></div>
+      <div v-else-if="detailError" class="stack"><p role="alert" class="small" style="color:var(--danger)">{{ detailError }}</p><button class="btn btn--sm" @click="open(openingSkill)">重试</button></div>
       <div v-if="editor" class="builder">
         <nav class="builder__rail">
           <button v-for="tab in sectionTabs" :key="tab.key" class="admin__nav-item"
@@ -369,7 +467,7 @@ export const SkillsView = {
           </button>
         </nav>
 
-        <div class="stack">
+        <fieldset class="stack" :disabled="saving || publishing || (!editor.isNew && !editor.editable)" style="border:0;padding:0;margin:0;min-width:0">
           <template v-if="section === 'basic'">
             <label class="field"><span>名称<em> *</em></span>
               <input v-model.trim="editor.name" class="input" placeholder="门店经营分析" /></label>
@@ -425,17 +523,18 @@ export const SkillsView = {
               <dt>状态</dt><dd>{{ editor.status }}</dd>
             </dl>
           </template>
-        </div>
+        </fieldset>
 
         <aside class="builder__test">
           <h3 class="card__title" style="margin-bottom:6px">配置与命中测试</h3>
-          <p class="xs faint" style="margin-bottom:10px">用一个问题验证这个技能能不能被正确选中。</p>
+          <p class="xs faint" style="margin-bottom:10px">校验已保存的配置，并用问题检查技能命中。编辑后请先保存。</p>
           <div class="stack" style="display:flex;flex-direction:column;gap:10px">
             <textarea v-model="testQuestion" class="textarea" rows="3" placeholder="输入一个测试问题"></textarea>
-            <button class="btn btn--primary btn--sm" :disabled="testing || editor.isNew" @click="test">
+            <button class="btn btn--primary btn--sm" :disabled="testing || saving || publishing || editor.isNew || editorDirty" @click="test">
               <Icon name="play" :size="14" />{{ testing ? '测试中…' : '校验配置' }}
             </button>
             <p v-if="editor.isNew" class="xs faint">先保存技能，才能运行测试。</p>
+            <p v-else-if="editorDirty" class="xs faint">{{ editor.editable ? '配置已修改，请先保存再运行测试。' : '配置已修改，请重新打开已保存的技能再运行测试。' }}</p>
 
             <div v-if="testResult" class="stack" style="display:flex;flex-direction:column;gap:8px">
               <span class="badge" :class="testResult.evaluation.passed ? 'badge--success' : 'badge--danger'">
@@ -459,10 +558,10 @@ export const SkillsView = {
       </div>
 
       <template #footer>
-        <button class="btn" @click="editor = null">关闭</button>
-        <button v-if="editor?.isNew || editor?.editable" class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+        <button class="btn" :disabled="saving || publishing" @click="closeEditor">关闭</button>
+        <button v-if="editor?.isNew || editor?.editable" class="btn" :disabled="saving || publishing" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
         <button v-if="!editor?.isNew && editor?.editable && editor?.status !== 'published'"
-                class="btn btn--primary" @click="publish">发布</button>
+                class="btn btn--primary" :disabled="saving || publishing" @click="publish">{{ publishing ? '发布中…' : '发布' }}</button>
       </template>
     </Modal>`,
 };

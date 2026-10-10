@@ -16,6 +16,9 @@ const STATUS_LABELS = {
   active: '使用中',
   configured: '已配置',
   connected: '已连接',
+  online: '在线',
+  offline: '离线',
+  error: '异常',
   running: '运行中',
   queued: '排队中',
   waiting_input: '待确认',
@@ -56,34 +59,77 @@ export const Status = {
 
 /* ------------------------------------------------------------------ 弹窗 */
 
-function useDismissable(open, close, root) {
+const dismissableStack = [];
+let bodyOverflow = '';
+let bodyPadding = '';
+
+/** Only the topmost layer owns keyboard/focus; background scroll resumes after the last closes. */
+export function useDismissable(open, close, root) {
   let previous = null;
+  let generation = 0;
+  const layer = {};
+  const focusable = () => [...(root.value?.querySelectorAll(
+    'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex]',
+  ) || [])].filter(item => item.tabIndex >= 0 && item.getClientRects().length && !item.closest('[inert]'));
+  const isTop = () => dismissableStack.at(-1) === layer;
+  function release() {
+    generation += 1;
+    document.removeEventListener('keydown', onKeydown, true);
+    document.removeEventListener('focusin', onFocus, true);
+    const index = dismissableStack.indexOf(layer);
+    if (index < 0) return false;
+    const wasTop = isTop();
+    dismissableStack.splice(index, 1);
+    if (!dismissableStack.length) {
+      document.body.style.overflow = bodyOverflow;
+      document.body.style.paddingInlineEnd = bodyPadding;
+    }
+    return wasTop;
+  }
   watch(open, async (value) => {
     if (value) {
       previous = document.activeElement;
+      const current = ++generation;
       await nextTick();
+      if (current !== generation || !open.value || !root.value) return;
+      if (!dismissableStack.length) {
+        bodyOverflow = document.body.style.overflow;
+        bodyPadding = document.body.style.paddingInlineEnd;
+        const scrollbar = innerWidth - document.documentElement.clientWidth;
+        if (scrollbar > 0) document.body.style.paddingInlineEnd = `${parseFloat(getComputedStyle(document.body).paddingInlineEnd) + scrollbar}px`;
+        document.body.style.overflow = 'hidden';
+      }
+      dismissableStack.push(layer);
       const target = root.value;
-      target?.querySelector('[autofocus], input, textarea, select, button')?.focus();
       document.addEventListener('keydown', onKeydown, true);
+      document.addEventListener('focusin', onFocus, true);
+      const items = focusable();
+      (items.find(item => item.hasAttribute('autofocus')) ||
+        items.find(item => ['INPUT', 'TEXTAREA', 'SELECT'].includes(item.tagName)) || items[0] || target).focus();
     } else {
-      document.removeEventListener('keydown', onKeydown, true);
-      if (previous?.isConnected) {
+      const wasTop = release();
+      if (wasTop && previous?.isConnected) {
         await nextTick();
         previous?.focus();
       }
       previous = null;
     }
-  });
+  }, { immediate: true });
+  function onFocus(event) {
+    if (isTop() && root.value && !root.value.contains(event.target)) {
+      (focusable()[0] || root.value).focus();
+    }
+  }
   function onKeydown(event) {
+    if (!isTop() || event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {
-      event.stopPropagation();
+      event.preventDefault();
+      event.stopImmediatePropagation();
       close();
       return;
     }
     if (event.key !== 'Tab') return;
-    const items = [...(root.value?.querySelectorAll(
-      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]',
-    ) || [])];
+    const items = focusable();
     if (!items.length) {
       event.preventDefault();
       return;
@@ -96,13 +142,16 @@ function useDismissable(open, close, root) {
       items[0].focus();
     }
   }
-  onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown, true));
+  onBeforeUnmount(() => {
+    const wasTop = release();
+    if (wasTop && previous?.isConnected) previous.focus();
+  });
 }
 
 export const Modal = {
   name: 'Modal',
   components: { Icon },
-  props: { open: Boolean, title: String, wide: Boolean },
+  props: { open: Boolean, title: String, wide: Boolean, size: { type: String, default: 'medium' } },
   emits: ['close'],
   setup(props, { emit }) {
     const root = ref(null);
@@ -113,7 +162,7 @@ export const Modal = {
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="open" class="overlay overlay--center" @mousedown.self="$emit('close')">
-          <section ref="root" class="modal" :class="{ 'modal--wide': wide }"
+          <section ref="root" class="modal" :class="{ 'modal--wide': wide }" :data-size="size"
                    role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
             <header class="modal__head">
               <h2>{{ title }}</h2>
@@ -163,9 +212,9 @@ export const Drawer = {
 export const EmptyState = {
   name: 'EmptyState',
   components: { Icon },
-  props: { icon: { default: 'file' }, title: String, text: String },
+  props: { icon: { default: 'file' }, title: String, text: String, compact: Boolean },
   template: `
-    <div class="empty">
+    <div class="empty" :class="{ 'empty--compact': compact }">
       <span class="empty__icon"><Icon :name="icon" :size="22" /></span>
       <h3>{{ title }}</h3>
       <p v-if="text">{{ text }}</p>
@@ -196,6 +245,9 @@ export const DataTable = {
       if (this.columns.length) return this.columns;
       return this.rows[0] ? Object.keys(this.rows[0]) : [];
     },
+    numericColumns() {
+      return new Set(this.shownColumns.filter(column => this.numeric(column)).map(column => this.key(column)));
+    },
   },
   methods: {
     key(column) { return typeof column === 'string' ? column : column.key; },
@@ -214,23 +266,26 @@ export const DataTable = {
       if (typeof value === 'object') return JSON.stringify(value);
       return String(value);
     },
+    date(value) {
+      return typeof value === 'string' && /^\d{4}[-/]\d{2}[-/]\d{2}(?:[T ][\d:.+Z-]+)?$/.test(value);
+    },
   },
   template: `
     <div v-if="!rows.length" class="empty" style="padding:24px">
       <p class="small">{{ empty || '暂无数据' }}</p>
     </div>
-    <div v-else class="table-wrap" :style="{ maxHeight }">
+    <div v-else class="table-wrap" :style="{ maxHeight }" tabindex="0" role="region" aria-label="数据明细，可滚动查看">
       <table class="table">
         <thead><tr>
-          <th v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numeric(column) }">
+          <th v-for="column in shownColumns" :key="key(column)" :class="{ 'is-numeric': numericColumns.has(key(column)) }" scope="col">
             {{ label(column) }}
           </th>
         </tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="index">
             <td v-for="column in shownColumns" :key="key(column)"
-                :class="{ 'is-numeric': numeric(column) }"
-                :title="format(row[key(column)])">{{ format(row[key(column)]) }}</td>
+                :class="{ 'is-numeric': numericColumns.has(key(column)) }"
+                :title="format(row[key(column)])"><span class="table__value" :class="{ 'is-date': date(row[key(column)]) }">{{ format(row[key(column)]) }}</span></td>
           </tr>
         </tbody>
       </table>
@@ -278,9 +333,22 @@ export const Tabs = {
   name: 'Tabs',
   props: { modelValue: String, items: { type: Array, default: () => [] } },
   emits: ['update:modelValue'],
+  methods: {
+    onKeydown(event, index) {
+      const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      const count = this.items.length;
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? count - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + count) % count;
+      this.$emit('update:modelValue', this.items[next].key);
+      this.$el.querySelectorAll('[role="tab"]')[next]?.focus();
+    },
+  },
   template: `
     <div class="tabs" role="tablist">
-      <button v-for="item in items" :key="item.key" role="tab"
+      <button v-for="(item, index) in items" :key="item.key" role="tab" type="button"
+              :tabindex="item.key === modelValue ? 0 : -1" @keydown="onKeydown($event, index)"
               :aria-selected="item.key === modelValue"
               :class="{ active: item.key === modelValue }"
               @click="$emit('update:modelValue', item.key)">
@@ -308,7 +376,7 @@ export const SearchInput = {
   template: `
     <label class="search-field">
       <Icon name="search" :size="15" />
-      <input class="input input--sm" :value="modelValue" :placeholder="placeholder"
+      <input class="input input--sm" :value="modelValue" :placeholder="placeholder" :aria-label="placeholder"
              @input="$emit('update:modelValue', $event.target.value)"
              @keyup.enter="$emit('search')" />
     </label>`,

@@ -27,9 +27,10 @@ export const UsersView = {
   },
   data() {
     return {
-      members: [], loading: true, inviteOpen: false,
+      members: [], loading: true, loadError: '', inviteOpen: false,
       invite: { email: '', role: 'analyst' }, inviteMode: 'new', invitationUrl: '',
       busy: false, tab: 'members',
+      memberBusy: {},
     };
   },
   async mounted() {
@@ -52,17 +53,22 @@ export const UsersView = {
     },
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get(`/api/workspaces/${state.workspaceId}/members`);
         this.members = response.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
     },
     async inviteMember() {
       if (!this.invite.email || this.busy) return;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.invite.email)) {
+        toast('请填写有效邮箱地址', '邮箱格式不正确', 'error');
+        return;
+      }
       this.busy = true;
       try {
         if (this.inviteMode === 'new') {
@@ -92,22 +98,31 @@ export const UsersView = {
         toast('请选中链接手动复制', '复制失败', 'error');
       }
     },
-    async changeRole(member, role) {
+    async changeRole(member, role, input) {
+      if (this.memberBusy[member.user_id]) return;
+      this.memberBusy[member.user_id] = true;
       try {
         await actions.patch(`/api/workspaces/${state.workspaceId}/members/${member.user_id}`, { role });
         member.role = role;
         toast('角色已更新', '完成');
       } catch (error) {
+        if (input) input.value = member.role;
         toast(error.message, '更新失败', 'error');
+      } finally {
+        delete this.memberBusy[member.user_id];
       }
     },
     async remove(member) {
+      if (this.memberBusy[member.user_id]) return;
+      this.memberBusy[member.user_id] = true;
       try {
         await actions.remove(`/api/workspaces/${state.workspaceId}/members/${member.user_id}`);
         this.members = this.members.filter(item => item.user_id !== member.user_id);
         toast('成员已移除', '完成');
       } catch (error) {
         toast(error.message, '移除失败', 'error');
+      } finally {
+        delete this.memberBusy[member.user_id];
       }
     },
   },
@@ -139,28 +154,29 @@ export const UsersView = {
         <div class="card__head">
           <div class="grow">
             <h2 class="card__title">成员</h2>
-            <p class="card__hint">{{ members.length }} 位成员</p>
+            <p v-if="!loading && !loadError" class="card__hint">{{ members.length }} 位成员</p>
           </div>
         </div>
         <div v-if="loading" class="stack">
           <div v-for="index in 3" :key="index" class="skeleton" style="height:44px"></div>
         </div>
-        <EmptyState v-else-if="!members.length" icon="users" title="还没有其他成员"
+        <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>成员列表加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+        <EmptyState v-else-if="!members.length" compact icon="users" title="还没有其他成员"
                     text="邀请同事加入，他们只能看到自己有权限的数据、指标和成果。" />
         <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
           <div v-for="member in members" :key="member.user_id" class="card row row--between"
                style="padding:12px 14px">
-            <div>
+            <div class="grow">
               <b>{{ member.name || member.username || member.email }}</b>
               <p class="small muted">{{ member.email || member.user_id }}</p>
             </div>
             <div class="row" style="gap:8px">
               <select v-if="state.workspaceRole === 'owner'" class="select input--sm" style="width:120px" :value="member.role"
-                      @change="changeRole(member, $event.target.value)">
+                      :disabled="memberBusy[member.user_id]" :aria-label="'修改' + (member.name || member.email) + '的角色'" @change="changeRole(member, $event.target.value, $event.target)">
                 <option v-for="role in roles" :key="role.key" :value="role.key">{{ role.label }}</option>
               </select>
               <span v-else class="badge">{{ roleLabel(member.role) }}</span>
-              <button v-if="state.workspaceRole === 'owner'" class="icon-btn icon-btn--danger" aria-label="移除成员" @click="remove(member)">
+              <button v-if="state.workspaceRole === 'owner'" :disabled="memberBusy[member.user_id]" class="icon-btn icon-btn--danger" aria-label="移除成员" @click="remove(member)">
                 <Icon name="trash" :size="15" />
               </button>
             </div>
@@ -169,7 +185,7 @@ export const UsersView = {
       </div>
     </div>
 
-    <Modal :open="inviteOpen" :title="invitationUrl ? '注册链接' : '添加用户'" @close="closeInvite">
+    <Modal :open="inviteOpen" size="small" :title="invitationUrl ? '注册链接' : '添加用户'" @close="closeInvite">
       <div v-if="invitationUrl" class="stack">
         <p class="small">链接在 24 小时内有效。请复制并发给对方；对方打开后使用受邀邮箱设置账号和密码。</p>
         <input class="input" :value="invitationUrl" readonly aria-label="注册链接"
@@ -211,10 +227,14 @@ export const UsersView = {
 
 const RETENTION = [
   { key: 'forever', label: '永久保留' },
+  { key: '7', label: '7 天' },
+  { key: '14', label: '14 天' },
   { key: '30d', label: '30 天' },
   { key: '90d', label: '90 天' },
   { key: '180d', label: '180 天' },
+  { key: 'custom', label: '自定义' },
 ];
+const RETENTION_DAYS = { '30d': 30, '90d': 90, '180d': 180 };
 
 export const SystemSettingsView = {
   name: 'SystemSettingsView',
@@ -223,7 +243,7 @@ export const SystemSettingsView = {
     return { navigate, state, toast };
   },
   data() {
-    return { tab: 'storage', settings: null, audit: [], usage: null, loading: true, trash: [] };
+    return { tab: 'storage', settings: null, retentionChoice: 'forever', audit: [], usage: null, loading: true, loadError: '', saving: false, trash: [] };
   },
   async mounted() {
     await this.load();
@@ -231,25 +251,62 @@ export const SystemSettingsView = {
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const [settings, audit] = await Promise.all([
           actions.get('/api/lifecycle/settings'),
           actions.get('/api/audit?limit=200'),
         ]);
-        this.settings = settings.settings || {};
+        this.applySettings(settings.settings || {});
         this.audit = audit.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
     },
-    async save() {
+    applySettings(settings, choice = '') {
+      this.settings = { ...settings };
+      this.retentionChoice = choice === 'custom' && settings.retention_preset === 'custom'
+        ? 'custom'
+        : settings.retention_preset === 'custom'
+          ? Object.keys(RETENTION_DAYS).find(key => RETENTION_DAYS[key] === settings.retention_custom_days) || 'custom'
+          : settings.retention_preset;
+    },
+    selectRetention(choice) {
+      if (this.saving || !this.settings) return;
+      this.retentionChoice = choice;
+      this.settings.retention_preset = RETENTION_DAYS[choice] ? 'custom' : choice;
+      if (RETENTION_DAYS[choice]) this.settings.retention_custom_days = RETENTION_DAYS[choice];
+    },
+    auditTime(value) {
+      if (!value) return '—';
       try {
-        await actions.patch('/api/lifecycle/settings', this.settings);
+        return new Intl.DateTimeFormat('zh-CN', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hourCycle: 'h23', timeZoneName: 'shortOffset',
+        }).format(new Date(value));
+      } catch {
+        return String(value);
+      }
+    },
+    async save() {
+      if (this.saving || !this.settings) return;
+      if (this.settings.retention_preset === 'custom'
+          && (!Number.isInteger(this.settings.retention_custom_days) || this.settings.retention_custom_days < 1 || this.settings.retention_custom_days > 3650)) {
+        toast('请输入 1 至 3650 之间的整数', '保留天数不正确', 'error');
+        return;
+      }
+      this.saving = true;
+      try {
+        const response = await actions.put('/api/lifecycle/settings', { ...this.settings });
+        this.applySettings(response.settings, this.retentionChoice);
         toast('设置已保存', '完成');
       } catch (error) {
         toast(error.message, '保存失败', 'error');
+      } finally {
+        this.saving = false;
       }
     },
   },
@@ -265,29 +322,32 @@ export const SystemSettingsView = {
 
       <Tabs v-model="tab" :items="[
         { key: 'storage', label: '数据保留' },
-        { key: 'audit', label: '审计日志', count: audit.length },
+        { key: 'audit', label: '审计日志', count: loading || loadError ? null : audit.length },
       ]" />
 
       <div v-if="loading" class="stack">
         <div v-for="index in 3" :key="index" class="skeleton" style="height:80px"></div>
       </div>
 
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>系统设置加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+
       <div v-else-if="tab === 'storage' && settings" class="card" style="margin-top:18px">
         <h2 class="card__title" style="margin-bottom:4px">成果与会话保留</h2>
         <p class="card__hint" style="margin-bottom:14px">
-          到期后进入回收站，仍可恢复；只有显式确认才会永久清除。
+          按最后活动或保存时间计算，服务每分钟检查。执行中或待继续的分析不会回收；
+          到期内容进入回收站，仍可恢复，只有显式确认才会永久清除。
         </p>
         <div class="chip-group">
           <button v-for="option in retentionOptions" :key="option.key" class="chip"
-                  :class="{ active: settings.retention_preset === option.key }"
-                  @click="settings.retention_preset = option.key">{{ option.label }}</button>
+                  :class="{ active: retentionChoice === option.key }" :disabled="saving"
+                  @click="selectRetention(option.key)">{{ option.label }}</button>
         </div>
-        <label v-if="settings.retention_preset === 'custom'" class="field" style="margin-top:12px;width:180px">
+        <label v-if="retentionChoice === 'custom'" class="field" style="margin-top:12px;width:180px">
           <span>保留天数</span>
-          <input type="number" v-model.number="settings.retention_custom_days" min="1" max="3650" class="input" />
+          <input type="number" v-model.number="settings.retention_custom_days" :disabled="saving" min="1" max="3650" class="input" />
         </label>
         <div class="row" style="margin-top:16px">
-          <button class="btn btn--primary btn--sm" @click="save">保存设置</button>
+          <button class="btn btn--primary btn--sm" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存设置' }}</button>
         </div>
       </div>
 
@@ -302,7 +362,7 @@ export const SystemSettingsView = {
               <b class="small">{{ item.event_type }}</b>
               <div class="xs faint">{{ item.object_type }} · {{ item.actor || 'system' }}</div>
             </div>
-            <span class="timeline__time">{{ item.created_at }}</span>
+            <time class="timeline__time" :datetime="item.created_at" :title="item.created_at">{{ auditTime(item.created_at) }}</time>
           </div>
         </div>
       </div>

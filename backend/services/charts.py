@@ -204,7 +204,7 @@ def select_charts(user_intent: str, available_columns: list[str] | None = None, 
 def _safe_value(value: Any) -> Any:
     if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, np.floating):
+    if isinstance(value, (float, np.floating)):
         return None if not np.isfinite(value) else float(value)
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
@@ -252,9 +252,9 @@ def _base(title: str, *, category_axis: bool = True) -> dict:
     return option
 
 
-def _quantiles(values: list[float]) -> list[float]:
+def _quantiles(values: list[float]) -> list[float | None]:
     if not values:
-        return [0, 0, 0, 0, 0]
+        return [None, None, None, None, None]
     return [float(np.quantile(values, value)) for value in (0, 0.25, 0.5, 0.75, 1)]
 
 
@@ -278,9 +278,14 @@ def _xy_data(data: pd.DataFrame, x: str, y: str) -> list[list[Any]]:
     ]
 
 
-def _number(value: Any, default: float = 0.0) -> float:
+def _number(value: Any, default: float | None = None) -> float | None:
     converted = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    return default if pd.isna(converted) else float(converted)
+    return default if pd.isna(converted) or not np.isfinite(converted) else float(converted)
+
+
+def _color_range(values: list[float]) -> dict[str, float]:
+    # 没有样本时也提供有效色域；负值不应被固定的零下界压成同一种颜色。
+    return {"min": min([0.0, *values]), "max": max([1.0, *values])}
 
 
 def _standard_option(
@@ -419,6 +424,11 @@ def _distribution_option(data: pd.DataFrame, kind: str, title: str, x: str, ys: 
     }
     if kind == "histogram":
         values = values_by_column[columns[0]]
+        if not values:
+            option = _base(title)
+            option["xAxis"]["data"] = []
+            option["series"] = [{"name": "频数", "type": "bar", "data": []}]
+            return option
         counts, edges = np.histogram(values, bins=min(30, max(5, round(math.sqrt(len(values))))))
         option = _base(title)
         option["xAxis"]["data"] = [f"{edges[index]:.3g}–{edges[index + 1]:.3g}" for index in range(len(counts))]
@@ -656,19 +666,20 @@ def _relationship_option(
             raise ValueError("热力图需要两个分类字段和一个数值字段")
         x_values = list(dict.fromkeys(str(value) for value in data[columns[0]].tolist()))
         y_values = list(dict.fromkeys(str(value) for value in data[columns[1]].tolist()))
-        values = [
-            [
+        values = []
+        for _, row in data.iterrows():
+            value = _number(row[columns[2]])
+            if value is None:
+                continue
+            values.append([
                 x_values.index(str(row[columns[0]])),
                 y_values.index(str(row[columns[1]])),
-                _number(row[columns[2]]),
-            ]
-            for _, row in data.iterrows()
-        ]
-        maximum = max([value[2] for value in values] or [1])
+                value,
+            ])
         option = _base(title)
         option.update({
             "xAxis": {"type": "category", "data": x_values}, "yAxis": {"type": "category", "data": y_values},
-            "visualMap": {"min": 0, "max": maximum, "calculable": True, "orient": "horizontal", "left": "center", "bottom": 0},
+            "visualMap": {**_color_range([value[2] for value in values]), "calculable": True, "orient": "horizontal", "left": "center", "bottom": 0},
             "series": [{"type": "heatmap", "data": values}],
         })
         return option
@@ -729,15 +740,16 @@ def _composition_option(
     data: pd.DataFrame, kind: str, title: str, x: str, ys: list[str], options: dict, group: str | None,
 ) -> dict:
     y = ys[0]
-    values = pd.to_numeric(data[y], errors="coerce").fillna(0).astype(float).tolist()
+    values = [_number(value) for value in data[y]]
     names = [str(value) for value in data[x].tolist()]
     items = [{"name": name, "value": value} for name, value in zip(names, values)]
     if kind == "gauge":
-        maximum = float(options.get("max") or max(values or [100]) or 100)
-        return {"title": {"text": title}, "series": [{"type": "gauge", "max": maximum, "progress": {"show": True}, "detail": {"valueAnimation": True}, "data": items[:1]}]}
+        numeric = [value for value in values if value is not None]
+        maximum = float(options.get("max") or (max([1.0, *numeric]) if numeric else 100))
+        return {"title": {"text": title}, "series": [{"type": "gauge", "min": min([0.0, *numeric]), "max": maximum, "progress": {"show": True}, "detail": {"valueAnimation": True}, "data": items[:1]}]}
     if kind == "pyramid" and len(ys) >= 2:
-        left = [-abs(value) for value in pd.to_numeric(data[ys[0]], errors="coerce").fillna(0).astype(float)]
-        right = [abs(value) for value in pd.to_numeric(data[ys[1]], errors="coerce").fillna(0).astype(float)]
+        left = [None if (value := _number(raw)) is None else -abs(value) for raw in data[ys[0]]]
+        right = [None if (value := _number(raw)) is None else abs(value) for raw in data[ys[1]]]
         return {
             "title": {"text": title}, "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "value", "axisLabel": {"formatter": "{value}"}},
@@ -764,10 +776,12 @@ def _composition_option(
             items = roots
         return {"title": {"text": title}, "tooltip": {}, "series": [{"type": kind, "data": items, "radius": ["10%", "78%"]}]}
     if kind == "waffle":
-        total = sum(max(0, value) for value in values) or 1
+        total = sum(max(0, value) for value in values if value is not None) or 1
         points = []
         cursor = 0
         for name, value in zip(names, values):
+            if value is None:
+                continue
             count = round(max(0, value) / total * 100)
             points.extend({"name": name, "value": [index % 10, index // 10, value]} for index in range(cursor, min(100, cursor + count)))
             cursor += count
@@ -786,8 +800,8 @@ def _composition_option(
             ],
         }
     if kind == "marimekko":
-        total = sum(max(value, 0) for value in values) or 1
-        widths = [max(value, 0) / total * 100 for value in values]
+        total = sum(max(value, 0) for value in values if value is not None) or 1
+        widths = [None if value is None else max(value, 0) / total * 100 for value in values]
         # 单指标时，100% 宽度马赛克等价于按占比排列的累积条。
         return {
             "title": {"text": title}, "tooltip": {"trigger": "item"},
@@ -796,7 +810,7 @@ def _composition_option(
             "series": [
                 {
                     "name": name, "type": "bar", "stack": "mosaic", "data": [width],
-                    "label": {"show": width >= 6, "formatter": f"{name}\n{width:.1f}%"},
+                    "label": {"show": width is not None and width >= 6, "formatter": f"{name}\n{width:.1f}%" if width is not None else name},
                 }
                 for name, width in zip(names, widths)
             ],
@@ -830,11 +844,11 @@ def _special_option(data: pd.DataFrame, kind: str, title: str, x: str, ys: list[
     if kind == "calendar":
         dates = pd.to_datetime(data[x], errors="coerce")
         year = int(dates.dropna().iloc[0].year) if dates.notna().any() else pd.Timestamp.now().year
-        values = pd.to_numeric(data[ys[0]], errors="coerce").fillna(0)
-        points = [[date.strftime("%Y-%m-%d"), float(value)] for date, value in zip(dates, values) if pd.notna(date)]
+        values = [_number(value) for value in data[ys[0]]]
+        points = [[date.strftime("%Y-%m-%d"), value] for date, value in zip(dates, values) if pd.notna(date) and value is not None]
         return {
             "title": {"text": title}, "tooltip": {},
-            "visualMap": {"min": float(values.min()), "max": float(values.max()) or 1, "orient": "horizontal", "left": "center", "bottom": 0},
+            "visualMap": {**_color_range([point[1] for point in points]), "orient": "horizontal", "left": "center", "bottom": 0},
             "calendar": {"range": year, "cellSize": ["auto", 18]},
             "series": [{"type": "heatmap", "coordinateSystem": "calendar", "data": points}],
         }

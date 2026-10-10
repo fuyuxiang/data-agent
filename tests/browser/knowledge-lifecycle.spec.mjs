@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 function card(page, name) {
-  return page.locator('.view article.card').filter({ has: page.getByText(name, { exact: true }) });
+  return page.locator('.view article.card, .view article.knowledge-entry').filter({ has: page.getByText(name, { exact: true }) });
 }
 
 async function uploadDocument(page, name, content) {

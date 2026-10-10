@@ -31,6 +31,7 @@ from .security import SecretVault, safe_http_request, validate_outbound_host, va
 from .authorization import actor_role, require_sources_access
 from .data_policy import effective_policy, filter_frame, policy_fingerprint, reject_denied_columns, rewrite_database_sql
 from .sql_security import bounded_read_only_sql, validate_query_tables, validate_read_only_sql
+from .query_results import normalize_result_columns, read_result_frame, write_result_frame
 
 
 SUPPORTED_FILE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet"}
@@ -105,7 +106,7 @@ def _json_safe(value: Any) -> Any:
         return None
     if isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.floating,)):
+    if isinstance(value, (float, np.floating)):
         return None if np.isnan(value) or np.isinf(value) else float(value)
     if isinstance(value, (np.bool_,)):
         return bool(value)
@@ -1348,12 +1349,13 @@ def execute_query(
     system_truncated = len(frame) > limit
     if system_truncated:
         frame = frame.head(limit).copy()
+    frame = normalize_result_columns(frame)
     _enforce_result_size(frame)
     source_partial = any(source.get("ingestion_completeness") == "partial" for source in sources)
     completeness = "system_truncated" if system_truncated else "source_partial" if source_partial else "complete"
     query_id = db().new_id("qry")
-    result_path = settings().export_dir / f"{query_id}.csv"
-    frame.to_csv(result_path, index=False)
+    result_path = settings().export_dir / f"{query_id}.parquet"
+    result_path = write_result_frame(frame, result_path)
     if result_path.stat().st_size > settings().max_query_bytes:
         result_path.unlink(missing_ok=True)
         raise ValueError("查询结果超过服务端字节上限，请先聚合或缩小范围")
@@ -1402,7 +1404,7 @@ def load_result_frame(result_id: str) -> pd.DataFrame:
     max_bytes = min(int(settings().max_upload_bytes), 50 * 1024 * 1024)
     if path.stat().st_size > max_bytes or int(result.get("rows") or 0) > settings().max_query_rows:
         raise ValueError("结果超过本地完整读取门禁，请在仓内继续计算")
-    return pd.read_csv(path)
+    return read_result_frame(result)
 
 
 def refresh_source(source: dict) -> dict:

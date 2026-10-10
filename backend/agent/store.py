@@ -47,6 +47,7 @@ class RunStore:
         run_kind: str = "analysis",
         budget: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        require_session: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         now = utcnow()
         from ..services.authorization import actor_role
@@ -63,6 +64,28 @@ class RunStore:
         policy_version = policy_fingerprint(scoped_sources, actor_id=actor_id, role=role)
         normalized_key = str(idempotency_key or "").strip()[:200] or None
         with self.db.transaction() as connection:
+            # A retention sweep can run after the API validates a conversation.
+            # Recheck it under the same write lock as inserting the run, and
+            # record activity without replacing the conversation payload.
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                "SELECT workspace_id,archived_at FROM records WHERE collection='sessions' AND id=?",
+                (session_id,),
+            ).fetchone()
+            # Standalone store/worker callers can use virtual session IDs.
+            # API callers require persisted conversations even if deletion won
+            # the lock after their earlier authorization check.
+            if session is None and require_session:
+                raise FileNotFoundError("会话不存在或已被永久删除，请重新创建会话后重试")
+            if session:
+                if str(session["workspace_id"]) != str(workspace_id):
+                    raise PermissionError("会话不属于当前工作空间")
+                if session["archived_at"]:
+                    raise ValueError("会话已进入回收站，请先恢复后重试")
+                connection.execute(
+                    "UPDATE records SET updated_at=? WHERE collection='sessions' AND id=? AND workspace_id=?",
+                    (now, session_id, workspace_id),
+                )
             if normalized_key:
                 existing = connection.execute(
                     "SELECT * FROM agent_runs WHERE workspace_id=? AND actor_id=? AND idempotency_key=?",

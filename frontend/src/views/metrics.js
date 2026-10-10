@@ -38,6 +38,8 @@ export const MetricsView = {
       trialResult: null,
       trialPlan: null,
       trialing: false,
+      trialRequest: 0,
+      trialError: '',
       editor: null,
       modelEditor: null,
       modelDeleteTarget: null,
@@ -48,17 +50,42 @@ export const MetricsView = {
       deleteReferencesError: '',
       modelTables: [],
       modelColumns: [],
+      modelTablesLoading: false,
+      modelTablesError: '',
+      modelTablesRequest: 0,
       saving: false,
       deleting: false,
+      changingMetrics: [],
       loading: true,
+      loadError: '',
     };
   },
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.trialRequest += 1;
+    this.modelTablesRequest += 1;
+  },
+  watch: {
+    trial: {
+      deep: true,
+      handler() {
+        this.invalidateTrial();
+      },
+    },
+  },
   methods: {
+    invalidateTrial() {
+      this.trialRequest += 1;
+      this.trialing = false;
+      this.trialResult = null;
+      this.trialPlan = null;
+      this.trialError = '';
+    },
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const [metrics, models, sources] = await Promise.all([
           actions.get('/api/semantic/metrics'),
@@ -69,7 +96,7 @@ export const MetricsView = {
         this.models = models.items || [];
         this.sources = sources.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -81,15 +108,29 @@ export const MetricsView = {
       return item.unit || '';
     },
     select(metric) {
+      if (!metric) return;
       this.selected = metric;
       this.advanced = false;
-      this.trialResult = null;
-      this.trialPlan = null;
+      this.invalidateTrial();
       this.trial = { metric: metric.name, groupBy: [], filters: [], limit: 200, timeRange: {} };
     },
     /** 试算走受治理的指标编译器：管理员预览到的就是 Agent 之后会产出的。 */
     async runTrial() {
+      if (this.trialing || !this.canTrial || !this.selected) return;
+      if (!Number.isInteger(this.trial.limit) || this.trial.limit < 1 || this.trial.limit > 5000) {
+        this.trialError = '行数上限应为 1 到 5000 的整数';
+        return;
+      }
+      if (this.trial.timeRange.start && this.trial.timeRange.end
+          && this.trial.timeRange.start > this.trial.timeRange.end) {
+        this.trialError = '开始日期不能晚于结束日期';
+        return;
+      }
+      const requestId = ++this.trialRequest;
       this.trialing = true;
+      this.trialResult = null;
+      this.trialPlan = null;
+      this.trialError = '';
       try {
         const response = await actions.post('/api/admin/metric-trial', {
           metric: this.trial.metric,
@@ -98,12 +139,14 @@ export const MetricsView = {
           time_range: this.trial.timeRange,
           limit: this.trial.limit,
         });
-        this.trialResult = response.result;
-        this.trialPlan = response.plan;
+        if (requestId === this.trialRequest) {
+          this.trialResult = response.result;
+          this.trialPlan = response.plan;
+        }
       } catch (error) {
-        toast(error.message, '试算失败', 'error');
+        if (requestId === this.trialRequest) this.trialError = error.message;
       } finally {
-        this.trialing = false;
+        if (requestId === this.trialRequest) this.trialing = false;
       }
     },
     addFilter() {
@@ -122,6 +165,12 @@ export const MetricsView = {
       };
     },
     async saveMetric() {
+      if (this.saving || !this.editor) return;
+      if (!this.editor.label || !this.editor.name || !this.editor.model_id
+          || !(this.editor.metric_type === 'atomic' ? this.editor.measure : this.editor.expression)) {
+        toast('请填写业务名称、技术名称、语义模型和计算方式', '指标信息不完整', 'error');
+        return;
+      }
       this.saving = true;
       try {
         const body = {
@@ -267,22 +316,32 @@ export const MetricsView = {
     },
     async loadModelTables() {
       if (!this.modelEditor?.source_id) return;
+      const editor = this.modelEditor;
+      const sourceId = editor.source_id;
+      const requestId = ++this.modelTablesRequest;
+      this.modelTables = [];
+      this.modelColumns = [];
+      this.modelTablesLoading = true;
+      this.modelTablesError = '';
       try {
-        const response = await actions.get(`/api/sources/${this.modelEditor.source_id}/schema`);
+        const response = await actions.get(`/api/sources/${sourceId}/schema`);
+        if (requestId !== this.modelTablesRequest || this.modelEditor !== editor) return;
         this.modelTables = response.schema?.tables || [];
         if (!this.modelTables.find(item => item.name === this.modelEditor.table)) {
           this.modelEditor.table = this.modelTables[0]?.name || '';
         }
         this.updateModelColumns();
       } catch (error) {
-        this.modelTables = [];
-        toast(error.message, '读取数据表失败', 'error');
+        if (requestId === this.modelTablesRequest && this.modelEditor === editor) this.modelTablesError = error.message;
+      } finally {
+        if (requestId === this.modelTablesRequest) this.modelTablesLoading = false;
       }
     },
     updateModelColumns() {
       this.modelColumns = this.modelTables.find(item => item.name === this.modelEditor?.table)?.columns || [];
     },
     addModelField(kind) {
+      if (this.modelTablesLoading || !this.modelColumns.length) return;
       const column = this.modelColumns.find(item => !this.modelEditor[kind].some(field => field.column === item.name));
       const name = column?.name || '';
       this.modelEditor[kind].push({
@@ -292,6 +351,7 @@ export const MetricsView = {
       });
     },
     async saveModel() {
+      if (this.saving || this.modelTablesLoading) return;
       if (!this.modelEditor?.name || !this.modelEditor.table || !this.modelEditor.measures.length) {
         toast('请填写模型名称、数据表，并至少添加一个度量', '模型信息不完整', 'error');
         return;
@@ -311,21 +371,29 @@ export const MetricsView = {
       }
     },
     async publish(metric) {
+      if (this.changingMetrics.includes(metric.id)) return;
+      this.changingMetrics.push(metric.id);
       try {
         await actions.patch(`/api/semantic/metrics/${metric.id}`, { status: 'approved' });
         metric.status = 'approved';
         toast('指标已发布，分析将优先使用它', '完成');
       } catch (error) {
         toast(error.message, '发布失败', 'error');
+      } finally {
+        this.changingMetrics = this.changingMetrics.filter(id => id !== metric.id);
       }
     },
     async disable(metric) {
+      if (this.changingMetrics.includes(metric.id)) return;
+      this.changingMetrics.push(metric.id);
       try {
         await actions.patch(`/api/semantic/metrics/${metric.id}`, { status: 'deprecated' });
         metric.status = 'deprecated';
         toast('指标已停用', '完成');
       } catch (error) {
         toast(error.message, '操作失败', 'error');
+      } finally {
+        this.changingMetrics = this.changingMetrics.filter(id => id !== metric.id);
       }
     },
     askWith(metric) {
@@ -334,17 +402,19 @@ export const MetricsView = {
     trialChart() {
       if (!this.trialResult) return null;
       const columns = this.trialResult.columns || [];
-      const label = columns.find(name => name !== this.trial.metric && !name.endsWith('_id'));
-      const value = columns.find(name => name === this.trial.metric) || columns[0];
-      if (!label || !value) return null;
+      const labels = columns.filter(name => name !== this.trial.metric && this.trial.groupBy.includes(name));
+      const value = columns.find(name => name === this.trial.metric);
+      const rows = this.trialResult.data || [];
+      if (!labels.length || !value || !rows.length) return null;
+      const valueLabel = this.selected.label || value;
       return {
         id: 'trial',
-        title: `${value} 按${label}`,
-        type: /日期|时间|月份|年月|date|time|month|year/i.test(label) ? 'line' : 'bar',
+        title: `${valueLabel}${this.selected.unit ? '（' + this.selected.unit + '）' : ''} · ${labels.map(name => this.supportedDimensions.find(item => item.name === name)?.label || name).join(' / ')}`,
+        type: labels.length === 1 && /日期|时间|月份|年月|date|time|month|year/i.test(labels[0]) ? 'line' : 'bar',
         available: true,
         encoding: {
-          x: this.trialResult.data.slice(0, 20).map(row => row[label]),
-          series: [{ name: value, values: this.trialResult.data.slice(0, 20).map(row => Number(row[value]) || 0) }],
+          x: rows.slice(0, 20).map(row => labels.map(name => row[name] ?? '—').join(' / ')),
+          series: [{ name: valueLabel, values: rows.slice(0, 20).map(row => row[value] === null || row[value] === undefined || row[value] === '' ? null : Number(row[value])) }],
         },
       };
     },
@@ -357,7 +427,7 @@ export const MetricsView = {
             <h1 class="page-head__title">指标中心</h1>
             <p class="page-head__desc">
               正式指标是 AI 理解业务的口径来源。有指标时分析优先走指标定义，
-              没有对应指标时 Agent 才会做探索性分析——指标是加速器，不是墙。
+              没有对应指标时，AI 会结合数据进行探索分析。
             </p>
           </div>
           <div v-if="admin" class="page-head__actions">
@@ -367,6 +437,8 @@ export const MetricsView = {
           </div>
         </header>
 
+        <div v-if="loadError" class="card stack"><p class="small" role="alert" style="color:var(--danger)">{{ loadError }}</p><button class="btn btn--sm" @click="load">重新加载指标中心</button></div>
+        <template v-else>
         <Tabs v-model="tab" :items="[
           { key: 'metrics', label: '指标', count: metrics.length },
           { key: 'dimensions', label: '维度', count: dimensions.length },
@@ -377,7 +449,7 @@ export const MetricsView = {
         <div v-if="tab === 'metrics'" class="metric-layout" style="margin-top:18px">
           <div>
             <div class="toolbar">
-              <SearchInput v-model="query" placeholder="搜索指标名称、口径或同义词" style="width:280px" />
+              <SearchInput v-model="query" placeholder="搜索指标名称、口径或同义词" />
               <div class="segmented">
                 <button :class="{ active: !statusFilter }" @click="statusFilter = ''">全部</button>
                 <button :class="{ active: statusFilter === 'approved' }" @click="statusFilter = 'approved'">可用</button>
@@ -389,11 +461,12 @@ export const MetricsView = {
             <div v-if="loading" class="stack">
               <div v-for="index in 4" :key="index" class="skeleton" style="height:64px"></div>
             </div>
-            <EmptyState v-else-if="!filtered.length" icon="metric" title="还没有指标"
-                        text="指标定义了业务口径，让不同人问同一个问题时得到同一个答案。" />
+            <EmptyState v-else-if="!filtered.length" icon="metric" :title="query || statusFilter ? '没有匹配的指标' : '还没有指标'"
+                        :text="query || statusFilter ? '调整关键词或状态筛选后重试。' : '指标定义了业务口径，让不同人问同一个问题时得到同一个答案。'" />
 
-            <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <article v-for="item in filtered" :key="item.id" class="card card--interactive"
+            <div v-else class="metric-list">
+              <article v-for="item in filtered" :key="item.id" class="card card--interactive metric-item"
+                       :class="{ 'metric-item--selected': selected?.id === item.id }"
                        style="display:flex;align-items:center;gap:12px;text-align:left;width:100%"
                        role="button" tabindex="0" @click="select(item)"
                        @keydown.enter.self="select(item)" @keydown.space.self.prevent="select(item)">
@@ -412,12 +485,9 @@ export const MetricsView = {
                   <span class="xs faint truncate" style="display:block;margin-top:2px">
                     {{ item.description || '暂无业务定义' }}
                   </span>
-                  <span v-if="state.workspaceRole === 'owner'" class="row" style="margin-top:10px">
-                    <span class="grow"></span>
-                    <button class="btn btn--sm" style="color:var(--danger)"
-                            @click.stop="openMetricDelete(item)">删除指标</button>
-                  </span>
                 </span>
+                <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm" style="color:var(--danger)"
+                        @click.stop="openMetricDelete(item)">删除指标</button>
               </article>
             </div>
           </div>
@@ -485,8 +555,8 @@ export const MetricsView = {
                   <template v-if="canAdmin">
                     <button v-if="selected.status !== 'approved' || state.workspaceRole === 'owner'"
                             class="btn btn--sm" @click="editMetric(selected)">编辑</button>
-                    <button v-if="selected.status === 'draft' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="publish(selected)">发布</button>
-                    <button v-if="selected.status === 'approved' && state.workspaceRole === 'owner'" class="btn btn--sm" @click="disable(selected)">停用</button>
+                    <button v-if="selected.status === 'draft' && state.workspaceRole === 'owner'" class="btn btn--sm" :disabled="changingMetrics.includes(selected.id)" @click="publish(selected)">{{ changingMetrics.includes(selected.id) ? '发布中…' : '发布' }}</button>
+                    <button v-if="selected.status === 'approved' && state.workspaceRole === 'owner'" class="btn btn--sm" :disabled="changingMetrics.includes(selected.id)" @click="disable(selected)">{{ changingMetrics.includes(selected.id) ? '停用中…' : '停用' }}</button>
                     <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm"
                             style="color:var(--danger)" @click="openMetricDelete(selected)">删除指标</button>
                   </template>
@@ -497,7 +567,7 @@ export const MetricsView = {
                 <div class="card__head">
                   <div class="grow">
                     <h2 class="card__title">试算</h2>
-                    <p class="card__hint">用受治理的编译器跑一次，看到的就是 Agent 会得到的口径。</p>
+                    <p class="card__hint">按当前指标口径试算，结果与分析中使用的口径保持一致。</p>
                   </div>
                 </div>
 
@@ -550,23 +620,26 @@ export const MetricsView = {
                   </div>
 
                   <p v-if="!canTrial" class="small muted">{{ canAnalyze ? '草稿指标仅管理员可试算。' : '当前为只读权限，可查看口径；试算需要分析权限。' }}</p>
-                  <button v-else class="btn btn--primary" :disabled="trialing" @click="runTrial">
+                  <p v-if="trialError" class="small" role="alert" style="color:var(--danger)">{{ trialError }}。调整条件后可重新试算。</p>
+                  <button v-if="canTrial" class="btn btn--primary" :disabled="trialing" @click="runTrial">
                     <Icon name="play" :size="15" />{{ trialing ? '试算中…' : '运行试算' }}
                   </button>
                 </div>
 
                 <div v-if="trialResult" class="stack" style="margin-top:16px;display:flex;flex-direction:column;gap:12px">
+                  <p class="small muted" role="status">{{ selected.label || selected.name }} · 返回 {{ (trialResult.data || []).length }} 行<span v-if="selected.unit"> · 单位：{{ selected.unit }}</span><span v-if="trialResult.truncated"> · 已达到行数上限，部分数据未展示</span></p>
                   <div v-if="trialChart()" class="small muted">
                     <ChartCard :spec="trialChart()" />
+                    <p v-if="(trialResult.data || []).length > 20" class="xs faint">图表展示前 20 组，全部返回数据见下方表格。</p>
                   </div>
                   <DataTable :rows="trialResult.data || []" :columns="(trialResult.columns || []).map(c => ({ key: c, label: c }))"
                              max-height="280px" />
-                  <details>
+                  <details v-if="trialPlan">
                     <summary class="small muted" style="cursor:pointer">查看 SQL 与口径</summary>
                     <pre style="margin-top:8px">{{ trialPlan.sql }}</pre>
                     <p class="xs faint" style="margin-top:6px">
-                      {{ trialPlan.model.name }} v{{ trialPlan.model.version }} ·
-                      {{ trialPlan.metric.label }} v{{ trialPlan.metric.version }}
+                      {{ trialPlan.model?.name }} v{{ trialPlan.model?.version }} ·
+                      {{ trialPlan.metric?.label }} v{{ trialPlan.metric?.version }}
                     </p>
                   </details>
                 </div>
@@ -625,10 +698,11 @@ export const MetricsView = {
         <div v-else class="card" style="margin-top:18px">
           <EmptyState icon="book" title="业务术语" text="业务术语、同义词与业务规则在「管理后台 → 知识」中维护，会被 Agent 在检索时使用。" />
         </div>
+        </template>
       </div>
     </div>
 
-    <Modal :open="!!modelDeleteTarget" title="删除语义模型" @close="closeModelDelete">
+    <Modal :open="!!modelDeleteTarget" title="删除语义模型" size="small" @close="closeModelDelete">
       <template v-if="modelDeleteTarget">
         <p v-if="deleteReferencesLoading" class="small muted">正在检查关联指标…</p>
         <div v-else-if="deleteReferencesError" class="stack">
@@ -655,7 +729,7 @@ export const MetricsView = {
       </template>
     </Modal>
 
-    <Modal :open="!!metricDeleteTarget" title="删除指标" @close="closeMetricDelete">
+    <Modal :open="!!metricDeleteTarget" title="删除指标" size="small" @close="closeMetricDelete">
       <p v-if="deleteReferencesLoading" class="small muted">正在检查指标和智能体引用…</p>
       <div v-else-if="deleteReferencesError" class="stack">
         <p class="small" style="color:var(--danger)">{{ deleteReferencesError }}</p>
@@ -681,43 +755,45 @@ export const MetricsView = {
       </template>
     </Modal>
 
-    <Modal :open="!!modelEditor" :title="modelEditor?.id ? '编辑语义模型' : '新建语义模型'" wide @close="modelEditor = null">
+    <Modal :open="!!modelEditor" :title="modelEditor?.id ? '编辑语义模型' : '新建语义模型'" size="editor" @close="!saving && (modelEditor = null)">
       <div v-if="modelEditor" class="stack">
-        <div class="grid grid--2" style="gap:12px">
+        <div class="grid grid--2 model-basics" style="gap:12px">
           <label class="field"><span>模型名称 *</span><input v-model.trim="modelEditor.name" class="input" placeholder="销售事实模型" /></label>
           <label class="field"><span>数据源 *</span><select v-model="modelEditor.source_id" class="select" @change="loadModelTables">
             <option v-for="source in sources.filter(item => item.status === 'ready')" :key="source.id" :value="source.id">{{ source.name }}</option>
           </select></label>
-          <label class="field"><span>数据表 *</span><select v-model="modelEditor.table" class="select" @change="updateModelColumns">
+          <label class="field"><span>数据表 *</span><select v-model="modelEditor.table" class="select" :disabled="modelTablesLoading" @change="updateModelColumns">
             <option v-for="table in modelTables" :key="table.name" :value="table.name">{{ table.name }}</option>
           </select></label>
           <label class="field"><span>数据粒度</span><input v-model.trim="modelEditor.grain" class="input" placeholder="每行代表一笔订单" /></label>
         </div>
+        <p v-if="modelTablesLoading" class="small muted" role="status">正在读取数据表与字段…</p>
+        <div v-else-if="modelTablesError" class="row"><p class="small" role="alert" style="color:var(--danger)">{{ modelTablesError }}</p><button class="btn btn--sm" @click="loadModelTables">重新读取</button></div>
         <label class="field"><span>业务说明</span><textarea v-model.trim="modelEditor.description" class="textarea"></textarea></label>
-        <div class="row row--between"><b>维度</b><button class="btn btn--sm" @click="addModelField('dimensions')">添加维度</button></div>
-        <div v-for="(field, index) in modelEditor.dimensions" :key="'d' + index" class="row">
-          <input v-model.trim="field.name" class="input" placeholder="技术名称" style="flex:1" />
-          <input v-model.trim="field.label" class="input" placeholder="显示名称" style="flex:1" />
-          <select v-model="field.column" class="select" style="flex:1"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
-          <select v-model="field.type" class="select" style="width:100px"><option value="categorical">分类</option><option value="time">时间</option><option value="numeric">数值</option><option value="boolean">布尔</option></select>
+        <div class="row row--between"><b>维度</b><button class="btn btn--sm" :disabled="modelTablesLoading || !modelColumns.length" @click="addModelField('dimensions')">添加维度</button></div>
+        <div v-for="(field, index) in modelEditor.dimensions" :key="'d' + index" class="row model-field-row">
+          <input v-model.trim="field.name" class="input" placeholder="技术名称" aria-label="维度技术名称" />
+          <input v-model.trim="field.label" class="input" placeholder="显示名称" aria-label="维度显示名称" />
+          <select v-model="field.column" class="select" aria-label="维度数据字段"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
+          <select v-model="field.type" class="select" aria-label="维度类型"><option value="categorical">分类</option><option value="time">时间</option><option value="numeric">数值</option><option value="boolean">布尔</option></select>
           <button class="icon-btn" aria-label="删除维度" @click="modelEditor.dimensions.splice(index, 1)"><Icon name="close" :size="14" /></button>
         </div>
-        <div class="row row--between"><b>度量 *</b><button class="btn btn--sm" @click="addModelField('measures')">添加度量</button></div>
-        <div v-for="(field, index) in modelEditor.measures" :key="'m' + index" class="row">
-          <input v-model.trim="field.name" class="input" placeholder="技术名称" style="flex:1" />
-          <input v-model.trim="field.label" class="input" placeholder="显示名称" style="flex:1" />
-          <select v-model="field.column" class="select" style="flex:1"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
-          <select v-model="field.aggregation" class="select" style="width:100px"><option value="sum">求和</option><option value="count">计数</option><option value="avg">平均</option><option value="min">最小</option><option value="max">最大</option></select>
+        <div class="row row--between"><b>度量 *</b><button class="btn btn--sm" :disabled="modelTablesLoading || !modelColumns.length" @click="addModelField('measures')">添加度量</button></div>
+        <div v-for="(field, index) in modelEditor.measures" :key="'m' + index" class="row model-field-row">
+          <input v-model.trim="field.name" class="input" placeholder="技术名称" aria-label="度量技术名称" />
+          <input v-model.trim="field.label" class="input" placeholder="显示名称" aria-label="度量显示名称" />
+          <select v-model="field.column" class="select" aria-label="度量数据字段"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
+          <select v-model="field.aggregation" class="select" aria-label="度量聚合方式"><option value="sum">求和</option><option value="count">计数</option><option value="avg">平均</option><option value="min">最小</option><option value="max">最大</option></select>
           <button class="icon-btn" aria-label="删除度量" @click="modelEditor.measures.splice(index, 1)"><Icon name="close" :size="14" /></button>
         </div>
         <label v-if="modelEditor.dimensions.some(item => item.type === 'time')" class="field"><span>默认时间维度</span>
           <select v-model="modelEditor.default_time_dimension" class="select"><option value="">不指定</option><option v-for="field in modelEditor.dimensions.filter(item => item.type === 'time')" :key="field.name" :value="field.name">{{ field.label || field.name }}</option></select>
         </label>
       </div>
-      <template #footer><button class="btn" @click="modelEditor = null">取消</button><button class="btn btn--primary" :disabled="saving" @click="saveModel">{{ saving ? '保存中…' : '保存模型' }}</button></template>
+      <template #footer><button class="btn" :disabled="saving" @click="modelEditor = null">取消</button><button class="btn btn--primary" :disabled="saving || modelTablesLoading || !!modelTablesError" @click="saveModel">{{ saving ? '保存中…' : '保存模型' }}</button></template>
     </Modal>
 
-    <Modal :open="!!editor" :title="editor?.id ? '编辑指标' : '新建指标'" wide @close="editor = null">
+    <Modal :open="!!editor" :title="editor?.id ? '编辑指标' : '新建指标'" wide @close="!saving && (editor = null)">
       <div v-if="editor" class="stack">
         <div class="grid grid--2" style="gap:12px">
           <label class="field"><span>业务名称<em> *</em></span>
@@ -753,7 +829,7 @@ export const MetricsView = {
           <input v-model.trim="editor.time_semantics" class="input" placeholder="按支付完成月份归集" /></label>
       </div>
       <template #footer>
-        <button class="btn" @click="editor = null">取消</button>
+        <button class="btn" :disabled="saving" @click="editor = null">取消</button>
         <button class="btn btn--primary" :disabled="saving" @click="saveMetric">
           {{ saving ? '保存中…' : '保存为草稿' }}
         </button>

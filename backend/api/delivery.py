@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 from flask import Blueprint, current_app, request, send_file
 
 from ..agent.store import RunStore
 from ..services.authorization import actor_role, require_sources_access
 from ..services.data_policy import policy_fingerprint
+from ..services.datasets import frame_records
+from ..services.query_results import read_result_frame
 from ..services.results.delivery import ARTIFACT_KINDS, generate_artifacts, prepare_eml, send_email
 from ..services.results.manifests import ResultService
 from .common import (
@@ -164,11 +165,8 @@ def analysis_details(run_id: str):
         return ok(items=[], columns=table.get("columns") or [], total=None, completeness="unknown", next_cursor=None)
     page_size = max(1, min(int(request.args.get("limit", 100)), 500))
     cursor = max(0, int(request.args.get("cursor", 0)))
-    path = safe_child(current_app.config["SETTINGS"].export_dir, Path(result["path"]))
-    if path.stat().st_size > 50 * 1024 * 1024:
-        raise ValueError("明细结果超过本地分页上限，应通过远程 DatasetRef 分页")
-    frame = pd.read_csv(path, skiprows=range(1, cursor + 1), nrows=page_size)
-    items = frame.where(pd.notna(frame), None).to_dict(orient="records")
+    frame = read_result_frame(result, offset=cursor, limit=page_size)
+    items = frame_records(frame, page_size)
     next_cursor = cursor + len(items) if cursor + len(items) < int(result.get("rows") or 0) else None
     return ok(
         items=items, columns=result.get("columns") or [], total=result.get("total_rows"),

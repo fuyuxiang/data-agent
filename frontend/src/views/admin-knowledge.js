@@ -28,8 +28,12 @@ export const KnowledgeView = {
       searchQuery: '',
       results: [],
       searching: false,
+      searched: false,
+      searchError: '',
       searchVersion: 0,
       editor: null,
+      saving: false,
+      uploading: false,
       uploadOpen: false,
       entryDeleteTarget: null,
       deletingEntry: false,
@@ -43,6 +47,7 @@ export const KnowledgeView = {
       documentReferencesChecked: false,
       documentReferenceVersion: 0,
       loading: true,
+      loadError: '',
     };
   },
   computed: {
@@ -63,16 +68,24 @@ export const KnowledgeView = {
     this.searchVersion += 1;
     this.documentReferenceVersion += 1;
   },
+  watch: {
+    searchQuery() {
+      this.invalidateSearch();
+    },
+  },
   methods: {
     invalidateSearch(documentId = null) {
       this.searchVersion += 1;
       this.searching = false;
+      this.searched = false;
+      this.searchError = '';
       this.results = documentId
         ? this.results.filter(item => item.document_id !== documentId)
         : [];
     },
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const [entries, documents] = await Promise.all([
           actions.get('/api/knowledge/entries'),
@@ -81,7 +94,7 @@ export const KnowledgeView = {
         this.entries = entries.items || [];
         this.documents = documents.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -111,6 +124,12 @@ export const KnowledgeView = {
       this.editor = { ...entry };
     },
     async save() {
+      if (!this.editor || this.saving || !canAdmin.value) return;
+      if (!this.editor.name?.trim()) {
+        toast('请填写知识条目标题', '信息不完整', 'error');
+        return;
+      }
+      this.saving = true;
       try {
         const response = this.editor.id
           ? await actions.patch(`/api/knowledge/entries/${this.editor.id}`, this.editor)
@@ -122,6 +141,8 @@ export const KnowledgeView = {
         toast('知识条目已保存', '完成');
       } catch (error) {
         toast(error.message, '保存失败', 'error');
+      } finally {
+        this.saving = false;
       }
     },
     async toggle(entry) {
@@ -235,14 +256,20 @@ export const KnowledgeView = {
       }
     },
     async search() {
-      if (!this.searchQuery.trim()) return;
+      if (!this.searchQuery.trim() || this.searching) return;
       const version = ++this.searchVersion;
       this.searching = true;
+      this.results = [];
+      this.searched = false;
+      this.searchError = '';
       try {
         const response = await actions.post('/api/knowledge/search', { query: this.searchQuery });
-        if (version === this.searchVersion) this.results = response.items || [];
+        if (version === this.searchVersion) {
+          this.results = response.items || [];
+          this.searched = true;
+        }
       } catch (error) {
-        if (version === this.searchVersion) toast(error.message, '检索失败', 'error');
+        if (version === this.searchVersion) this.searchError = error.message;
       } finally {
         if (version === this.searchVersion) this.searching = false;
       }
@@ -250,7 +277,8 @@ export const KnowledgeView = {
     async upload(event) {
       const file = event.target.files?.[0];
       event.target.value = '';
-      if (!file) return;
+      if (!file || this.uploading || !canAdmin.value) return;
+      this.uploading = true;
       const form = new FormData();
       form.append('file', file);
       form.append('workspace_id', state.workspaceId);
@@ -271,6 +299,8 @@ export const KnowledgeView = {
         toast('文档已索引', '完成');
       } catch (error) {
         toast(error.message, '导入失败', 'error');
+      } finally {
+        this.uploading = false;
       }
     },
   },
@@ -284,14 +314,17 @@ export const KnowledgeView = {
             正式指标口径请到「指标中心」维护。
           </p>
         </div>
-        <div class="page-head__actions">
+        <div v-if="canAdmin" class="page-head__actions">
           <label class="btn btn--sm">
-            <Icon name="upload" :size="14" />导入文档
-            <input type="file" hidden accept=".txt,.md,.html,.csv,.json,.pdf,.docx,.xlsx,.xls" @change="upload" />
+            <Icon name="upload" :size="14" />{{ uploading ? '导入中…' : '导入文档' }}
+            <input type="file" hidden :disabled="uploading" accept=".txt,.md,.html,.csv,.json,.pdf,.docx,.xlsx,.xls" @change="upload" />
           </label>
         </div>
       </header>
 
+      <div v-if="loadError" class="card stack"><p class="small" role="alert" style="color:var(--danger)">{{ loadError }}</p><button class="btn btn--sm" @click="load">重新加载知识</button></div>
+      <div v-else-if="loading" class="grid grid--3"><div v-for="index in 3" :key="index" class="skeleton" style="height:200px"></div></div>
+      <template v-else>
       <Tabs v-model="tab" :items="[
         { key: 'structured', label: '结构化知识', count: entries.length },
         { key: 'documents', label: '知识文档', count: documents.length },
@@ -306,11 +339,10 @@ export const KnowledgeView = {
               <h2 class="card__title">{{ group.title }}</h2>
               <p class="card__hint">{{ group.items.length }} 条</p>
             </div>
-            <button class="btn btn--sm" @click="newEntry(group.type)"><Icon name="plus" :size="14" />新增</button>
+            <button v-if="canAdmin" class="btn btn--sm" @click="newEntry(group.type)"><Icon name="plus" :size="14" />新增</button>
           </div>
           <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-            <article v-for="item in group.items" :key="item.id" class="card card--interactive"
-                     style="padding:12px 14px">
+            <article v-for="item in group.items" :key="item.id" class="knowledge-entry">
               <div class="row row--between" style="align-items:flex-start">
                 <div class="grow">
                   <b>{{ entryTitle(item) }}</b>
@@ -320,7 +352,8 @@ export const KnowledgeView = {
                     <span v-if="item.rule_id" class="badge badge--brand">{{ item.rule_id }}</span>
                   </div>
                 </div>
-                <div class="row" style="gap:4px">
+              </div>
+                <div v-if="canAdmin" class="row knowledge-entry__actions" style="gap:4px">
                   <Switch :model-value="item.enabled !== false" :label="'启用 ' + entryTitle(item)"
                           :disabled="deletingEntry || changingEntries.includes(item.id)"
                           @update:model-value="toggle(item)" />
@@ -330,7 +363,6 @@ export const KnowledgeView = {
                     <Icon name="trash" :size="15" />
                   </button>
                 </div>
-              </div>
             </article>
             <EmptyState v-if="!group.items.length" icon="book" title="暂无条目"
                         :text="'添加一条' + group.title + '，Agent 在相关问题中会用到它。'" />
@@ -369,13 +401,15 @@ export const KnowledgeView = {
         <p class="card__hint" style="margin-bottom:12px">检查 Agent 能不能召回正确的业务口径。</p>
         <div class="row" style="margin-bottom:14px">
           <input v-model="searchQuery" class="input" style="flex:1"
-                 placeholder="例如：GMV 的计算口径是什么？" @keyup.enter="search" />
+                 placeholder="例如：GMV 的计算口径是什么？" @keydown.enter="!$event.isComposing && $event.keyCode !== 229 && search()" />
           <button class="btn btn--primary" :disabled="searching || !searchQuery.trim()" @click="search">
             {{ searching ? '检索中…' : '检索' }}
           </button>
         </div>
-        <EmptyState v-if="!results.length" icon="search" title="还没有检索结果"
-                    text="输入一个问题，看看会召回哪些知识片段。" />
+        <p v-if="searching" class="small muted" role="status">正在检索当前问题…</p>
+        <p v-else-if="searchError" class="small" role="alert" style="color:var(--danger)">{{ searchError }}，可重新检索。</p>
+        <EmptyState v-else-if="!results.length" icon="search" :title="searched ? '没有匹配的知识片段' : '还没有检索结果'"
+                    :text="searched ? '尝试更具体的业务词语，或确认相关知识已启用。' : '输入一个问题，看看会召回哪些知识片段。'" />
         <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
           <article v-for="(item, index) in results" :key="index" class="card" style="padding:12px 14px">
             <div class="row row--between">
@@ -386,9 +420,10 @@ export const KnowledgeView = {
           </article>
         </div>
       </div>
+      </template>
     </div>
 
-    <Modal :open="!!entryDeleteTarget" title="删除知识条目" @close="closeEntryDelete">
+    <Modal :open="!!entryDeleteTarget" title="删除知识条目" size="small" @close="closeEntryDelete">
       <p v-if="entryDeleteTarget" class="small">
         确定删除知识条目「{{ entryTitle(entryDeleteTarget) }}」吗？后续检索将不再使用它，
         已完成的分析记录会保留。可到 <a href="#/admin/trash?collection=knowledge_entries">回收站</a> 恢复。
@@ -402,7 +437,7 @@ export const KnowledgeView = {
       </template>
     </Modal>
 
-    <Modal :open="!!documentDeleteTarget" title="删除知识文档" @close="closeDocumentDelete">
+    <Modal :open="!!documentDeleteTarget" title="删除知识文档" size="small" @close="closeDocumentDelete">
       <p v-if="documentDeleteTarget" class="small">
         确定删除知识文档「{{ documentDeleteTarget.name }}」吗？文档将移入回收站，
         后续知识检索将不再使用它，已完成的分析记录会保留。
@@ -429,7 +464,7 @@ export const KnowledgeView = {
       </template>
     </Modal>
 
-    <Modal :open="!!editor" :title="editor?.id ? '编辑知识条目' : '新增知识条目'" @close="editor = null">
+    <Modal :open="!!editor" :title="editor?.id ? '编辑知识条目' : '新增知识条目'" @close="!saving && (editor = null)">
       <div v-if="editor" class="stack">
         <label class="field"><span>标题<em> *</em></span>
           <input v-model.trim="editor.name" class="input" placeholder="销售额口径" /></label>
@@ -453,8 +488,8 @@ export const KnowledgeView = {
           <input v-model.trim="editor.notes" class="input" /></label>
       </div>
       <template #footer>
-        <button class="btn" @click="editor = null">取消</button>
-        <button class="btn btn--primary" @click="save">保存</button>
+        <button class="btn" :disabled="saving" @click="editor = null">取消</button>
+        <button class="btn btn--primary" :disabled="saving || !editor?.name?.trim()" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>`,
 };

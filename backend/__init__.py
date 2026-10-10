@@ -123,6 +123,12 @@ def create_app(test_config: dict | None = None) -> Flask:
 
         job_manager = get_job_manager(app)
         atexit.register(job_manager.shutdown)
+        from .services.lifecycle import RetentionWorker
+
+        retention_worker = RetentionWorker(app)
+        app.extensions["meridian_retention"] = retention_worker
+        retention_worker.start()
+        atexit.register(retention_worker.shutdown)
 
     @app.before_request
     def establish_request_context():

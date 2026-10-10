@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from ...core.database import Database
+from ..query_results import read_result_frame
 
 
 def _json_value(value: Any) -> Any:
@@ -48,7 +49,7 @@ def _query_result(database: Database, workspace_id: str, refs: list[str]) -> tup
             continue
         path = Path(str(result.get("path") or ""))
         if path.is_file() and path.stat().st_size <= 50 * 1024 * 1024:
-            return result, pd.read_csv(path)
+            return result, read_result_frame(result)
         return result, pd.DataFrame(result.get("data") or [])
     return None, pd.DataFrame()
 

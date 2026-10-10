@@ -36,21 +36,19 @@ export const AgentsView = {
         .filter(item => {
           if (this.activeGroup === 'official') return item.builtin;
           if (this.activeGroup === 'mine') return item.created_by === (state.user?.id || 'local-default');
-          return true;
+          return !item.builtin && item.visibility !== 'private';
         });
     },
     groups() {
-      return GROUPS.filter(group => this.countFor(group.key) > 0);
+      return GROUPS;
     },
   },
   methods: {
     countFor(key) {
-      const keyword = this.query.trim().toLowerCase();
       return state.agents.filter(item => {
-        if (keyword && !`${item.name} ${item.description || ''}`.toLowerCase().includes(keyword)) return false;
         if (key === 'official') return item.builtin;
         if (key === 'mine') return item.created_by === (state.user?.id || 'local-default');
-        return true;
+        return !item.builtin && item.visibility !== 'private';
       }).length;
     },
     start(agent) {
@@ -79,8 +77,8 @@ export const AgentsView = {
           <SearchInput v-model="query" placeholder="搜索智能体" />
         </div>
 
-        <EmptyState v-if="!agents.length" icon="robot" title="没有可用的智能体"
-                    text="管理员可以在「管理后台 → 智能体」里创建并发布智能体。" />
+        <EmptyState v-if="!agents.length" icon="robot" :title="query ? '没有匹配的智能体' : '该分组暂无智能体'"
+                    :text="query ? '尝试其他关键词，或切换分组查看。' : '管理员可以在「管理后台 → 智能体」里创建并发布智能体。'" />
 
         <div v-else class="grid grid--2">
           <article v-for="agent in agents" :key="agent.id" class="card card--interactive agent-card">

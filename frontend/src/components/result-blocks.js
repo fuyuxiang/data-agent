@@ -44,6 +44,7 @@ const ARROW = (value) => {
 
 const KpiCard = {
   name: 'KpiCard',
+  components: { Icon },
   props: { kpi: Object },
   computed: {
     display() {
@@ -52,14 +53,20 @@ const KpiCard = {
     },
     deltaClass() { return TREND(this.kpi.delta); },
     deltaIcon() { return ARROW(this.kpi.delta); },
+    deltaDisplay() {
+      const value = this.kpi?.delta;
+      if (value === null || value === '' || !Number.isFinite(Number(value))) return '—';
+      const number = Number(value) * 100;
+      return `${number > 0 ? '+' : ''}${number.toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`;
+    },
   },
   template: `
     <div class="kpi">
       <div class="kpi__label">{{ kpi.label }}</div>
-      <div class="kpi__value">{{ display }}</div>
+      <div class="kpi__value" :title="String(kpi.value ?? '—')">{{ display }}</div>
       <div v-if="kpi.delta !== undefined" class="kpi__meta" :class="deltaClass">
-        <Icon :name="deltaIcon" :size="13" />
-        {{ kpi.deltaLabel || '环比' }} {{ Math.abs(kpi.delta * 100).toFixed(1) }}%
+        <Icon v-if="deltaIcon" :name="deltaIcon" :size="13" />
+        {{ kpi.deltaLabel || '环比' }} {{ deltaDisplay }}
       </div>
     </div>`,
 };
@@ -76,7 +83,7 @@ const InsightItem = {
       return 'fact';
     },
     label() {
-      return { fact: '事实', inference: '推测', risk: '风险', suggestion: '建议' }[this.tone] || '发现';
+      return { fact: '事实', inference: '推测', risk: '风险', suggestion: '建议' }[this.item?.type] || '发现';
     },
   },
   template: `
@@ -93,6 +100,7 @@ const FileCard = {
   components: { Icon },
   props: { file: Object, canDownload: { type: Boolean, default: true } },
   emits: ['preview', 'source'],
+  data() { return { downloading: false }; },
   computed: {
     iconName() { return iconForCategory(this.file.category, this.file.kind); },
     meta() {
@@ -102,10 +110,15 @@ const FileCard = {
   },
   methods: {
     async download() {
+      if (this.downloading) return;
+      this.downloading = true;
       try {
         await actions.download(this.file.download_url, this.file.filename || this.file.title);
+        toast('文件已开始下载', '下载');
       } catch (error) {
         toast(error.message, '下载失败', 'error');
+      } finally {
+        this.downloading = false;
       }
     },
   },
@@ -119,7 +132,7 @@ const FileCard = {
       <button v-if="file.previewable" class="btn btn--sm" @click="$emit('preview', file)">
         <Icon name="eye" :size="14" />预览
       </button>
-      <button v-if="canDownload" class="btn btn--sm" @click="download"><Icon name="download" :size="14" />下载</button>
+      <button v-if="canDownload" class="btn btn--sm" :disabled="downloading" @click="download"><Icon name="download" :size="14" />{{ downloading ? '下载中…' : '下载' }}</button>
     </div>`,
 };
 
@@ -133,12 +146,13 @@ export const ResultView = {
     loading: Boolean,
     canExport: { type: Boolean, default: true },
   },
-  emits: ['preview', 'source'],
+  emits: ['preview', 'source', 'table-page'],
+  data() { return { moreCharts: false, moreInsights: false }; },
   setup(props) {
     const summaryHtml = computed(() => renderMarkdown(props.payload?.summary || ''));
     const charts = computed(() => (props.payload?.charts || [])
-      .filter(item => item.available !== false).slice(0, 2));
-    const kpis = computed(() => (props.payload?.kpis || []).slice(0, 4));
+      .filter(item => item.available !== false));
+    const kpis = computed(() => (props.payload?.kpis || []));
     const insights = computed(() => {
       const report = props.payload?.report || {};
       const items = [];
@@ -150,10 +164,14 @@ export const ResultView = {
           items.push({ type: 'suggestion', text: value });
         });
       });
-      return items.slice(0, 6);
+      return items;
     });
     const basis = computed(() => (props.payload?.evidence_refs || []).map(String));
-    return { summaryHtml, charts, kpis, insights, basis };
+    const limitations = computed(() => [...new Set((props.payload?.limitations || props.payload?.report?.limitations || [])
+      .filter(Boolean).map(String))]);
+    const hasContent = computed(() => Boolean(summaryHtml.value || kpis.value.length || charts.value.length
+      || props.tables.length || props.artifacts.length || insights.value.length));
+    return { summaryHtml, charts, kpis, insights, basis, limitations, hasContent };
   },
   methods: {
     formatValue,
@@ -172,20 +190,50 @@ export const ResultView = {
     </section>
 
     <section v-else class="result">
+      <EmptyState v-if="!hasContent" icon="chart2" title="本次分析没有可展示的结论或数据" text="可查看来源与执行过程，确认数据范围后重新提问。" />
       <div v-if="summaryHtml" class="markdown result__conclusion" v-html="summaryHtml"></div>
 
       <div v-if="kpis.length" class="kpi-grid">
         <KpiCard v-for="kpi in kpis" :key="kpi.id" :kpi="kpi" />
       </div>
 
-      <ChartCard v-for="chart in charts" :key="chart.id" :spec="chart" />
+      <ChartCard v-for="chart in moreCharts ? charts : charts.slice(0, 2)" :key="chart.id" :spec="chart" />
+      <button v-if="charts.length > 2" class="btn btn--sm" :aria-expanded="moreCharts" @click="moreCharts = !moreCharts">
+        {{ moreCharts ? '收起更多图表' : '查看其余 ' + (charts.length - 2) + ' 张图表' }}
+      </button>
 
-      <div v-for="table in tables" :key="table.id">
+      <div v-for="table in tables" :key="table.id" class="result-table">
+        <div class="result-table__head">
+          <b>{{ table.title || '数据明细' }}</b>
+          <span class="small muted grow" role="status">
+            {{ table.total === null || table.total === undefined ? '共 ' + (table.rows || []).length + ' 条' : '共 ' + table.total + ' 条' }}
+            <template v-if="table.total > (table.rows || []).length"> · 当前 {{ (table.offset || 0) + 1 }}–{{ (table.offset || 0) + (table.rows || []).length }} 条</template>
+          </span>
+          <template v-if="table.paginated && table.total > (table.limit || 50)">
+            <button class="btn btn--sm" :aria-label="(table.title || '数据明细') + '上一页'"
+                    :disabled="table.loading || !(table.offset > 0)"
+                    @click="$emit('table-page', { table, offset: Math.max(0, table.offset - (table.limit || 50)) })">上一页</button>
+            <button class="btn btn--sm" :aria-label="(table.title || '数据明细') + '下一页'"
+                    :disabled="table.loading || (table.offset || 0) + (table.rows || []).length >= table.total"
+                    @click="$emit('table-page', { table, offset: (table.offset || 0) + (table.limit || 50) })">下一页</button>
+          </template>
+        </div>
+        <p v-if="table.sourceTotal > table.total || ['partial', 'truncated', 'sampled'].includes(table.completeness)" class="result-table__status small muted">
+          本次返回 {{ table.total }} 条{{ table.sourceTotal > table.total ? '，原始结果共 ' + table.sourceTotal + ' 条' : '' }}；当前明细为部分数据。
+        </p>
+        <p v-if="!table.paginated && table.total > (table.rows || []).length" class="result-table__status small muted">当前为前 {{ (table.rows || []).length }} 条预览；完整明细请使用导出 Excel。</p>
+        <p v-if="table.error" class="result-table__status small" role="alert">{{ table.error }}
+          <button class="btn btn--sm" @click="$emit('table-page', { table, offset: table.failedOffset ?? table.offset ?? 0 })">重试加载</button>
+        </p>
+        <p v-if="table.loading" class="result-table__status small muted" role="status">正在加载明细…</p>
         <DataTable :rows="table.rows || []" :columns="table.columns || []" :max-height="'380px'" />
       </div>
 
       <div v-if="insights.length" class="stack" style="display:flex;flex-direction:column;gap:8px">
-        <InsightItem v-for="(item, index) in insights" :key="index" :item="item" />
+        <InsightItem v-for="(item, index) in moreInsights ? insights : insights.slice(0, 6)" :key="index" :item="item" />
+        <button v-if="insights.length > 6" class="btn btn--sm" :aria-expanded="moreInsights" @click="moreInsights = !moreInsights">
+          {{ moreInsights ? '收起更多发现' : '查看其余 ' + (insights.length - 6) + ' 条发现与建议' }}
+        </button>
       </div>
 
       <div v-if="artifacts.length" class="stack" style="display:flex;flex-direction:column;gap:8px">
@@ -201,6 +249,10 @@ export const ResultView = {
         </button>
         <span v-if="basis.length > 4" class="faint">+{{ basis.length - 4 }}</span>
       </div>
+      <details v-if="limitations.length" class="result__limits">
+        <summary>结果说明与限制 · {{ limitations.length }} 项</summary>
+        <ul><li v-for="item in limitations" :key="item">{{ item }}</li></ul>
+      </details>
     </section>`,
 };
 
@@ -209,7 +261,7 @@ export const ResultView = {
 export const ClarificationCard = {
   name: 'ClarificationCard',
   components: { Icon },
-  props: { contract: Object },
+  props: { contract: Object, busy: Boolean },
   emits: ['submit', 'cancel'],
   data() {
     return {
@@ -233,6 +285,11 @@ export const ClarificationCard = {
       }
       return '本月';
     },
+    dateError() {
+      if (this.choices.period !== '自定义') return '';
+      if (!this.choices.start || !this.choices.end) return '请选择开始和结束日期';
+      return this.choices.start > this.choices.end ? '结束日期不能早于开始日期' : '';
+    },
   },
   template: `
     <div class="clarify">
@@ -246,15 +303,17 @@ export const ClarificationCard = {
 
       <div class="clarify__group">
         <div class="clarify__label">分析时间</div>
+        <p class="small muted" style="margin-bottom:8px">当前口径：{{ period }}</p>
         <div class="chip-group">
           <button v-for="item in ['本月','上月','最近3个月','最近12个月','自定义']" :key="item"
                   class="chip" :class="{ active: choices.period === item }"
-                  @click="choices.period = item">{{ item }}</button>
+                  :disabled="busy" @click="choices.period = item">{{ item }}</button>
         </div>
         <div v-if="choices.period === '自定义'" class="row" style="margin-top:8px">
-          <label class="field grow"><span>开始日期</span><input v-model="choices.start" type="date" class="input" /></label>
-          <label class="field grow"><span>结束日期</span><input v-model="choices.end" type="date" class="input" /></label>
+          <label class="field grow"><span>开始日期</span><input v-model="choices.start" :disabled="busy" type="date" class="input" /></label>
+          <label class="field grow"><span>结束日期</span><input v-model="choices.end" :disabled="busy" type="date" class="input" /></label>
         </div>
+        <p v-if="dateError" class="small" style="color:var(--danger);margin-top:6px" role="status">{{ dateError }}</p>
       </div>
 
       <div class="clarify__group">
@@ -262,7 +321,7 @@ export const ClarificationCard = {
         <div class="chip-group">
           <button v-for="item in ['整体表现','趋势变化','城市差异','品类表现','下降原因']" :key="item"
                   class="chip" :class="{ active: choices.focus === item }"
-                  @click="choices.focus = item">{{ item }}</button>
+                  :disabled="busy" @click="choices.focus = item">{{ item }}</button>
         </div>
       </div>
 
@@ -275,9 +334,9 @@ export const ClarificationCard = {
         <button class="btn btn--ghost btn--sm" @click="expanded = !expanded">
           {{ expanded ? '收起口径' : '查看口径' }}
         </button>
-        <button class="btn btn--sm" @click="$emit('cancel')">重新描述</button>
-        <button class="btn btn--primary" @click="$emit('submit', choices)">
-          <Icon name="play" :size="15" />开始分析
+        <button class="btn btn--sm" :disabled="busy" @click="$emit('cancel')">重新描述</button>
+        <button class="btn btn--primary" :disabled="busy || !!dateError" @click="$emit('submit', { ...choices })">
+          <Icon name="play" :size="15" />{{ busy ? '正在提交…' : '开始分析' }}
         </button>
       </div>
     </div>`,

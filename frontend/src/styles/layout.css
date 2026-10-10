@@ -59,6 +59,7 @@
 
 .sidebar__scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 6px 12px 12px;
   scrollbar-width: none;
@@ -157,6 +158,7 @@
 }
 
 .recent-item span { overflow: hidden; text-overflow: ellipsis; }
+.recent-item svg { flex: none; }
 .recent-item:hover { background: var(--sidebar-hover); color: var(--sidebar-text-strong); }
 .recent-item.active { background: var(--sidebar-active); color: var(--sidebar-text-strong); }
 
@@ -202,6 +204,10 @@
 .app--collapsed .sidebar__recent,
 .app--collapsed .sidebar__user-meta,
 .app--collapsed .sidebar__new span { display: none; }
+.app--collapsed .sidebar__foot .recent-item span,
+.app--collapsed .sidebar__user > .avatar,
+.app--collapsed .sidebar__user > .grow { display: none; }
+.app--collapsed .sidebar__foot .recent-item { justify-content: center; padding: 0; }
 .app--collapsed .sidebar__brand { justify-content: center; padding: 0; }
 .app--collapsed .nav-item { justify-content: center; padding: 0; }
 .app--collapsed .sidebar__new { justify-content: center; padding: 0; }
@@ -225,8 +231,8 @@
   flex: none;
 }
 
-.topbar__title { font-size: var(--text-md); font-weight: 600; }
-.topbar__sub { font-size: var(--text-sm); color: var(--text-tertiary); }
+.topbar__title { font-size: var(--text-md); font-weight: 600; flex: none; }
+.topbar__sub { min-width: 0; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--text-secondary); }
 .topbar__spacer { flex: 1; }
 
 .topbar__search {
@@ -242,6 +248,7 @@
   color: var(--text-tertiary);
   font-size: var(--text-sm);
   transition: border-color var(--duration-fast) var(--ease);
+  flex: none;
 }
 .topbar__search:hover { border-color: var(--border-strong); }
 
@@ -262,7 +269,8 @@
 .view__inner--reading { max-width: var(--reading-max); }
 
 /* ---------- Admin 布局 ---------- */
-.admin { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 28px; align-items: start; }
+.admin { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 24px; align-items: start; }
+.admin > *, .builder > *, .split > *, .grid > * { min-width: 0; }
 
 .admin__nav { position: sticky; top: calc(var(--header-height) + 20px); }
 
@@ -295,14 +303,16 @@
 .admin__nav-item.active { background: var(--brand-soft); color: var(--brand-primary); font-weight: 500; }
 
 /* 三栏仅用于智能体与技能编辑器 */
-.builder { display: grid; grid-template-columns: 220px minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.builder { display: grid; grid-template-columns: 152px minmax(0, 1fr) 260px; gap: 18px; align-items: start; }
 .builder__rail { position: sticky; top: calc(var(--header-height) + 20px); }
 .builder__test { position: sticky; top: calc(var(--header-height) + 20px); }
+.modal .builder__rail, .modal .builder__test { top: 0; }
+.builder__test .row:has(> input) { flex-wrap: nowrap; }
 
 /* ---------- 卡片网格 ---------- */
 .grid { display: grid; gap: 14px; }
-.grid--2 { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-.grid--3 { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.grid--2 { grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); }
+.grid--3 { grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); }
 
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -1,4 +1,4 @@
-/** 可恢复的删除入口：个人分析与有权限管理的知识、文件。 */
+/** 可恢复的删除入口：个人分析与有权限管理的数据、知识、文件、连接。 */
 import { Icon } from '../components/icons.js';
 import { EmptyState, Modal, SearchInput } from '../components/ui.js';
 import { actions, bootstrap, formatDate, state, toast } from '../store.js';
@@ -7,6 +7,7 @@ import { navigate } from '../router.js';
 const COLLECTION_LABELS = {
   agent_runs: '分析', sessions: '会话', knowledge_documents: '知识文档',
   knowledge_entries: '知识条目', artifacts: '资料', saved_sessions: '保存的会话', sources: '数据源',
+  mcp_servers: 'MCP 服务', connectors: '集成连接',
 };
 
 export const TrashView = {
@@ -116,11 +117,11 @@ export const TrashView = {
       </div>
       <div v-if="loading" class="stack"><div v-for="index in 3" :key="index" class="skeleton" style="height:68px"></div></div>
       <div v-else-if="error" class="card"><p class="small" style="color:var(--danger)">{{ error }}</p><button class="btn btn--sm" @click="load">重新加载</button></div>
-      <EmptyState v-else-if="!filtered.length" icon="trash" title="没有已删除的内容" text="这里只显示你有权限恢复的内容。" />
+      <EmptyState v-else-if="!filtered.length" icon="trash" :title="query || collection ? '没有匹配的已删除内容' : '没有已删除的内容'" :text="query || collection ? '调整关键词或内容类型后重试。' : '这里只显示你有权限恢复的内容。'" />
       <div v-else class="stack">
         <article v-for="item in filtered" :key="key(item)" class="card row row--between" style="padding:14px 16px">
           <div class="grow" style="min-width:0">
-            <b class="small">{{ item.title }}</b>
+            <b class="small" style="overflow-wrap:anywhere">{{ item.title }}</b>
             <p class="xs muted">{{ label(item) }} · 删除于 {{ formatDate(item.archived_at) }}</p>
             <p v-if="item.restore_block_reason" class="small muted">{{ item.restore_block_reason }}</p>
           </div>
@@ -132,7 +133,7 @@ export const TrashView = {
           </div>
         </article>
       </div>
-      <Modal :open="!!deleteTarget" title="永久删除" @close="closeDelete">
+      <Modal :open="!!deleteTarget" title="永久删除" size="small" @close="closeDelete">
         <p v-if="deleteTarget" class="small">永久删除「{{ deleteTarget.title }}」及其文件？此操作无法恢复。</p>
         <p v-if="deleteError" class="small" style="color:var(--danger)">{{ deleteError }}</p>
         <template #footer>

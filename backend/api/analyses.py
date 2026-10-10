@@ -322,6 +322,7 @@ def create_analysis():
         skill_id=skill_id, run_kind=str(payload.get("run_kind") or "analysis"),
         budget=_analysis_budget(payload),
         idempotency_key=idempotency_key,
+        require_session=True,
     )
     if created:
         # 技能解析先记一笔：即使运行因为没有模型而提前结束，运行详情也说得清
@@ -891,6 +892,7 @@ def branch_analysis(run_id: str):
         ))),
         provider_id=run.get("provider_id"), parent_run_id=run["id"], run_kind=mode,
         skill_id=run.get("skill_id"),
+        require_session=True,
     )
     parent_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     db().put("analysis_context", {

@@ -5,16 +5,13 @@
  */
 
 @media (max-width: 1400px) {
-  .admin { grid-template-columns: 184px minmax(0, 1fr); gap: 22px; }
-  .builder { grid-template-columns: 200px minmax(0, 1fr) 300px; }
-  .metric-layout { grid-template-columns: minmax(0, 1fr) 340px; }
+  .admin { grid-template-columns: 156px minmax(0, 1fr); gap: 20px; }
 }
 
 @media (max-width: 1200px) {
   :root { --page-gutter: 24px; }
 
-  .builder { grid-template-columns: 190px minmax(0, 1fr); }
-  .builder__test { grid-column: 1 / -1; position: static; }
+  .admin .metric-layout { grid-template-columns: minmax(0, 1fr); }
   .metric-layout,
   .split { grid-template-columns: minmax(0, 1fr); }
   .workbench__capabilities { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -29,15 +26,35 @@
   .sidebar__recent,
   .sidebar__user-meta,
   .sidebar__new span { display: none; }
+  .sidebar__foot .recent-item span,
+  .sidebar__user > .avatar,
+  .sidebar__user > .grow { display: none; }
+  .sidebar__foot .recent-item { justify-content: center; padding: 0; }
 
   .sidebar__brand { justify-content: center; padding: 0; }
   .nav-item { justify-content: center; padding: 0; }
   .sidebar__new { justify-content: center; padding: 0; }
   .sidebar__user { justify-content: center; }
 
+  .app--nav-expanded { grid-template-columns: min(240px, 40vw) minmax(0, 1fr); }
+  .app--nav-expanded .sidebar__name { display: flex; }
+  .app--nav-expanded .nav-item span,
+  .app--nav-expanded .sidebar__new span,
+  .app--nav-expanded .sidebar__foot .recent-item span { display: inline; }
+  .app--nav-expanded .sidebar__recent,
+  .app--nav-expanded .nav-group__label,
+  .app--nav-expanded .sidebar__user-meta { display: block; }
+  .app--nav-expanded .sidebar__brand { justify-content: flex-start; padding: 0 18px; }
+  .app--nav-expanded .nav-item,
+  .app--nav-expanded .sidebar__foot .recent-item { justify-content: flex-start; padding: 0 10px; }
+  .app--nav-expanded .sidebar__new { justify-content: flex-start; padding: 0 12px; }
+  .app--nav-expanded .sidebar__user { justify-content: flex-start; }
+  .app--nav-expanded .sidebar__user > .avatar { display: grid; }
+  .app--nav-expanded .sidebar__user > .grow { display: block; }
+
   .admin { grid-template-columns: minmax(0, 1fr); }
   .admin__nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
-  .admin__nav-group { display: flex; gap: 4px; }
+  .admin__nav-group { display: flex; gap: 4px; flex: none; }
   .admin__nav-group + .admin__nav-group { margin-top: 0; }
   .admin__nav-label { display: none; }
   .admin__nav-item { white-space: nowrap; }
@@ -49,8 +66,6 @@
   .suggest-list { grid-template-columns: minmax(0, 1fr); }
   .topbar__search { width: auto; }
   .topbar__search span { display: none; }
-  .builder { grid-template-columns: minmax(0, 1fr); }
-  .builder__rail { position: static; }
   .kpi__value { font-size: 26px; }
   .definition { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
   .definition dd { margin-bottom: 10px; }
@@ -60,10 +75,25 @@
 @media (max-width: 640px) {
   :root { --page-gutter: 16px; --header-height: 54px; }
 
+  .app--nav-expanded { grid-template-columns: var(--sidebar-collapsed) minmax(0, 1fr); }
+  .app--nav-expanded .main { grid-column: 2; }
+  .app--nav-expanded .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 46;
+    width: min(280px, calc(100vw - 48px));
+    height: 100dvh;
+    box-shadow: var(--shadow-overlay);
+  }
+  .sidebar-backdrop { position: fixed; inset: 0; z-index: 45; width: 100%; height: 100%; background: var(--overlay-modal); }
+  .sidebar__close { margin-left: auto; color: var(--sidebar-text); }
+  .topbar { gap: 8px; }
+  .topbar__search kbd { display: none; }
   .view--page { padding: var(--page-gutter) 16px; }
   .grid--2, .grid--3, .file-grid { grid-template-columns: minmax(0, 1fr); }
   .page-head { flex-direction: column; align-items: stretch; }
-  .modal { max-height: 92vh; }
+  .overlay--center { padding: 12px; }
+  .modal { max-height: calc(100dvh - 24px); }
   .modal__body { padding: 16px; }
   .turn__bubble { max-width: 94%; }
   .toast-stack { right: 12px; left: 12px; bottom: 12px; }

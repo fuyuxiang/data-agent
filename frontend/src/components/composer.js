@@ -49,7 +49,9 @@ export const Composer = {
       mentionQuery: null,
       resolution: null,
       resolving: false,
-      area: null,
+      composing: false,
+      resolutionEpoch: 0,
+      resolutionController: null,
     };
   },
   computed: {
@@ -100,21 +102,37 @@ export const Composer = {
   },
   methods: {
     focus() {
-      this.area?.focus();
+      this.$refs.area?.focus();
+    },
+    setText(value, { focus = false } = {}) {
+      this.text = String(value ?? '');
+      this.mentionQuery = null;
+      return nextTick(() => {
+        const area = this.$refs.area;
+        area?.setSelectionRange(this.text.length, this.text.length);
+        this.resize();
+        if (focus) this.focus();
+      });
     },
     onInput(event) {
       // 文本框用 :value 单向绑定，必须在 input 事件里回写模型，
       // 否则发送按钮永远处于禁用状态。
       this.text = event?.target?.value ?? this.text;
+      this.updateMention();
+    },
+    updateMention() {
       const value = this.text;
-      const caret = this.area?.selectionStart ?? value.length;
+      const caret = this.$refs.area?.selectionStart ?? value.length;
       const before = value.slice(0, caret);
       const match = before.match(/@([^\s@]*)$/);
       this.mentionQuery = match ? match[1] : null;
-      this.resize();
-      this.scheduleResolve();
+    },
+    onCursorChange(event) {
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) this.updateMention();
     },
     onKeydown(event) {
+      // IME 的 Enter 用来确认候选词，不能同时发起分析。
+      if (event.isComposing || this.composing || event.keyCode === 229) return;
       if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
         event.preventDefault();
         this.send();
@@ -127,8 +145,17 @@ export const Composer = {
     },
     insertMention(item) {
       const value = this.text;
-      const caret = this.area?.selectionStart ?? value.length;
-      const next = `${value.slice(0, caret)}@${item.name} ${value.slice(caret)}`;
+      const area = this.$refs.area;
+      const caret = area?.selectionStart ?? value.length;
+      const match = value.slice(0, caret).match(/@([^\s@]*)$/);
+      if (!match) {
+        this.mentionQuery = null;
+        return;
+      }
+      const before = value.slice(0, caret - match[0].length);
+      const after = value.slice(area?.selectionEnd ?? caret).replace(/^[^\s@]*/, '').replace(/^[ \t]+/, '');
+      const mention = `@${item.name} `;
+      const next = `${before}${mention}${after}`;
       this.text = next;
       this.mentionQuery = null;
       if (item.type === '智能体') {
@@ -137,10 +164,10 @@ export const Composer = {
         this.scopeExplicit = false;
       }
       nextTick(() => {
+        this.$refs.area?.setSelectionRange(before.length + mention.length, before.length + mention.length);
         this.resize();
         this.focus();
       });
-      this.scheduleResolve();
     },
     send() {
       if (!this.canSend) return;
@@ -148,13 +175,14 @@ export const Composer = {
         text: this.text.trim() || '分析上传的文件',
         sourceIds: this.visibleSources,
         agentId: this.agentId,
-        files: this.pendingFiles,
+        files: [...this.pendingFiles],
         skillHint: this.resolution?.selected?.[0]?.id || '',
       };
       this.$emit('submit', payload);
       this.mentionQuery = null;
     },
     reset() {
+      this.cancelResolve();
       this.text = '';
       this.pendingFiles = [];
       if (this.fileScopeAuto) {
@@ -167,9 +195,10 @@ export const Composer = {
       nextTick(() => this.resize());
     },
     resize() {
-      if (!this.area) return;
-      this.area.style.height = 'auto';
-      this.area.style.height = `${Math.min(this.area.scrollHeight, 260)}px`;
+      const area = this.$refs.area;
+      if (!area) return;
+      area.style.height = 'auto';
+      area.style.height = `${Math.min(area.scrollHeight, 260)}px`;
     },
     toggleSource(id) {
       const current = this.chosenSources.map(item => item.id);
@@ -196,6 +225,7 @@ export const Composer = {
       this.addFiles(Array.from(event.dataTransfer?.files || []));
     },
     addFiles(files) {
+      if (this.disabled) return;
       const accepted = files.filter(file => ACCEPTED_FILES.has(file.name.split('.').pop().toLowerCase())
         && file.size <= 50 * 1024 * 1024);
       if (accepted.length !== files.length) {
@@ -213,6 +243,7 @@ export const Composer = {
       this.pendingFiles = [...this.pendingFiles, ...accepted];
     },
     removeFile(index) {
+      if (this.disabled) return;
       this.pendingFiles.splice(index, 1);
       if (!this.pendingFiles.length && this.fileScopeAuto) {
         this.scopeExplicit = false;
@@ -220,19 +251,28 @@ export const Composer = {
         this.fileScopeAuto = false;
       }
     },
-    scheduleResolve() {
+    cancelResolve() {
       clearTimeout(this.timer);
+      this.resolutionEpoch += 1;
+      this.resolutionController?.abort();
+      this.resolutionController = null;
+      this.resolving = false;
+    },
+    scheduleResolve() {
+      this.cancelResolve();
+      this.resolution = null;
       const question = this.text.trim();
-      if (question.length < 4) {
-        this.resolution = null;
-        return;
-      }
+      if (question.length < 4) return;
+      const epoch = this.resolutionEpoch;
       // 让用户看到"系统会用哪个技能"，但绝不阻塞发送。
       this.timer = setTimeout(async () => {
         this.resolving = true;
+        const controller = new AbortController();
+        this.resolutionController = controller;
         try {
           const response = await fetch(`/api/skills/resolve`, {
             method: 'POST',
+            signal: controller.signal,
             headers: {
               'Content-Type': 'application/json',
               'X-Workspace-Id': state.workspaceId,
@@ -240,16 +280,24 @@ export const Composer = {
             },
             body: JSON.stringify({ question }),
           });
-          if (response.ok) this.resolution = await response.json();
+          const result = response.ok ? await response.json() : null;
+          if (epoch === this.resolutionEpoch && question === this.text.trim()) this.resolution = result;
         } catch {
-          this.resolution = null;
+          if (epoch === this.resolutionEpoch) this.resolution = null;
         } finally {
-          this.resolving = false;
+          if (epoch === this.resolutionEpoch) {
+            this.resolving = false;
+            this.resolutionController = null;
+          }
         }
       }, 320);
     },
   },
   watch: {
+    text() {
+      this.scheduleResolve();
+      nextTick(() => this.resize());
+    },
     sourceIds(value) {
       this.$emit('update:sources', value);
     },
@@ -258,39 +306,41 @@ export const Composer = {
     this.resize();
   },
   beforeUnmount() {
-    clearTimeout(this.timer);
+    this.cancelResolve();
   },
   template: `
     <div class="composer" @dragover.prevent @drop.prevent="dropFile">
       <div v-if="pendingFiles.length" class="composer__attachments">
         <span v-for="(file, index) in pendingFiles" :key="index" class="attachment-chip">
           <Icon name="file" :size="13" />{{ file.name }}
-          <button class="icon-btn" style="width:18px;height:18px" :aria-label="'移除 ' + file.name"
+          <button class="icon-btn" :disabled="disabled" style="width:18px;height:18px" :aria-label="'移除 ' + file.name"
                   @click="removeFile(index)"><Icon name="close" :size="12" /></button>
         </span>
       </div>
 
       <textarea ref="area" class="composer__input" rows="1" :value="text" :disabled="disabled"
-                :placeholder="placeholder" @input="onInput" @keydown="onKeydown"></textarea>
+                :placeholder="placeholder" aria-label="分析问题" @input="onInput" @keydown="onKeydown"
+                @click="updateMention" @select="updateMention" @keyup="onCursorChange"
+                @compositionstart="composing = true" @compositionend="composing = false"></textarea>
 
       <div class="composer__bar">
         <button type="button" class="composer__scope" :class="{ 'is-on': chosenSources.length }"
-                title="选择本次分析的数据范围" @click="scopeOpen = true">
+                :disabled="disabled" title="选择本次分析的数据范围" @click="scopeOpen = true">
           <Icon name="database" :size="15" />
           <span class="truncate" style="max-width:160px">{{ scopeLabel }}</span>
         </button>
         <label class="composer__scope" title="附加文件（PDF、Word、Excel、文本）">
           <Icon name="upload" :size="15" />
-          <input type="file" multiple hidden accept=".docx,.xlsx,.pdf,.md,.txt" @change="pickFiles" />
+          <input type="file" multiple hidden :disabled="disabled" accept=".docx,.xlsx,.pdf,.md,.txt" @change="pickFiles" />
         </label>
         <button type="button" class="composer__scope" :class="{ 'is-on': agentId }"
-                title="选择本次使用的智能体" @click="agentOpen = true">
+                :disabled="disabled" title="选择本次使用的智能体" @click="agentOpen = true">
           <Icon name="robot" :size="15" />
           <span class="truncate" style="max-width:120px">{{ agent ? agent.name : '自动选择智能体' }}</span>
         </button>
         <span class="composer__spacer"></span>
         <span v-if="resolving" class="composer__scope xs faint">识别中…</span>
-        <span v-else-if="resolution && resolution.selected && resolution.selected.length" class="composer__scope xs">
+        <span v-else-if="resolution && resolution.selected && resolution.selected.length" class="composer__scope composer__resolution xs">
           <Icon name="layers" :size="13" />
           将使用 {{ resolution.selected.map(item => item.name).join('、') }}
         </span>

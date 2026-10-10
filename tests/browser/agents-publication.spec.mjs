@@ -158,4 +158,7 @@ test('模型、技能、指标和连接的失效绑定都可解除保存', async
   expect(actual.skill_ids).toEqual([]);
   expect(actual.metric_ids).toEqual([]);
   expect(actual.mcp_server_ids).toEqual([]);
+  // Saving refreshes the list asynchronously. Wait for interception callbacks
+  // before closing the page so their fetched responses remain readable.
+  await page.unrouteAll({ behavior: 'wait' });
 });

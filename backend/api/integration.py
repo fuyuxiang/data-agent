@@ -285,6 +285,12 @@ def _public_connector(item: dict) -> dict:
     return value
 
 
+CONNECTOR_CHANNEL_TYPES = {
+    "feishu": "lark", "dingtalk": "dingtalk", "wecom": "webhook",
+    "teams": "webhook", "email": "email",
+}
+
+
 @bp.get("/api/connectors")
 def connectors():
     wid = workspace_id()
@@ -302,6 +308,9 @@ def create_connector():
     connector_type = str(payload.get("type") or "webhook")
     if connector_type not in {"webhook", "lark", "lark_app", "dingtalk", "slack", "email"}:
         raise ValueError("连接器类型不受支持")
+    channel = str(payload.get("channel") or "")
+    if channel and CONNECTOR_CHANNEL_TYPES.get(channel) != connector_type:
+        raise ValueError("连接用途与连接器类型不匹配")
     url = str(payload.get("url") or "")
     if connector_type not in {"email", "lark_app"} and not url.startswith(("http://", "https://")):
         raise ValueError("通知连接器需要有效 Webhook URL")
@@ -328,7 +337,8 @@ def create_connector():
         "connectors",
         {
             "id": db().new_id("conn"), "workspace_id": wid, "name": str(payload.get("name") or connector_type)[:100],
-            "type": connector_type, "credential": credential, "enabled": bool(payload.get("enabled", True)), "status": "configured",
+            "type": connector_type, "channel": channel, "credential": credential,
+            "enabled": bool(payload.get("enabled", True)), "status": "configured",
         },
         workspace_id=wid,
     )

@@ -11,14 +11,15 @@ import { actions, formatDate, formatTime, state, toast } from '../store.js';
 
 export const RunsView = {
   name: 'RunsView',
-  components: { DataTable, Drawer, EmptyState, Icon, Status, Tabs },
+  components: { DataTable, Drawer, EmptyState, Icon, SearchInput, Status, Tabs },
   setup() {
-    return { formatDate, state, toast };
+    return { actions, formatDate, formatTime, state, toast };
   },
   data() {
     return {
-      runs: [], loading: true, query: '', statusFilter: '',
+      runs: [], loading: true, loadError: '', query: '', statusFilter: '',
       detail: null, detailTab: 'overview',
+      detailOpen: false, detailLoading: false, detailError: '', activeRun: null, detailVersion: 0,
     };
   },
   computed: {
@@ -45,33 +46,50 @@ export const RunsView = {
         ...item,
         created_at: formatTime(item.created_at),
         skill_ids: (item.skill_ids || []).join('、') || '—',
-        duration_seconds: item.duration_seconds ? `${item.duration_seconds}s` : '—',
+        duration_seconds: item.duration_seconds != null ? `${item.duration_seconds}s` : '—',
       }));
     },
   },
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.detailVersion += 1;
+  },
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/admin/runs?limit=300');
         this.runs = response.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
     },
     async open(run) {
+      const version = ++this.detailVersion;
       this.detailTab = 'overview';
       this.detail = null;
+      this.activeRun = run;
+      this.detailOpen = true;
+      this.detailLoading = true;
+      this.detailError = '';
       try {
-        this.detail = (await actions.get(`/api/admin/runs/${run.id}`)).item;
+        const response = await actions.get(`/api/admin/runs/${run.id}`);
+        if (version === this.detailVersion) this.detail = response.item;
       } catch (error) {
-        toast(error.message, '无法读取详情', 'error');
+        if (version === this.detailVersion) this.detailError = error.message;
+      } finally {
+        if (version === this.detailVersion) this.detailLoading = false;
       }
+    },
+    closeDetail() {
+      this.detailVersion += 1;
+      this.detailOpen = false;
+      this.detail = null;
     },
   },
   template: `
@@ -92,15 +110,17 @@ export const RunsView = {
           <button :class="{ active: statusFilter === 'cancelled' }" @click="statusFilter = 'cancelled'">已取消</button>
         </div>
         <span class="toolbar__spacer"></span>
-        <span class="small faint">{{ filtered.length }} 条记录</span>
+        <span v-if="!loading && !loadError" class="small faint">{{ filtered.length }} 条记录</span>
       </div>
 
       <div v-if="loading" class="stack">
         <div v-for="index in 6" :key="index" class="skeleton" style="height:44px"></div>
       </div>
 
-      <EmptyState v-else-if="!filtered.length" icon="history" title="还没有运行记录"
-                  text="用户在工作台提问后，这里会记录完整的执行轨迹。" />
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>运行记录加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+
+      <EmptyState v-else-if="!filtered.length" icon="history" :title="runs.length ? '没有匹配的运行记录' : '还没有运行记录'"
+                  :text="runs.length ? '调整搜索词或状态筛选后重试。' : '用户在工作台提问后，这里会记录完整的执行轨迹。'" />
 
       <div v-else class="table-wrap">
         <table class="table">
@@ -110,10 +130,10 @@ export const RunsView = {
           </tr></thead>
           <tbody>
             <tr v-for="item in filtered" :key="item.id">
-              <td>{{ item.created_at }}</td>
+              <td class="small" style="white-space:nowrap" :title="item.created_at">{{ formatTime(item.created_at) }}</td>
               <td class="run-row__q" :title="item.question">{{ item.question || '—' }}<span v-if="item.archived_at" class="xs muted" style="display:block">已从会话删除 · 执行记录保留</span></td>
               <td>{{ (item.skill_ids || []).join('、') || '自动' }}</td>
-              <td class="is-numeric">{{ item.duration_seconds ? item.duration_seconds + 's' : '—' }}</td>
+              <td class="is-numeric">{{ item.duration_seconds != null ? item.duration_seconds + 's' : '—' }}</td>
               <td><Status :status="item.execution_status" /></td>
               <td><button class="btn btn--sm" @click="open(item)">详情</button></td>
             </tr>
@@ -122,8 +142,10 @@ export const RunsView = {
       </div>
     </div>
 
-    <Drawer :open="!!detail" :title="'运行详情'" :subtitle="detail?.contract?.payload?.objective" width="620"
-            @close="detail = null">
+    <Drawer :open="detailOpen" :title="'运行详情'" :subtitle="detail?.contract?.payload?.objective || activeRun?.question" width="680"
+            @close="closeDetail">
+      <div v-if="detailLoading" class="stack"><p class="small muted" role="status">正在读取运行详情…</p><div class="skeleton" style="height:120px"></div></div>
+      <div v-else-if="detailError" class="stack"><p class="small" role="alert" style="color:var(--danger)">{{ detailError }}</p><button class="btn btn--sm" @click="open(activeRun)">重试</button></div>
       <div v-if="detail">
         <Tabs v-model="detailTab" :items="[
           { key: 'overview', label: '概览' },
@@ -147,19 +169,19 @@ export const RunsView = {
             </div>
             <div class="metric-strip__item">
               <div class="metric-strip__label">耗时</div>
-              <div class="metric-strip__value">{{ detail.run.duration_seconds ? detail.run.duration_seconds + 's' : '—' }}</div>
+              <div class="metric-strip__value">{{ detail.run.duration_seconds != null ? detail.run.duration_seconds + 's' : '—' }}</div>
             </div>
             <div class="metric-strip__item">
               <div class="metric-strip__label">Token</div>
-              <div class="metric-strip__value">{{ detail.run.usage.model_tokens || 0 }}</div>
+              <div class="metric-strip__value">{{ detail.run.usage?.model_tokens || 0 }}</div>
             </div>
           </div>
           <dl class="definition">
             <template v-if="detail.run.archived_at"><dt>会话显示</dt><dd>已从会话删除，执行记录保留</dd></template>
             <dt>结束原因</dt><dd class="mono xs">{{ detail.run.stop_reason || '—' }}</dd>
-            <dt>数据范围</dt><dd class="mono xs">{{ detail.run.source_scope.join('、') || '—' }}</dd>
-            <dt>起始</dt><dd>{{ formatDate(detail.run.started_at) }}</dd>
-            <dt>结束</dt><dd>{{ formatDate(detail.run.finished_at) }}</dd>
+            <dt>数据范围</dt><dd class="mono xs">{{ (detail.run.source_scope || []).join('、') || '—' }}</dd>
+            <dt>起始</dt><dd :title="detail.run.started_at">{{ formatTime(detail.run.started_at) || '—' }}</dd>
+            <dt>结束</dt><dd :title="detail.run.finished_at">{{ formatTime(detail.run.finished_at) || '—' }}</dd>
           </dl>
           <div v-if="detail.metrics && detail.metrics.length">
             <h3 class="card__title" style="margin:16px 0 8px">核验规则</h3>
@@ -183,12 +205,10 @@ export const RunsView = {
         <div v-else-if="detailTab === 'actions'" class="timeline" style="margin-top:16px">
           <EmptyState v-if="!detail.actions.length" icon="bolt" title="没有工具调用" />
           <div v-for="item in detail.actions" :key="item.tool_id + item.created_at" class="timeline__item">
-            <Icon name="check" :size="15" />
-            <div>
+            <Icon :name="['failed', 'error'].includes(item.status) ? 'close' : 'bolt'" :size="15" />
+            <div class="grow">
               <b class="small">{{ item.tool_id }}</b>
-              <div v-if="item.arguments && item.arguments.sql" class="xs faint mono truncate">
-                {{ item.arguments.sql }}
-              </div>
+              <details v-if="item.arguments?.sql" class="run-sql"><summary class="xs muted">查看 SQL</summary><pre class="mono xs" tabindex="0">{{ item.arguments.sql }}</pre></details>
             </div>
             <span class="timeline__time">{{ item.status }}</span>
           </div>
@@ -202,7 +222,7 @@ export const RunsView = {
               <b class="small">第 {{ item.sequence }} 轮 · {{ item.model }}</b>
               <div class="xs faint">{{ item.finish_reason }} · {{ item.tool_call_count }} 次工具调用</div>
             </div>
-            <span class="timeline__time">{{ item.usage.total_tokens || 0 }} tok</span>
+            <span class="timeline__time">{{ item.usage?.total_tokens || 0 }} tok</span>
           </div>
         </div>
 
@@ -230,10 +250,10 @@ export const EvaluationsView = {
   name: 'EvaluationsView',
   components: { EmptyState, Icon, Status },
   setup() {
-    return { state, toast };
+    return { formatDate, state, toast };
   },
   data() {
-    return { data: null, loading: true, tab: 'overview' };
+    return { data: null, loading: true, loadError: '', tab: 'overview' };
   },
   computed: {
     reasonMax() {
@@ -246,10 +266,11 @@ export const EvaluationsView = {
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         this.data = await actions.get('/api/admin/evaluations');
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -266,13 +287,15 @@ export const EvaluationsView = {
           <p class="page-head__desc">用户反馈、错误统计与质量趋势。反馈不只是一个赞踩按钮，它要能说明哪里不对。</p>
         </div>
         <div class="page-head__actions">
-          <button class="btn btn--sm" @click="load"><Icon name="refresh" :size="14" />刷新</button>
+          <button class="btn btn--sm" :disabled="loading" @click="load"><Icon name="refresh" :size="14" />{{ loading ? '刷新中…' : '刷新' }}</button>
         </div>
       </header>
 
       <div v-if="loading" class="stack">
         <div v-for="index in 3" :key="index" class="skeleton" style="height:110px"></div>
       </div>
+
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>评测数据加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <template v-else-if="data">
         <div class="metric-strip">
@@ -337,7 +360,7 @@ export const EvaluationsView = {
             <h2 class="card__title" style="margin-bottom:4px">模型用量</h2>
             <p class="card__hint" style="margin-bottom:14px">按累计 token 排序</p>
             <EmptyState v-if="!data.usage.length" icon="cpu" title="还没有用量记录" />
-            <table v-else class="table">
+            <div v-else class="table-wrap"><table class="table">
               <thead><tr><th>模型</th><th class="is-numeric">请求</th><th class="is-numeric">Token</th></tr></thead>
               <tbody>
                 <tr v-for="item in data.usage" :key="item.model">
@@ -346,7 +369,7 @@ export const EvaluationsView = {
                   <td class="is-numeric">{{ item.total_tokens.toLocaleString('zh-CN') }}</td>
                 </tr>
               </tbody>
-            </table>
+            </table></div>
           </div>
 
           <div class="card">

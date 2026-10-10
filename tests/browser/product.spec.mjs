@@ -43,7 +43,11 @@ test('指标中心是一等模块：可搜索、可看口径、可试算', async
   await expect(page.locator('.definition').last()).toContainText('技术负责人');
 
   await expect(page.locator('.card').filter({ hasText: '试算' })).toBeVisible();
+  const completed = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/admin/metric-trial' && response.request().method() === 'POST',
+  { timeout: 20_000 });
   await page.locator('.card').filter({ hasText: '试算' }).locator('button', { hasText: '运行试算' }).click();
+  expect((await completed).ok()).toBe(true);
   await expect(page.locator('.card').filter({ hasText: '试算' }).locator('pre')).toContainText('SELECT');
 });
 

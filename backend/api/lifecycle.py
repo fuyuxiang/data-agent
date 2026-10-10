@@ -20,7 +20,7 @@ from ..services.lifecycle import (
     uploads_preview,
     workspace_preview,
 )
-from .common import body, db, require_workspace_access, workspace_id
+from .common import body, current_user_id, db, require_workspace_access, workspace_id
 
 
 bp = Blueprint("lifecycle", __name__)
@@ -71,7 +71,7 @@ def lifecycle_settings_get(): return jsonify({"ok": True, "settings": load_setti
 @bp.put("/api/lifecycle/settings")
 def lifecycle_settings_put():
     try:
-        return jsonify({"ok": True, "settings": save_settings(db(), workspace_id(), body())})
+        return jsonify({"ok": True, "settings": save_settings(db(), workspace_id(), body(), actor=current_user_id())})
     except ValueError as exc:
         return _failure(exc, "")
 

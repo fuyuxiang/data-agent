@@ -36,9 +36,9 @@ export const ModelsView = {
   },
   data() {
     return {
-      providers: [], loading: true, editor: null, detail: null, removeTarget: null,
+      providers: [], loading: true, loadError: '', editor: null, detail: null, removeTarget: null,
       removeReferences: null, removeLoading: false, removeError: '',
-      saving: false, deleting: false, testing: '', result: {},
+      saving: false, deleting: false, testing: {}, result: {},
     };
   },
   computed: {
@@ -52,11 +52,12 @@ export const ModelsView = {
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/providers');
         this.providers = response.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
@@ -99,14 +100,15 @@ export const ModelsView = {
       }
     },
     async test(provider) {
-      this.testing = provider.id;
+      if (this.testing[provider.id]) return;
+      this.testing[provider.id] = true;
       try {
         await actions.post(`/api/providers/${provider.id}/test`);
         this.result[provider.id] = { ok: true, text: '连接成功' };
       } catch (error) {
         this.result[provider.id] = { ok: false, text: error.message };
       } finally {
-        this.testing = '';
+        delete this.testing[provider.id];
       }
     },
     async openRemove(provider) {
@@ -170,6 +172,9 @@ export const ModelsView = {
         <div v-for="index in 3" :key="index" class="skeleton" style="height:80px"></div>
       </div>
 
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>模型服务加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+
+      <EmptyState v-else-if="!providers.length" compact icon="cpu" title="还没有模型服务" text="添加模型服务后，智能体才能进行分析。" />
       <div v-else class="grid grid--2">
         <article v-for="item in providers" :key="item.id" class="card">
           <div class="card__head">
@@ -193,8 +198,8 @@ export const ModelsView = {
             <button class="btn btn--sm" @click="detail = item"><Icon name="fileText" :size="14" />查看</button>
             <button v-if="canManageProviders && (item.id !== 'environment-default' || state.user?.role === 'owner')"
                     class="btn btn--sm" @click="edit(item)"><Icon name="edit" :size="14" />编辑</button>
-            <button v-if="canManageProviders" class="btn btn--sm" :disabled="testing === item.id" @click="test(item)">
-              <Icon name="play" :size="14" />{{ testing === item.id ? '测试中…' : '测试连接' }}
+            <button v-if="canManageProviders" class="btn btn--sm" :disabled="testing[item.id]" @click="test(item)">
+              <Icon name="play" :size="14" />{{ testing[item.id] ? '测试中…' : '测试连接' }}
             </button>
             <span class="grow"></span>
             <button v-if="canManageProviders && item.id !== 'environment-default'" class="btn btn--sm"
@@ -241,7 +246,7 @@ export const ModelsView = {
       </template>
     </Modal>
 
-    <Modal :open="!!editor" :title="editor?.id ? '编辑模型服务' : '添加模型服务'" @close="editor = null">
+    <Modal :open="!!editor" :title="editor?.id ? '编辑模型服务' : '添加模型服务'" @close="!saving && (editor = null)">
       <div v-if="editor" class="stack">
         <label class="field"><span>名称<em> *</em></span>
           <input v-model.trim="editor.name" class="input" placeholder="生产模型" /></label>
@@ -262,7 +267,7 @@ export const ModelsView = {
           </select></label>
       </div>
       <template #footer>
-        <button class="btn" @click="editor = null">取消</button>
+        <button class="btn" :disabled="saving" @click="editor = null">取消</button>
         <button class="btn btn--primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>`,
@@ -274,72 +279,102 @@ export const McpView = {
   name: 'McpView',
   components: { EmptyState, Icon, Modal, Status },
   setup() {
-    return { state, toast };
+    return { navigate, state, toast };
   },
   data() {
-    return { servers: [], loading: true, editor: null, active: null, tools: [], testing: '' };
+    return { servers: [], loading: true, loadError: '', editor: null, active: null, tools: [], testing: {},
+      saving: false, toolsLoading: false, toolsError: '', toolsVersion: 0, removeTarget: null, deleting: false };
   },
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.toolsVersion += 1;
+  },
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/mcp/servers');
         this.servers = response.items || response.servers || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
     },
     create() {
-      this.editor = { name: '', url: '', transport: 'http', enabled: true };
+      this.editor = { name: '', url: '', transport: 'http', command: '', args: [], enabled: true };
     },
     async save() {
+      if (this.saving || !this.editor) return;
+      if (!this.editor.name || (this.editor.transport === 'stdio' ? !this.editor.command?.trim() : !/^https?:\/\//.test(this.editor.url))) {
+        toast(this.editor.transport === 'stdio' ? '请填写名称和执行命令' : '请填写名称和有效的 HTTP / HTTPS 服务地址', '信息未填完整', 'error');
+        return;
+      }
+      this.saving = true;
       try {
+        const payload = { ...this.editor, args: (this.editor.args || []).filter(argument => argument.trim() !== '') };
         const response = this.editor.id
-          ? await actions.patch(`/api/mcp/servers/${this.editor.id}`, this.editor)
-          : await actions.post('/api/mcp/servers', this.editor);
+          ? await actions.patch(`/api/mcp/servers/${this.editor.id}`, payload)
+          : await actions.post('/api/mcp/servers', payload);
         this.servers = this.servers
           .filter(item => item.id !== response.item.id).concat(response.item);
         this.editor = null;
         toast('MCP 服务已保存', '完成');
       } catch (error) {
         toast(error.message, '保存失败', 'error');
+      } finally {
+        this.saving = false;
       }
     },
     async test(server) {
-      this.testing = server.id;
+      if (this.testing[server.id]) return;
+      this.testing[server.id] = true;
       try {
         const response = await actions.post(`/api/mcp/servers/${server.id}/test`);
         server.status = 'connected';
-        server.tool_count = (response.tools || []).length;
+        server.tool_count = (response.result?.tools || response.tools || []).length;
         toast('连接成功', '完成');
       } catch (error) {
         server.status = 'error';
         toast(error.message, '连接失败', 'error');
       } finally {
-        this.testing = '';
+        delete this.testing[server.id];
       }
     },
     async open(server) {
+      const version = ++this.toolsVersion;
       this.active = server;
       this.tools = [];
+      this.toolsLoading = true;
+      this.toolsError = '';
       try {
         const response = await actions.get(`/api/mcp/servers/${server.id}/tools`);
-        this.tools = response.items || response.tools || [];
+        if (version === this.toolsVersion) this.tools = response.items || response.tools || [];
       } catch (error) {
-        toast(error.message, '无法读取工具清单', 'error');
+        if (version === this.toolsVersion) this.toolsError = error.message;
+      } finally {
+        if (version === this.toolsVersion) this.toolsLoading = false;
       }
     },
+    closeTools() {
+      this.toolsVersion += 1;
+      this.active = null;
+    },
     async remove(server) {
+      if (!server || this.deleting) return;
+      this.deleting = true;
       try {
         await actions.remove(`/api/mcp/servers/${server.id}`);
         this.servers = this.servers.filter(item => item.id !== server.id);
+        this.removeTarget = null;
+        toast('MCP 服务已移入回收站', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+      } finally {
+        this.deleting = false;
       }
     },
     riskLabel(tool) {
@@ -357,6 +392,7 @@ export const McpView = {
           </p>
         </div>
         <div class="page-head__actions">
+          <button class="btn btn--sm" @click="navigate('admin/trash', { collection: 'mcp_servers' })"><Icon name="trash" :size="14" />回收站</button>
           <button class="btn btn--primary btn--sm" @click="create"><Icon name="plus" :size="14" />添加 MCP 服务</button>
         </div>
       </header>
@@ -377,6 +413,8 @@ export const McpView = {
         <div v-for="index in 2" :key="index" class="skeleton" style="height:80px"></div>
       </div>
 
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>MCP 服务加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
+
       <EmptyState v-else-if="!servers.length" icon="plug" title="还没有连接 MCP 服务"
                   text="连接后，智能体可以通过 MCP 读取外部系统的数据——但仍然受权限与确认策略约束。" />
 
@@ -394,12 +432,12 @@ export const McpView = {
             <span v-if="item.tool_count !== undefined" class="badge">{{ item.tool_count }} 个工具</span>
           </div>
           <div class="row" style="margin-top:12px">
-            <button class="btn btn--sm" :disabled="testing === item.id" @click="test(item)">
-              <Icon name="play" :size="14" />{{ testing === item.id ? '连接中…' : '测试连接' }}
+            <button class="btn btn--sm" :disabled="testing[item.id]" @click="test(item)">
+              <Icon name="play" :size="14" />{{ testing[item.id] ? '连接中…' : '测试连接' }}
             </button>
             <button class="btn btn--sm" @click="open(item)"><Icon name="sort" :size="14" />查看工具</button>
             <span class="grow"></span>
-            <button class="icon-btn icon-btn--danger" aria-label="删除" @click="remove(item)">
+            <button class="icon-btn icon-btn--danger" aria-label="删除" @click="removeTarget = item">
               <Icon name="trash" :size="15" />
             </button>
           </div>
@@ -407,11 +445,16 @@ export const McpView = {
       </div>
     </div>
 
-    <Modal :open="!!editor" title="添加 MCP 服务" @close="editor = null">
+    <Modal :open="!!removeTarget" size="small" title="删除 MCP 服务" @close="!deleting && (removeTarget = null)">
+      <p class="small">确定删除「{{ removeTarget?.name }}」吗？智能体将无法再调用此服务，可在回收站恢复。</p>
+      <template #footer><button class="btn" :disabled="deleting" @click="removeTarget = null">取消</button><button class="btn btn--danger" :disabled="deleting" @click="remove(removeTarget)">{{ deleting ? '删除中…' : '确认删除' }}</button></template>
+    </Modal>
+
+    <Modal :open="!!editor" title="添加 MCP 服务" @close="!saving && (editor = null)">
       <div v-if="editor" class="stack">
         <label class="field"><span>名称<em> *</em></span>
           <input v-model.trim="editor.name" class="input" placeholder="CRM 只读接口" /></label>
-        <label class="field"><span>服务地址<em> *</em></span>
+        <label v-if="editor.transport !== 'stdio'" class="field"><span>服务地址<em> *</em></span>
           <input v-model.trim="editor.url" class="input" placeholder="https://mcp.example.com/sse" /></label>
         <label class="field"><span>传输方式</span>
           <select v-model="editor.transport" class="select">
@@ -419,19 +462,26 @@ export const McpView = {
             <option value="stdio">本地 stdio</option>
           </select></label>
         <p class="xs faint">出站域名必须已在部署白名单内。</p>
+        <template v-if="editor.transport === 'stdio'">
+          <label class="field"><span>执行命令<em> *</em></span><input v-model.trim="editor.command" class="input" placeholder="npx / node / python3" /></label>
+          <label class="field"><span>命令参数（每行一个）</span><textarea v-model="argumentText" class="textarea" rows="3"></textarea></label>
+          <p class="xs faint">仅系统所有者可创建，且部署环境须已启用 stdio MCP。使用 PATH 中受支持的命令，脚本路径或包名填在参数中；空行会忽略。</p>
+        </template>
       </div>
       <template #footer>
-        <button class="btn" @click="editor = null">取消</button>
-        <button class="btn btn--primary" @click="save">保存</button>
+        <button class="btn" :disabled="saving" @click="editor = null">取消</button>
+        <button class="btn btn--primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>
 
-    <Modal :open="!!active" :title="(active?.name || '') + ' · 工具'" wide @close="active = null">
+    <Modal :open="!!active" :title="(active?.name || '') + ' · 工具'" size="large" @close="closeTools">
       <p class="small muted" style="margin-bottom:12px">
         MCP 工具是外部系统提供的能力，不是技能。技能可以调用它们，但两者不是同一层概念。
       </p>
       <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-        <EmptyState v-if="!tools.length" icon="plug" title="没有可用工具" text="先测试连接，确认服务可达。" />
+        <p v-if="toolsLoading" class="small muted" role="status">正在读取工具清单…</p>
+        <div v-else-if="toolsError" class="stack"><p role="alert" class="small" style="color:var(--danger)">{{ toolsError }}</p><button class="btn btn--sm" @click="open(active)">重试</button></div>
+        <EmptyState v-else-if="!tools.length" compact icon="plug" title="没有可用工具" text="先测试连接，确认服务可达。" />
         <article v-for="tool in tools" :key="tool.name" class="card" style="padding:12px 14px">
           <div class="row row--between">
             <b class="small">{{ tool.name }}</b>
@@ -442,6 +492,10 @@ export const McpView = {
       </div>
     </Modal>`,
   computed: {
+    argumentText: {
+      get() { return (this.editor?.args || []).join('\n'); },
+      set(value) { if (this.editor) this.editor.args = String(value || '').split('\n'); },
+    },
     riskLevels() {
       return TOOL_RISK;
     },
@@ -451,35 +505,44 @@ export const McpView = {
 /* ------------------------------------------------------------------ 集成 */
 
 const CHANNELS = [
-  { key: 'feishu', name: '飞书', icon: 'cable', note: '通过应用机器人把分析结果推送到群聊' },
-  { key: 'dingtalk', name: '钉钉', icon: 'cable', note: '通过群机器人 Webhook 推送' },
-  { key: 'wecom', name: '企业微信', icon: 'cable', note: '通过群机器人 Webhook 推送' },
-  { key: 'teams', name: 'Teams', icon: 'cable', note: '通过 Incoming Webhook 推送' },
+  { key: 'feishu', type: 'lark', name: '飞书', icon: 'cable', note: '通过群机器人 Webhook 推送分析结果' },
+  { key: 'dingtalk', type: 'dingtalk', name: '钉钉', icon: 'cable', note: '通过群机器人 Webhook 推送' },
+  { key: 'wecom', type: 'webhook', name: '企业微信', icon: 'cable', note: '通过适配网关接收通用 JSON，再转发到群机器人' },
+  { key: 'teams', type: 'webhook', name: 'Teams', icon: 'cable', note: '通过适配网关接收通用 JSON，再转发到 Teams' },
   { key: 'api', name: '开放 API', icon: 'cable', note: '供外部系统以集成令牌调用分析结果' },
-  { key: 'email', name: '邮件', icon: 'cable', note: '通过 SMTP 把报告与成果发送给收件人' },
+  { key: 'email', type: 'email', name: '邮件', icon: 'cable', note: '通过 SMTP 把报告与成果发送给收件人' },
 ];
 
 export const IntegrationsView = {
   name: 'IntegrationsView',
   components: { EmptyState, Icon, Modal, Status },
   setup() {
-    return { state, toast };
+    return { navigate, state, toast };
   },
   data() {
-    return { connectors: [], loading: true, editor: null, sendOpen: false, sendForm: { url: '', payload: '' } };
+    return { connectors: [], loading: true, loadError: '', editor: null, saving: false, testing: {},
+      removeTarget: null, deleting: false, apiOpen: false };
   },
   computed: {
     channels() {
-      return CHANNELS.map(channel => {
-        const existing = this.connectors.find(item => item.type === channel.key);
+      const assigned = new Set();
+      const channels = CHANNELS.map(channel => {
+        const existing = channel.type && this.connectors.find(item => item.type === channel.type && !assigned.has(item.id)
+          && (item.channel ? item.channel === channel.key : channel.type !== 'webhook'));
+        if (existing) assigned.add(existing.id);
         return {
           ...channel,
           connector: existing,
           state: existing
-            ? (existing.status === 'connected' || existing.status === 'ready' ? 'connected' : 'configured')
+            ? (existing.enabled === false ? 'disabled' : existing.status || 'configured')
             : 'disabled',
         };
       });
+      return channels.concat(this.connectors.filter(item => !assigned.has(item.id)).map(item => ({
+        key: item.id, type: item.type, name: item.name, icon: 'cable',
+        note: item.type === 'webhook' && !item.channel ? '通用 Webhook 连接器' : '已保存的连接器', connector: item,
+        state: item.enabled === false ? 'disabled' : item.status || 'configured',
+      })));
     },
   },
   async mounted() {
@@ -488,49 +551,72 @@ export const IntegrationsView = {
   methods: {
     async load() {
       this.loading = true;
+      this.loadError = '';
       try {
         const response = await actions.get('/api/connectors');
         this.connectors = response.items || [];
       } catch (error) {
-        toast(error.message, '加载失败', 'error');
+        this.loadError = error.message;
       } finally {
         this.loading = false;
       }
     },
     configure(channel) {
+      if (channel.key === 'api') { this.apiOpen = true; return; }
       if (channel.connector) {
         this.editor = { ...channel.connector };
         return;
       }
-      this.editor = { name: channel.name, type: channel.key, url: '', enabled: true };
+      this.editor = { name: channel.name, type: channel.type, channel: channel.key, url: '', enabled: true,
+        host: '', port: 587, username: '', password: '', sender: '', recipient: '', use_tls: true };
     },
     async save() {
+      if (!this.editor || this.editor.id || this.saving) return;
+      const email = this.editor.type === 'email';
+      if (!this.editor.name || (email ? !this.editor.host || !this.editor.recipient : !/^https?:\/\//.test(this.editor.url))) {
+        toast(email ? '请填写名称、SMTP 主机和收件人' : '请填写名称和有效的 HTTP / HTTPS Webhook 地址', '信息未填完整', 'error');
+        return;
+      }
+      this.saving = true;
       try {
-        const response = this.editor.id
-          ? await actions.patch(`/api/connectors/${this.editor.id}`, this.editor)
-          : await actions.post('/api/connectors', this.editor);
+        const response = await actions.post('/api/connectors', this.editor);
         this.connectors = this.connectors
           .filter(item => item.id !== response.item.id).concat(response.item);
         this.editor = null;
         toast('集成已保存', '完成');
       } catch (error) {
         toast(error.message, '保存失败', 'error');
+      } finally {
+        this.saving = false;
       }
     },
     async test(connector) {
+      if (this.testing[connector.id]) return;
+      this.testing[connector.id] = true;
       try {
         await actions.post(`/api/connectors/${connector.id}/test`);
+        connector.status = 'connected';
         toast('连接成功', '完成');
       } catch (error) {
+        connector.status = 'error';
         toast(error.message, '连接失败', 'error');
+      } finally {
+        delete this.testing[connector.id];
       }
     },
     async remove(connector) {
+      if (!connector || this.deleting) return;
+      this.deleting = true;
       try {
         await actions.remove(`/api/connectors/${connector.id}`);
         this.connectors = this.connectors.filter(item => item.id !== connector.id);
+        this.removeTarget = null;
+        this.editor = null;
+        toast('集成已移入回收站', '完成');
       } catch (error) {
         toast(error.message, '删除失败', 'error');
+      } finally {
+        this.deleting = false;
       }
     },
   },
@@ -541,11 +627,14 @@ export const IntegrationsView = {
           <h1 class="page-head__title">集成</h1>
           <p class="page-head__desc">把数擎的分析结果送到用户已经在用的地方。没有配置的一律显示"未配置"，不做假开关。</p>
         </div>
+        <div class="page-head__actions"><button class="btn btn--sm" @click="navigate('admin/trash', { collection: 'connectors' })"><Icon name="trash" :size="14" />回收站</button></div>
       </header>
 
       <div v-if="loading" class="grid grid--2">
         <div v-for="index in 6" :key="index" class="skeleton" style="height:110px"></div>
       </div>
+
+      <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>集成加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <div v-else class="grid grid--2">
         <article v-for="channel in channels" :key="channel.key" class="card file-tile">
@@ -562,39 +651,58 @@ export const IntegrationsView = {
             <Status :status="channel.state" />
           </div>
           <div class="row" style="margin-top:auto">
-            <button v-if="channel.connector" class="btn btn--sm" @click="test(channel.connector)">
-              <Icon name="play" :size="14" />测试
+            <button v-if="channel.connector" class="btn btn--sm" :disabled="testing[channel.connector.id]" @click="test(channel.connector)">
+              <Icon name="play" :size="14" />{{ testing[channel.connector.id] ? '测试中…' : '测试' }}
             </button>
             <button class="btn btn--sm" @click="configure(channel)">
-              {{ channel.connector ? '配置' : '接入' }}
+              {{ channel.key === 'api' ? '查看接入说明' : channel.connector ? '查看配置' : '接入' }}
             </button>
             <span class="grow"></span>
             <button v-if="channel.connector" class="icon-btn icon-btn--danger" aria-label="移除"
-                    @click="remove(channel.connector)"><Icon name="trash" :size="15" /></button>
+                    @click="removeTarget = channel.connector"><Icon name="trash" :size="15" /></button>
           </div>
         </article>
       </div>
     </div>
 
-    <Modal :open="!!editor" :title="(editor?.name || '') + ' 集成'" @close="editor = null">
-      <div v-if="editor" class="stack">
+    <Modal :open="apiOpen" title="开放 API 接入" size="small" @close="apiOpen = false">
+      <p class="small">开放 API 使用工作空间集成令牌鉴权，不需要创建通知连接器。令牌由工作空间所有者通过管理 API 生成；当前用户管理界面不提供生成入口。</p>
+      <p class="xs muted" style="margin-top:12px">请联系工作空间所有者获取接口地址与令牌。集成令牌应妥善保管。</p>
+      <template #footer><button class="btn" @click="apiOpen = false">关闭</button></template>
+    </Modal>
+
+    <Modal :open="!!removeTarget" title="移除集成" size="small" @close="!deleting && (removeTarget = null)">
+      <p class="small">确定移除「{{ removeTarget?.name }}」吗？此连接将无法再用于结果推送，可在回收站恢复。</p>
+      <template #footer><button class="btn" :disabled="deleting" @click="removeTarget = null">取消</button><button class="btn btn--danger" :disabled="deleting" @click="remove(removeTarget)">{{ deleting ? '移除中…' : '确认移除' }}</button></template>
+    </Modal>
+
+    <Modal :open="!!editor" :title="(editor?.name || '') + ' 集成'" @close="!saving && (editor = null)">
+      <div v-if="editor?.id" class="stack">
+        <dl class="definition"><dt>名称</dt><dd>{{ editor.name }}</dd><dt>连接类型</dt><dd>{{ editor.type }}</dd><dt>状态</dt><dd><Status :status="editor.status || 'configured'" /></dd><dt>凭据</dt><dd>{{ editor.configured ? '已加密保存' : '未配置' }}</dd></dl>
+        <p class="small muted">服务端不支持更新已保存的连接凭据。如需更换地址或凭据，请先移除该连接，再重新接入。</p>
+      </div>
+      <div v-else-if="editor" class="stack">
         <label class="field"><span>名称<em> *</em></span>
           <input v-model.trim="editor.name" class="input" /></label>
-        <label v-if="['feishu', 'dingtalk', 'wecom', 'teams'].includes(editor.type)" class="field">
+        <label v-if="editor.type !== 'email'" class="field">
           <span>Webhook 地址<em> *</em></span>
           <input v-model.trim="editor.url" class="input" placeholder="https://…" /></label>
-        <label v-else-if="editor.type === 'api'" class="field">
-          <span>说明</span>
-          <input v-model.trim="editor.description" class="input" placeholder="在「用户管理」生成集成令牌后调用开放 API" /></label>
-        <label v-else class="field">
-          <span>SMTP 配置</span>
-          <input class="input" disabled placeholder="在部署环境变量中配置 SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD" />
-        </label>
+        <p v-if="editor.type === 'webhook'" class="small muted">请填写能接收 message 与 metadata 字段的通用 JSON 适配网关地址。企业微信与 Teams 原生机器人地址需要协议转换，不能直接使用。</p>
+        <template v-if="editor.type === 'email'">
+          <div class="grid grid--2"><label class="field"><span>SMTP 主机<em> *</em></span><input v-model.trim="editor.host" class="input" placeholder="smtp.company.com" /></label><label class="field"><span>端口</span><input v-model.number="editor.port" class="input" type="number" min="1" max="65535" /></label></div>
+          <label class="field"><span>用户名</span><input v-model.trim="editor.username" class="input" autocomplete="off" /></label>
+          <label class="field"><span>密码</span><input v-model="editor.password" type="password" class="input" autocomplete="new-password" /></label>
+          <label class="field"><span>发件人</span><input v-model.trim="editor.sender" class="input" type="email" /></label>
+          <label class="field"><span>收件人<em> *</em></span><input v-model.trim="editor.recipient" class="input" type="email" placeholder="name@company.com" /></label>
+          <label class="row small"><input v-model="editor.use_tls" type="checkbox" />使用 TLS 加密连接</label>
+        </template>
         <p class="xs faint">外部地址必须已在部署的出站白名单内。</p>
       </div>
       <template #footer>
-        <button class="btn" @click="editor = null">取消</button>
-        <button class="btn btn--primary" @click="save">保存</button>
+        <button class="btn" :disabled="saving" @click="editor = null">{{ editor?.id ? '关闭' : '取消' }}</button>
+        <button v-if="editor?.id" class="btn" :disabled="testing[editor.id]" @click="test(editor)">{{ testing[editor.id] ? '测试中…' : '测试连接' }}</button>
+        <button v-if="editor?.id" class="btn btn--danger" @click="removeTarget = editor; editor = null">移除并重新接入</button>
+        <button v-else class="btn btn--primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>`,
 };
