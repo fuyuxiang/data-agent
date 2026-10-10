@@ -519,13 +519,16 @@ class Database:
         workspace_id: str | None = None,
         include_archived: bool = False,
         limit: int = 500,
+        archived_only: bool = False,
     ) -> list[dict[str, Any]]:
         where = ["collection=?"]
         args: list[Any] = [collection]
         if workspace_id is not None:
             where.append("workspace_id=?")
             args.append(workspace_id)
-        if not include_archived:
+        if archived_only:
+            where.append("archived_at IS NOT NULL")
+        elif not include_archived:
             where.append("archived_at IS NULL")
         args.append(max(1, min(limit, 5000)))
         with self.connect() as connection:
@@ -661,10 +664,21 @@ class Database:
             )
         return message
 
-    def messages(self, session_id: str, limit: int = 200) -> list[dict]:
+    def messages(self, session_id: str, limit: int = 200, *, include_archived_runs: bool = False) -> list[dict]:
+        query = "SELECT m.* FROM messages m WHERE m.session_id=?"
+        if not include_archived_runs:
+            # Saved-session copies can retain the original run_id. Only hide
+            # messages in the run's own conversation, never an independent copy.
+            query += """ AND NOT EXISTS (
+                SELECT 1 FROM agent_runs a
+                WHERE a.id=json_extract(m.metadata,'$.run_id')
+                  AND a.session_id=m.session_id AND a.workspace_id=m.workspace_id
+                  AND a.archived_at IS NOT NULL
+            )"""
+        query += " ORDER BY m.created_at ASC,m.rowid ASC LIMIT ?"
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC LIMIT ?",
+                query,
                 (session_id, max(1, min(limit, 1000))),
             ).fetchall()
         return [

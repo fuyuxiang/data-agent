@@ -291,6 +291,7 @@ def ensure_super_agent(database: Database, workspace_id: str, actor_id: str) -> 
         "icon": "sparkle",
         "tags": ["官方", "数据分析", "问数"],
         "source_ids": [],
+        "source_scope_mode": "authorized",
         "knowledge_document_ids": [],
         "metric_ids": [],
         "mcp_server_ids": [],

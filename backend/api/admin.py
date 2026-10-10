@@ -54,7 +54,7 @@ def _elapsed(run: dict[str, Any]) -> float | None:
 @api_errors
 def list_runs():
     wid = _require_admin()
-    runs = RunStore(db()).list_runs(wid, limit=min(1000, int(request.args.get("limit", "200"))))
+    runs = RunStore(db()).list_runs(wid, limit=min(1000, int(request.args.get("limit", "200"))), include_archived=True)
     session_names = {
         item["id"]: item.get("name") for item in db().list("sessions", workspace_id=wid, limit=5000)
     }
@@ -75,6 +75,7 @@ def list_runs():
             "id": run["id"],
             "created_at": run.get("created_at") or "",
             "updated_at": run.get("updated_at") or "",
+            "archived_at": run.get("archived_at"),
             "actor_id": run.get("actor_id") or "",
             "session_id": run.get("session_id") or "",
             "session_name": session_names.get(str(run.get("session_id") or "")) or "",
@@ -99,7 +100,7 @@ def list_runs():
 def run_detail(run_id: str):
     wid = _require_admin()
     store = RunStore(db())
-    run = store.get_run(run_id, workspace_id=wid)
+    run = store.get_run(run_id, workspace_id=wid, include_archived=True)
     if not run:
         raise FileNotFoundError("运行记录不存在")
     contract = store.latest_contract(run_id)
@@ -124,6 +125,7 @@ def run_detail(run_id: str):
             "created_at": run.get("created_at"),
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
+            "archived_at": run.get("archived_at"),
             "duration_seconds": _elapsed(run),
             "usage": run.get("usage") or {},
             "budget": run.get("budget") or {},
@@ -186,7 +188,7 @@ def evaluations():
     positive = sum(1 for item in feedback if item.get("rating") in {"up", "positive", 1, True})
     negative = sum(1 for item in feedback if item.get("rating") in {"down", "negative", -1, False})
 
-    runs = RunStore(db()).list_runs(wid, limit=1000)
+    runs = RunStore(db()).list_runs(wid, limit=1000, include_archived=True)
     failures: dict[str, int] = {}
     for run in runs:
         if run.get("execution_status") in {"failed", "cancelled"}:

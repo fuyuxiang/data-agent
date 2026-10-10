@@ -87,10 +87,11 @@ class SkillRegistry:
         return [item.id for item in self.definitions()]
 
     def agents_using(self, skill_id: str) -> list[str]:
+        from ..services.agent_definitions import agent_references
+
         return sorted({
             str(agent["id"])
-            for agent in self.database.list("agent_definitions", workspace_id=self.workspace_id, limit=5000)
-            if skill_id in (agent.get("skill_ids") or []) or skill_id == str(agent.get("skill_id") or "")
+            for agent in agent_references(self.database, self.workspace_id, "skill_ids", skill_id)
         })
 
 

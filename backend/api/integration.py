@@ -53,7 +53,14 @@ def update_provider(provider_id: str):
         wid = "default"
     else:
         require_workspace_record("providers", provider_id)
-    return ok(item=save_provider({**body(), "workspace_id": wid}, provider_id))
+    with db().transaction():
+        if "enabled" in body() and not body()["enabled"]:
+            from ..services.agent_definitions import agent_references
+
+            scope = None if provider_id == "environment-default" else wid
+            if agent_references(db(), scope, "provider_id", provider_id):
+                raise ValueError("模型服务仍被智能体的草稿或已发布版本使用，请更换模型并发布后再停用")
+        return ok(item=save_provider({**body(), "workspace_id": wid}, provider_id))
 
 
 @bp.delete("/api/providers/<provider_id>")
@@ -62,10 +69,11 @@ def delete_provider(provider_id: str):
     if provider_id == "environment-default":
         raise ValueError("环境变量模型配置不能删除")
     provider = require_workspace_record("providers", provider_id)
-    if _provider_references(provider_id, provider.get("workspace_id", "default")):
-        raise ValueError("模型服务仍被智能体使用，请先为这些智能体选择其他模型")
-    if not db().archive("providers", provider_id):
-        raise FileNotFoundError("模型配置不存在")
+    with db().transaction():
+        if _provider_references(provider_id, provider.get("workspace_id", "default")):
+            raise ValueError("模型服务仍被智能体的草稿或已发布版本使用，请更换模型并发布后再删除")
+        if not db().archive("providers", provider_id):
+            raise FileNotFoundError("模型配置不存在")
     cleared_sessions = 0
     for session in db().list("sessions", workspace_id=provider.get("workspace_id", "default"), limit=5000):
         if session.get("provider_id") == provider_id:
@@ -75,10 +83,13 @@ def delete_provider(provider_id: str):
 
 
 def _provider_references(provider_id: str, wid: str) -> list[dict]:
+    from ..services.agent_definitions import agent_references
+
     return [
-        {"id": item["id"], "name": item.get("name"), "status": item.get("status")}
-        for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
-        if item.get("provider_id") == provider_id
+        {"id": item["id"], "name": ("私有智能体" if item.get("visibility") == "private"
+                                    and item.get("created_by") != current_user_id() else item.get("name")),
+         "status": item.get("status")}
+        for item in agent_references(db(), wid, "provider_id", provider_id)
     ]
 
 
@@ -189,8 +200,14 @@ def update_mcp_server(server_id: str):
             "headers": headers if headers is not None else current_secret.get("headers", {}),
             "env": environment if environment is not None else current_secret.get("env", {}),
         })
-    server.update({key: value for key, value in payload.items() if key in {"name", "url", "transport", "command", "args", "enabled", "credential", "formal_read_tools"}})
-    item = db().put("mcp_servers", server, workspace_id=server["workspace_id"])
+    with db().transaction():
+        if "enabled" in payload and not payload["enabled"]:
+            from ..services.agent_definitions import agent_references
+
+            if agent_references(db(), server["workspace_id"], "mcp_server_ids", server_id):
+                raise ValueError("MCP 服务仍被智能体的草稿或已发布版本使用，请解除绑定并发布后再停用")
+        server.update({key: value for key, value in payload.items() if key in {"name", "url", "transport", "command", "args", "enabled", "credential", "formal_read_tools"}})
+        item = db().put("mcp_servers", server, workspace_id=server["workspace_id"])
     if "formal_read_tools" in payload:
         db().audit(
             "mcp.formal_tools_updated", workspace_id=server["workspace_id"], actor=current_user_id(),
@@ -205,10 +222,15 @@ def update_mcp_server(server_id: str):
 @bp.delete("/api/mcp/servers/<server_id>")
 @api_errors
 def delete_mcp_server(server_id: str):
-    require_workspace_record("mcp_servers", server_id)
+    server = require_workspace_record("mcp_servers", server_id)
+    with db().transaction():
+        from ..services.agent_definitions import agent_references
+
+        if agent_references(db(), server["workspace_id"], "mcp_server_ids", server_id):
+            raise ValueError("MCP 服务仍被智能体的草稿或已发布版本使用，请解除绑定并发布后再删除")
+        if not db().archive("mcp_servers", server_id):
+            raise FileNotFoundError("MCP 服务不存在")
     get_mcp_manager().remove_server(server_id)
-    if not db().archive("mcp_servers", server_id):
-        raise FileNotFoundError("MCP 服务不存在")
     return ok(archived=True)
 
 

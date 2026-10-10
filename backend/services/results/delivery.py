@@ -60,7 +60,7 @@ def _record_artifact(
     run_id: str, publication: dict, manifest: dict,
 ) -> dict[str, Any]:
     digest = _sha256(path)
-    run = RunStore(database).get_run(run_id, workspace_id=workspace_id)
+    run = RunStore(database).get_run(run_id, workspace_id=workspace_id, include_archived=True)
     if not run:
         raise FileNotFoundError("分析任务不存在")
     source_scope = run.get("source_scope") or []

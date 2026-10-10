@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from flask import Blueprint, current_app, request
+from flask import Blueprint, current_app, jsonify, request
 
 from ..services.analytics import clean_frame, profile
 from ..services.authorization import actor_role, filter_authorized_sources, inherited_source_policy
@@ -19,7 +19,9 @@ from ..services.datasets import (
     schema_for_source,
     source_table,
 )
-from ..services.knowledge import add_document, public_document, save_entry, search
+from ..services.knowledge import (
+    add_document, document_reference_map, document_references, public_document, save_entry, search,
+)
 from ..services.product import assert_feature_enabled
 from ..services.semantic import (
     compile_metric_query, execute_metric_query, save_metric, save_model, visible_metrics,
@@ -267,9 +269,14 @@ def update_source(source_id: str):
 @bp.delete("/api/sources/<source_id>")
 @api_errors
 def archive_source(source_id: str):
+    from ..services.agent_definitions import agent_references
+
     source = require_source_access(source_id, action="delete")
-    if not db().archive("sources", source_id):
-        raise FileNotFoundError("数据源不存在")
+    with db().transaction():
+        if agent_references(db(), source["workspace_id"], "source_ids", source_id):
+            raise ValueError("数据源仍被智能体引用，请先解除草稿和已发布版本的绑定")
+        if not db().archive("sources", source_id):
+            raise FileNotFoundError("数据源不存在")
     cleaned = _remove_source_from_scopes(source_id, source["workspace_id"])
     return ok(archived=True, cleaned=cleaned)
 
@@ -419,20 +426,24 @@ def create_semantic_model():
 def update_semantic_model(model_id: str):
     current = require_workspace_record("semantic_models", model_id)
     require_source_access(str(current.get("source_id") or ""), current["workspace_id"], action="update")
-    has_approved_metrics = any(
-        item.get("model_id") == model_id and item.get("status") == "approved"
-        for item in db().list("semantic_metrics", workspace_id=current["workspace_id"], limit=5000)
-    )
+    has_approved_metrics = any(item.get("status") == "approved" for item in _model_references(model_id, current["workspace_id"]))
     if has_approved_metrics:
         require_workspace_access(current["workspace_id"], owner=True)
-    return ok(item=save_model(db(), body(), current["workspace_id"], current_user_id(), model_id))
+    with db().transaction():
+        return ok(item=save_model(db(), body(), current["workspace_id"], current_user_id(), model_id))
 
 
 def _model_references(model_id: str, wid: str) -> list[dict]:
+    import json
+
+    with db().connect() as connection:
+        rows = connection.execute(
+            "SELECT payload FROM records WHERE collection='semantic_metrics' AND workspace_id=? "
+            "AND archived_at IS NULL AND json_extract(payload, '$.model_id')=?", (wid, model_id),
+        ).fetchall()
     return [
         {"id": item["id"], "name": item.get("label") or item.get("name"), "status": item.get("status")}
-        for item in db().list("semantic_metrics", workspace_id=wid, limit=5000)
-        if item.get("model_id") == model_id
+        for item in (json.loads(row["payload"]) for row in rows)
     ]
 
 
@@ -477,22 +488,38 @@ def create_semantic_metric():
 @bp.patch("/api/semantic/metrics/<metric_id>")
 @api_errors
 def update_semantic_metric(metric_id: str):
-    current = require_workspace_record("semantic_metrics", metric_id)
-    if current.get("status") == "approved" or str(body().get("status") or "") == "approved":
-        require_workspace_access(current["workspace_id"], owner=True)
-    return ok(item=save_metric(db(), body(), current["workspace_id"], current_user_id(), metric_id))
+    with db().transaction():
+        current = require_workspace_record("semantic_metrics", metric_id)
+        requested_status = str(body().get("status") or current.get("status") or "draft").lower()
+        if current.get("status") == "approved" or requested_status == "approved":
+            require_workspace_access(current["workspace_id"], owner=True)
+        if current.get("status") == "approved" and requested_status in {"draft", "deprecated"}:
+            references = _metric_references(metric_id, current["workspace_id"])
+            if references["metrics"] or references["agents"]:
+                raise ValueError("指标仍被其他指标或智能体的草稿或已发布版本引用，请解除引用后再停用")
+        return ok(item=save_metric(db(), body(), current["workspace_id"], current_user_id(), metric_id))
 
 
 def _metric_references(metric_id: str, wid: str) -> dict:
+    import json
+
+    from ..services.agent_definitions import agent_references
+
+    with db().connect() as connection:
+        rows = connection.execute(
+            "SELECT payload FROM records WHERE collection='semantic_metrics' AND workspace_id=? "
+            "AND archived_at IS NULL AND EXISTS (SELECT 1 FROM json_each(records.payload, '$.dependency_metric_ids') "
+            "WHERE json_each.value=?)", (wid, metric_id),
+        ).fetchall()
     metrics = [
         {"id": item["id"], "name": item.get("label") or item.get("name"), "status": item.get("status")}
-        for item in db().list("semantic_metrics", workspace_id=wid, limit=5000)
-        if metric_id in (item.get("dependency_metric_ids") or [])
+        for item in (json.loads(row["payload"]) for row in rows)
     ]
     agents = [
-        {"id": item["id"], "name": item.get("name"), "status": item.get("status")}
-        for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
-        if metric_id in (item.get("metric_ids") or [])
+        {"id": item["id"], "name": ("私有智能体" if item.get("visibility") == "private"
+                                    and item.get("created_by") != current_user_id() else item.get("name")),
+         "status": item.get("status")}
+        for item in agent_references(db(), wid, "metric_ids", metric_id)
     ]
     return {"metrics": metrics, "agents": agents}
 
@@ -510,11 +537,12 @@ def semantic_metric_references(metric_id: str):
 def archive_semantic_metric(metric_id: str):
     current = require_workspace_record("semantic_metrics", metric_id)
     require_workspace_access(current["workspace_id"], owner=True)
-    references = _metric_references(metric_id, current["workspace_id"])
-    if references["metrics"] or references["agents"]:
-        raise ValueError("指标仍被其他指标或智能体引用，请先迁移或移除这些引用")
-    if not db().archive("semantic_metrics", metric_id):
-        raise FileNotFoundError("语义指标不存在")
+    with db().transaction():
+        references = _metric_references(metric_id, current["workspace_id"])
+        if references["metrics"] or references["agents"]:
+            raise ValueError("指标仍被其他指标或智能体的草稿或已发布版本引用，请解除绑定并发布后再删除")
+        if not db().archive("semantic_metrics", metric_id):
+            raise FileNotFoundError("语义指标不存在")
     return ok(archived=True)
 
 
@@ -536,8 +564,12 @@ def query_semantic_metric():
 
 @bp.get("/api/knowledge/documents")
 def list_documents():
+    wid = workspace_id()
+    admin = actor_role(db(), wid, current_user_id()) in {"owner", "editor"}
+    references = document_reference_map(db(), wid, actor_id=current_user_id()) if admin else {}
     return ok(items=[
-        public_document(item) for item in db().list("knowledge_documents", workspace_id=workspace_id())
+        {**public_document(item), **({"references": references.get(item["id"], [])} if admin else {})}
+        for item in db().list("knowledge_documents", workspace_id=wid)
         if item.get("visibility") != "analysis_attachment"
     ])
 
@@ -557,23 +589,58 @@ def upload_document():
 @bp.patch("/api/knowledge/documents/<document_id>")
 @api_errors
 def update_document(document_id: str):
+    with db().transaction():
+        document = require_workspace_record("knowledge_documents", document_id)
+        if document.get("visibility") == "analysis_attachment":
+            raise FileNotFoundError("知识文档不存在")
+        assert_feature_enabled(db(), document["workspace_id"], "knowledge_base")
+        allowed = {key: value for key, value in body().items() if key in {"name", "tags", "enabled"}}
+        if "enabled" in allowed and not isinstance(allowed["enabled"], bool):
+            raise ValueError("enabled 必须是布尔值")
+        if allowed.get("enabled") is False:
+            conflict = _document_reference_conflict(document, "停用")
+            if conflict:
+                return conflict
+        return ok(item=public_document(db().patch("knowledge_documents", document_id, allowed)))
+
+
+@bp.get("/api/knowledge/documents/<document_id>/references")
+@api_errors
+def knowledge_document_references(document_id: str):
     document = require_workspace_record("knowledge_documents", document_id)
+    require_workspace_access(document["workspace_id"], write=True)
     if document.get("visibility") == "analysis_attachment":
         raise FileNotFoundError("知识文档不存在")
-    assert_feature_enabled(db(), document["workspace_id"], "knowledge_base")
-    allowed = {key: value for key, value in body().items() if key in {"name", "tags", "enabled"}}
-    return ok(item=public_document(db().patch("knowledge_documents", document_id, allowed)))
+    return ok(references=document_references(
+        db(), document_id, document["workspace_id"], actor_id=current_user_id(),
+    ))
+
+
+def _document_reference_conflict(document: dict, operation: str):
+    references = document_references(
+        db(), document["id"], document["workspace_id"], actor_id=current_user_id(),
+    )
+    if references:
+        return jsonify({
+            "ok": False, "error": f"文档仍被智能体引用，请先解除草稿和已发布版本的引用，再{operation}",
+            "references": references,
+        }), 409
+    return None
 
 
 @bp.delete("/api/knowledge/documents/<document_id>")
 @api_errors
 def archive_document(document_id: str):
-    document = require_workspace_record("knowledge_documents", document_id)
-    if document.get("visibility") == "analysis_attachment":
-        raise FileNotFoundError("知识文档不存在")
-    if not db().archive("knowledge_documents", document_id):
-        raise FileNotFoundError("知识文档不存在")
-    return ok(archived=True)
+    with db().transaction():
+        document = require_workspace_record("knowledge_documents", document_id)
+        if document.get("visibility") == "analysis_attachment":
+            raise FileNotFoundError("知识文档不存在")
+        conflict = _document_reference_conflict(document, "删除")
+        if conflict:
+            return conflict
+        if not db().archive("knowledge_documents", document_id):
+            raise FileNotFoundError("知识文档不存在")
+        return ok(archived=True)
 
 
 @bp.post("/api/knowledge/search")

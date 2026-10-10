@@ -135,7 +135,7 @@ class AgentLoop:
             current = self.store.get_run(run_id)
             cancelled = should_cancel and should_cancel()
             if cancelled or (current and current["execution_status"] in {"cancelling", "cancelled"}):
-                self.store.update_status(run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled")
+                self.store.update_status(run_id, "cancelling", stop_reason="cancel_requested")
                 return LoopResult(run_id, "cancelled", "cancelled", "not_evaluated", "", None, "user_cancelled")
             if current and current["execution_status"] == "paused":
                 return LoopResult(run_id, "paused", current["outcome"], current["quality_status"], "", None, "paused")
@@ -184,7 +184,7 @@ class AgentLoop:
                     should_cancel=should_cancel,
                 )
             except InterruptedError:
-                self.store.update_status(run_id, "cancelled", outcome="cancelled", stop_reason="model_cancelled")
+                self.store.update_status(run_id, "cancelling", stop_reason="cancel_requested")
                 return LoopResult(run_id, "cancelled", "cancelled", "not_evaluated", "", None, "model_cancelled")
             except ModelProtocolError as exc:
                 self.store.append_event(run_id, "model.protocol_error", {"error": str(exc)})
@@ -192,6 +192,11 @@ class AgentLoop:
             except Exception as exc:
                 self.store.append_event(run_id, "model.failed", {"error": str(exc), "error_type": type(exc).__name__})
                 return self._fail(run_id, "model_unavailable")
+
+            current = self.store.get_run(run_id)
+            if (should_cancel and should_cancel()) or (current and current["execution_status"] in {"cancelling", "cancelled"}):
+                self.store.update_status(run_id, "cancelling", stop_reason="cancel_requested")
+                return LoopResult(run_id, "cancelled", "cancelled", "not_evaluated", "", None, "user_cancelled")
 
             try:
                 self.store.add_model_usage(run_id, response.usage)
@@ -258,7 +263,9 @@ class AgentLoop:
                             self.store.append_event(run_id, event_type, payload)
                 result = self.finalizer(run_id, answer, seen_results)
                 if result.get("published"):
-                    self.store.update_status(run_id, "finished", outcome="complete", quality_status="passed", stop_reason="published")
+                    updated = self.store.update_status(run_id, "finished", outcome="complete", quality_status="passed", stop_reason="published")
+                    if updated["execution_status"] in {"cancelling", "cancelled"}:
+                        return LoopResult(run_id, "cancelled", "cancelled", "not_evaluated", "", None, "user_cancelled")
                     self.store.append_event(run_id, "analysis.published", result)
                     return LoopResult(run_id, "finished", "complete", "passed", answer, result.get("publication_id"), "published")
                 blocking = (result.get("validation") or {}).get("blocking_issues") or []
@@ -347,7 +354,9 @@ class AgentLoop:
         return self._fail(run_id, "iteration_budget_exceeded")
 
     def _fail(self, run_id: str, reason: str) -> LoopResult:
-        self.store.update_status(run_id, "failed", outcome="failed", quality_status="not_evaluated", stop_reason=reason)
+        updated = self.store.update_status(run_id, "failed", outcome="failed", quality_status="not_evaluated", stop_reason=reason)
+        if updated["execution_status"] in {"cancelling", "cancelled"}:
+            return LoopResult(run_id, "cancelled", "cancelled", "not_evaluated", "", None, "user_cancelled")
         return LoopResult(run_id, "failed", "failed", "not_evaluated", "", None, reason)
 
 

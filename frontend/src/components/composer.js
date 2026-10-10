@@ -57,9 +57,11 @@ export const Composer = {
       return !this.disabled && (this.text.trim().length > 0 || this.pendingFiles.length > 0);
     },
     visibleSources() {
-      if (this.scopeExplicit) return this.sourceIds;
-      if (this.agentId && this.agent?.source_ids?.length) return this.agent.source_ids;
-      return state.sources.filter(item => item.status === 'ready').map(item => item.id);
+      const ready = state.sources.filter(item => item.status === 'ready');
+      const allowed = this.agentId && this.agent?.source_scope_mode !== 'authorized'
+        ? new Set(this.agent?.source_ids || []) : null;
+      const available = ready.filter(item => !allowed || allowed.has(item.id)).map(item => item.id);
+      return this.scopeExplicit ? available.filter(id => this.sourceIds.includes(id)) : available;
     },
     chosenSources() {
       const ids = new Set(this.visibleSources);
@@ -68,7 +70,7 @@ export const Composer = {
     availableSources() {
       const allowed = this.agent?.source_ids;
       return state.sources.filter(item => item.status === 'ready'
-        && (!this.agentId || !allowed?.length || allowed.includes(item.id)));
+        && (!this.agentId || this.agent?.source_scope_mode === 'authorized' || allowed?.includes(item.id)));
     },
     availableAgents() {
       return state.agents.filter(item => item.status === 'published');
@@ -89,6 +91,7 @@ export const Composer = {
         .filter(item => !query || item.name.toLowerCase().includes(query) || (item.hint || '').toLowerCase().includes(query))
         .slice(0, 5);
       const agents = state.agents
+        .filter(item => item.status === 'published')
         .map(item => ({ type: '智能体', id: item.id, name: item.name, hint: item.description, icon: 'robot' }))
         .filter(item => !query || item.name.toLowerCase().includes(query) || (item.hint || '').toLowerCase().includes(query))
         .slice(0, 3);
@@ -328,7 +331,7 @@ export const Composer = {
                 class="command__item" :class="{ 'is-selected': item.id === agentId }"
                 @click="selectAgent(item.id)">
           <Icon :name="item.icon || 'robot'" :size="15" />
-          <span class="grow"><b>{{ item.name }}</b><small>{{ item.description || '已发布智能体' }}</small></span>
+          <span class="grow"><b>{{ item.name }}</b><small>{{ item.source_scope_mode === 'authorized' ? '使用你当前有权分析的数据' : item.description || '已发布智能体' }}</small></span>
           <Icon v-if="item.id === agentId" name="check" :size="15" />
         </button>
         <p v-if="!availableAgents.length" class="muted small">当前没有已发布的智能体。</p>

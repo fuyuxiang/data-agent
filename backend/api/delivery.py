@@ -66,7 +66,7 @@ def _actor_artifacts(items: list[dict]) -> list[dict]:
     run_ids = {str(item["run_id"]) for item in items if item.get("run_id")}
     owned = {
         run_id for run_id in run_ids
-        if (run := RunStore(db()).get_run(run_id, workspace_id=workspace_id()))
+        if (run := RunStore(db()).get_run(run_id, workspace_id=workspace_id(), include_archived=True))
         and run.get("actor_id") == actor_id
     }
     visible = []
@@ -80,7 +80,7 @@ def _actor_artifacts(items: list[dict]) -> list[dict]:
         if item.get("run_id"):
             from ..services.advanced_agent import _source_authorized
 
-            run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"])
+            run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"], include_archived=True)
             if not run or not _source_authorized(db(), run):
                 continue
         visible.append(item)
@@ -99,7 +99,7 @@ def download_artifact(artifact_id: str):
     item = require_workspace_record("artifacts", artifact_id)
     source_ids = item.get("source_ids") or []
     if item.get("run_id"):
-        run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"])
+        run = RunStore(db()).get_run(str(item["run_id"]), workspace_id=item["workspace_id"], include_archived=True)
         if not run or run.get("actor_id") != current_user_id():
             raise FileNotFoundError("成果不存在")
         # Older artifacts did not persist source_ids. Always use the run's

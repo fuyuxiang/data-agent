@@ -50,6 +50,7 @@ export const ADMIN_NAV = [
     items: [
       { key: 'admin/users', label: '用户管理', icon: 'users' },
       { key: 'admin/settings', label: '系统设置', icon: 'settings' },
+      { key: 'admin/trash', label: '回收站', icon: 'trash' },
     ],
   },
 ];
@@ -72,6 +73,8 @@ export const TITLES = {
   'admin/evaluations': '评测',
   'admin/users': '用户管理',
   'admin/settings': '系统设置',
+  'admin/trash': '回收站',
+  trash: '回收站',
 };
 
 const LEGACY = {
@@ -83,7 +86,7 @@ const LEGACY = {
 };
 
 // 对话页是可达但不进导航的路由：它由提问动作进入，不在侧栏里出现。
-const HIDDEN = ['conversation'];
+const HIDDEN = ['conversation', 'trash'];
 
 const KNOWN = new Set([
   ...USER_NAV.map(item => item.key),
@@ -152,6 +155,7 @@ export function commandItems() {
   ];
   return [
     ...pages,
+    { name: 'trash', label: '回收站', icon: 'trash', kind: '页面' },
     { name: 'new', label: '新建对话', icon: 'plus', kind: '动作' },
     { name: 'workbench', label: '回到工作台', icon: 'home', kind: '动作' },
     { name: 'theme', label: '切换深浅色', icon: state.theme === 'dark' ? 'sun' : 'moon', kind: '动作' },

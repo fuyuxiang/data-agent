@@ -27,6 +27,7 @@ import { ConversationView } from './views/conversation.js';
 import { LibraryView } from './views/library.js';
 import { MetricsView } from './views/metrics.js';
 import { WorkbenchView } from './views/workbench.js';
+import { TrashView } from './views/trash.js';
 
 const { createApp } = Vue;
 
@@ -35,7 +36,7 @@ const Shell = {
   components: {
     AgentsView, AgentBuilderView, ConversationView, DataView, EvaluationsView, Icon,
     IntegrationsView, KnowledgeView, LibraryView, McpView, MetricsView, Modal, ModelsView,
-    RunsView, SkillsView, SystemSettingsView, Toasts, UsersView, WorkbenchView,
+    RunsView, SkillsView, SystemSettingsView, Toasts, TrashView, UsersView, WorkbenchView,
   },
   setup() {
     return {
@@ -96,6 +97,7 @@ const Shell = {
       navigate('workbench');
     },
     openConversation(session) {
+      state.activeSessionId = session.id;
       navigate('conversation', { id: session.id });
     },
     openSessionRename(session) {
@@ -166,6 +168,9 @@ const Shell = {
         </div>
 
         <footer class="sidebar__foot">
+          <button class="recent-item" :class="{ active: state.route === 'trash' }" @click="navigate('trash')">
+            <Icon name="trash" :size="15" /><span>回收站</span>
+          </button>
           <button v-if="canAdmin" class="recent-item" :class="{ active: isAdminRoute() }"
                   @click="navigate('admin/agents')">
             <Icon name="settings" :size="15" /><span>管理后台</span>
@@ -212,6 +217,7 @@ const Shell = {
           <AgentsView v-else-if="state.route === 'agents'" />
           <LibraryView v-else-if="state.route === 'library'" />
           <MetricsView v-else-if="state.route === 'metrics'" />
+          <TrashView v-else-if="state.route === 'trash'" :key="JSON.stringify(state.routeParams)" />
 
           <div v-else-if="state.route.startsWith('admin/')" class="view--page">
             <div class="admin">
@@ -237,6 +243,7 @@ const Shell = {
                 <EvaluationsView v-else-if="state.route === 'admin/evaluations'" />
                 <UsersView v-else-if="state.route === 'admin/users'" />
                 <SystemSettingsView v-else-if="state.route === 'admin/settings'" />
+                <TrashView v-else-if="state.route === 'admin/trash'" :key="JSON.stringify(state.routeParams)" />
               </div>
             </div>
           </div>

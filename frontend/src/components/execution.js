@@ -33,6 +33,8 @@ const STOP_LABELS = {
   tool_approval_required: '等待工具授权',
   external_job_running: '外部作业运行中',
   user_cancelled: '已取消',
+  cancel_confirmation_pending: '已请求终止，正在确认外部任务是否停止',
+  cancel_retry_pending: '暂时无法确认任务已停止，系统正在重试',
   empty_model_output: '模型没有返回内容',
   invalid_model_protocol: '模型返回格式异常',
   model_length: '模型输出被长度限制截断',
@@ -68,6 +70,7 @@ export const ExecutionStatus = {
     headline() {
       if (this.status === 'failed') return '分析未完成';
       if (this.status === 'cancelled') return '分析已取消';
+      if (this.status === 'cancelling') return '正在终止分析';
       if (this.status === 'finished' || this.status === 'partial') {
         return this.run.quality_status === 'passed' ? '分析已完成并通过核验' : '分析已完成';
       }

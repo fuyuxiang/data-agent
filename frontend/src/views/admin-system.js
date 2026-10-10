@@ -8,6 +8,7 @@
 import { Icon } from '../components/icons.js';
 import { DataTable, EmptyState, Modal, Status, Tabs } from '../components/ui.js';
 import { actions, state, toast } from '../store.js';
+import { navigate } from '../router.js';
 
 const ROLES = [
   { key: 'owner', label: '所有者', hint: '全部权限，含成员与系统设置' },
@@ -219,7 +220,7 @@ export const SystemSettingsView = {
   name: 'SystemSettingsView',
   components: { EmptyState, Icon, Status, Tabs },
   setup() {
-    return { state, toast };
+    return { navigate, state, toast };
   },
   data() {
     return { tab: 'storage', settings: null, audit: [], usage: null, loading: true, trash: [] };
@@ -257,8 +258,9 @@ export const SystemSettingsView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">系统设置</h1>
-          <p class="page-head__desc">数据保留、审计与回收站。删除都是可恢复的，永久清除需要显式确认。</p>
+          <p class="page-head__desc">数据保留与审计。误删内容可在回收站恢复，永久清除需要显式确认。</p>
         </div>
+        <button class="btn btn--sm" @click="navigate('admin/trash')"><Icon name="trash" :size="14" />打开回收站</button>
       </header>
 
       <Tabs v-model="tab" :items="[

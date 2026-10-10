@@ -32,12 +32,19 @@ export const ConversationView = {
       artifacts: {},
       activeRunId: '',
       polling: null,
+      pollEpoch: 0,
+      pollError: '',
+      disposed: false,
       sourceDrawer: { open: false, title: '', blocks: [] },
       filePreview: null,
       feedback: {},
       submitting: false,
       clarificationAnswer: '',
       loading: true,
+      runOperations: {},
+      runErrors: {},
+      deleteTarget: null,
+      deleteError: '',
     };
   },
   computed: {
@@ -60,7 +67,7 @@ export const ConversationView = {
         && item.stop_reason === 'clarification_required') || null;
     },
     running() {
-      return this.runs.some(item => ['queued', 'running', 'waiting_job'].includes(item.execution_status));
+      return this.runs.some(item => ['queued', 'running', 'waiting_job', 'cancelling'].includes(item.execution_status));
     },
     lastAnswer() {
       const turns = this.messages.filter(item => item.role === 'assistant');
@@ -93,6 +100,7 @@ export const ConversationView = {
     }
   },
   beforeUnmount() {
+    this.disposed = true;
     this.stopPolling();
   },
   watch: {
@@ -101,8 +109,10 @@ export const ConversationView = {
     },
   },
   methods: {
+    navigate,
     async load() {
       this.stopPolling();
+      const epoch = this.pollEpoch;
       this.loading = true;
       const sessionId = this.sessionId;
       try {
@@ -110,27 +120,38 @@ export const ConversationView = {
           actions.get(`/api/sessions/${sessionId}`),
           actions.get(`/api/analyses?session_id=${sessionId}&limit=50`),
         ]);
+        if (epoch !== this.pollEpoch || this.disposed) return;
+        this.results = {};
+        this.tables = {};
+        this.artifacts = {};
+        this.feedback = {};
+        this.runErrors = {};
         this.messages = detail.messages || [];
         this.runs = (runs.items || []).slice().reverse();
         this.activeRunId = this.runs.at(-1)?.id || '';
-        await this.hydrate();
-        if (this.running) this.startPolling();
+        await this.hydrate(epoch);
+        if (epoch === this.pollEpoch && this.running) this.startPolling();
       } catch (error) {
         toast(error.message, '加载失败', 'error');
       } finally {
-        this.loading = false;
+        if (!this.disposed) this.loading = false;
       }
     },
 
-    async hydrate() {
+    async hydrate(epoch = this.pollEpoch) {
       for (const run of this.runs) {
         if (this.results[run.id]) continue;
+        if (!run.publication && !['finished', 'partial'].includes(run.execution_status)) continue;
         try {
           const response = await actions.get(`/api/analyses/${run.id}/results`);
+          if (epoch !== this.pollEpoch || this.disposed || !this.runs.some(item => item.id === run.id)) return;
           if (response.status !== 'published') continue;
-          this.results[run.id] = response.manifest?.payload || null;
+          const payload = response.manifest?.payload || null;
+          const tables = await this.loadTables(payload);
+          if (epoch !== this.pollEpoch || this.disposed || !this.runs.some(item => item.id === run.id)) return;
+          this.results[run.id] = payload;
           this.artifacts[run.id] = response.artifacts || [];
-          this.tables[run.id] = await this.loadTables(this.results[run.id]);
+          this.tables[run.id] = tables;
         } catch {
           // 单次结果拉取失败不影响整页展示。
         }
@@ -161,31 +182,44 @@ export const ConversationView = {
     },
 
     startPolling() {
+      if (this.disposed) return;
       this.stopPolling();
+      const epoch = this.pollEpoch;
+      let inFlight = false;
       this.polling = setInterval(async () => {
-        if (document.hidden) return;
+        if (document.hidden || inFlight || epoch !== this.pollEpoch || this.disposed) return;
+        inFlight = true;
         try {
           const runs = await actions.get(`/api/analyses?session_id=${this.sessionId}&limit=50`);
+          if (epoch !== this.pollEpoch || this.disposed) return;
+          this.pollError = '';
           const next = (runs.items || []).slice().reverse();
+          const changed = next.length !== this.runs.length || next.some(item =>
+            this.runs.find(previous => previous.id === item.id)?.execution_status !== item.execution_status);
           this.runs = next;
+          if (changed || !this.running) await this.refreshMessages(epoch);
+          await this.hydrate(epoch);
+          if (epoch !== this.pollEpoch || this.disposed) return;
           if (!this.running) {
             this.stopPolling();
-            await this.refreshMessages();
-            await this.hydrate();
           }
-        } catch {
-          this.stopPolling();
+        } catch (error) {
+          if (epoch === this.pollEpoch && !this.disposed) this.pollError = error.message || '暂时无法连接，正在重试';
+        } finally {
+          inFlight = false;
         }
       }, POLL_MS);
     },
     stopPolling() {
+      this.pollEpoch += 1;
       if (this.polling) clearInterval(this.polling);
       this.polling = null;
     },
 
-    async refreshMessages() {
+    async refreshMessages(epoch = this.pollEpoch) {
       try {
         const detail = await actions.get(`/api/sessions/${this.sessionId}`);
+        if (epoch !== this.pollEpoch || this.disposed) return;
         this.messages = detail.messages || [];
       } catch {
         // 保留旧消息，不因为一次轮询失败清空界面。
@@ -297,20 +331,45 @@ export const ConversationView = {
       return ['queued', 'running', 'waiting_job', 'waiting_input', 'waiting_approval', 'paused', 'cancelling']
         .includes(run?.execution_status);
     },
+    cancelError(run) {
+      return this.runErrors[run.id] || (run.cancel_errors || []).map(item => item.message).filter(Boolean).join('；');
+    },
     async cancelRun(run) {
-      if (!run || !this.isCancelable(run) || run.execution_status === 'cancelling') return;
+      if (!run || !this.canAnalyze || !this.isCancelable(run) || this.runOperations[run.id]) return;
+      this.runOperations[run.id] = 'cancel';
+      delete this.runErrors[run.id];
       try {
         const response = await actions.post(`/api/analyses/${run.id}/control`, { action: 'cancel' });
         this.runs = this.runs.map(item => (item.id === run.id
           ? (response.item || { ...item, execution_status: 'cancelling' }) : item));
-        if (response.item?.execution_status === 'cancelled') this.stopPolling();
+        if (response.item?.execution_status === 'cancelling' || this.running) this.startPolling();
+        else {
+          this.stopPolling();
+          await this.refreshMessages();
+          await this.hydrate();
+        }
       } catch (error) {
+        this.runErrors[run.id] = error.message;
         toast(error.message, '终止失败', 'error');
+        this.startPolling();
+      } finally {
+        delete this.runOperations[run.id];
       }
     },
-    async deleteRun(run) {
-      if (!run || this.isCancelable(run)) return;
-      if (!window.confirm(`删除「${run.contract?.payload?.objective || '这条分析'}」？`)) return;
+    deleteRun(run) {
+      if (!run || !this.canAnalyze || this.isCancelable(run) || this.runOperations[run.id]) return;
+      this.deleteTarget = run;
+      this.deleteError = '';
+    },
+    closeRunDelete() {
+      if (!this.deleteTarget || !this.runOperations[this.deleteTarget.id]) this.deleteTarget = null;
+    },
+    async confirmRunDelete() {
+      const run = this.deleteTarget;
+      if (!run || !this.canAnalyze || this.runOperations[run.id]) return;
+      this.runOperations[run.id] = 'delete';
+      this.deleteError = '';
+      this.stopPolling();
       try {
         await actions.remove(`/api/analyses/${run.id}`);
         delete this.results[run.id];
@@ -319,10 +378,15 @@ export const ConversationView = {
         delete this.feedback[run.id];
         this.runs = this.runs.filter(item => item.id !== run.id);
         this.activeRunId = this.runs.at(-1)?.id || '';
+        this.deleteTarget = null;
         await this.refreshMessages();
-        toast('分析已删除', '完成');
+        toast('分析已移入回收站，资料库成果仍可使用', '完成');
       } catch (error) {
+        this.deleteError = error.message;
         toast(error.message, '删除失败', 'error');
+      } finally {
+        delete this.runOperations[run.id];
+        if (this.running) this.startPolling();
       }
     },
 
@@ -440,6 +504,10 @@ export const ConversationView = {
   },
   template: `
     <div class="view__inner view__inner--reading" style="padding:24px 28px 0">
+      <div v-if="pollError" class="card row row--between" style="margin-bottom:12px" role="status">
+        <p class="small muted">连接暂时中断，正在重试。{{ pollError }}</p>
+        <button class="btn btn--sm" @click="startPolling">重新连接</button>
+      </div>
       <div v-if="loading" class="stack" style="padding-top:24px">
         <div class="skeleton" style="height:56px"></div>
         <div class="skeleton" style="height:180px"></div>
@@ -453,16 +521,17 @@ export const ConversationView = {
           <div v-else-if="turn.kind === 'message' && turn.message.role === 'assistant'" class="turn">
             <div class="markdown" v-html="markdown(turn.message.content)"></div>
           </div>
-          <div v-else-if="turn.kind === 'run'" class="turn">
+          <div v-else-if="turn.kind === 'run'" class="turn" :data-run-id="turn.run.id">
           <ExecutionStatus :run="runView(turn.run)" :title="runTitle(turn.run)" />
-          <div class="row" style="margin:10px 0 4px">
+          <div v-if="canAnalyze" class="row" style="margin:10px 0 4px">
             <button v-if="isCancelable(turn.run)" class="btn btn--sm btn--danger"
-                    :disabled="turn.run.execution_status === 'cancelling'"
+                    :disabled="!!runOperations[turn.run.id] || (turn.run.execution_status === 'cancelling' && !cancelError(turn.run))"
                     @click="cancelRun(turn.run)">
-              {{ turn.run.execution_status === 'cancelling' ? '正在终止…' : '终止分析' }}
+              {{ runOperations[turn.run.id] ? '正在终止…' : (cancelError(turn.run) ? '重试终止' : (turn.run.execution_status === 'cancelling' ? '正在终止…' : '终止分析')) }}
             </button>
-            <button v-else class="btn btn--sm" @click="deleteRun(turn.run)">删除分析</button>
+            <button v-else class="btn btn--sm" :disabled="!!runOperations[turn.run.id]" @click="deleteRun(turn.run)">删除分析</button>
           </div>
+          <p v-if="cancelError(turn.run)" class="small" style="color:var(--danger)">{{ cancelError(turn.run) }}</p>
           <ResultView v-if="results[turn.run.id]" :payload="results[turn.run.id]"
                       :can-export="canAnalyze"
                       :artifacts="artifacts[turn.run.id] || []" :tables="tables[turn.run.id] || []"
@@ -500,7 +569,17 @@ export const ConversationView = {
     <div v-if="!loading" class="view__inner view__inner--reading" style="padding:0 28px 24px">
       <Composer ref="composer" :disabled="running || submitting || !canAnalyze" placeholder="继续追问，或换一个问题…" @submit="ask" />
       <p v-if="!canAnalyze" class="small muted">当前为只读权限，无法继续分析。</p>
+      <button class="btn btn--sm" style="margin-top:10px" @click="navigate('trash', { collection: 'agent_runs' })"><Icon name="trash" :size="14" />恢复已删除分析</button>
     </div>
+
+    <Modal :open="!!deleteTarget" title="删除分析" @close="closeRunDelete">
+      <p v-if="deleteTarget" class="small">将「{{ deleteTarget.contract?.payload?.objective || '这条分析' }}」移入回收站？会话中的提问和回答将隐藏，资料库成果和执行记录会保留，可在回收站恢复。</p>
+      <p v-if="deleteError" class="small" style="color:var(--danger)">{{ deleteError }}</p>
+      <template #footer>
+        <button class="btn" :disabled="!!runOperations[deleteTarget?.id]" @click="closeRunDelete">取消</button>
+        <button class="btn btn--primary" :disabled="!!runOperations[deleteTarget?.id]" @click="confirmRunDelete">{{ runOperations[deleteTarget?.id] ? '删除中…' : '移入回收站' }}</button>
+      </template>
+    </Modal>
 
     <Drawer :open="sourceDrawer.open" :title="sourceDrawer.title" subtitle="默认隐藏，需要时再深入"
             @close="sourceDrawer.open = false">

@@ -110,14 +110,17 @@ def test_agent_instruction_strips_reasoning_and_reaches_the_system_prompt(client
     assert "所有金额使用万元" in system_prompt
     assert "不应注入的思考" not in system_prompt
 
-    # Editing an agent returns it to draft, and a draft agent may not run.
-    client.patch(f"/api/agents/{agent['id']}", json={"instruction": "所有金额使用万元。"})
-    draft = client.post("/api/analyses", json={
+    # An unpublished edit must not interrupt service or alter the live prompt.
+    client.patch(f"/api/agents/{agent['id']}", json={"instruction": "所有金额使用元。"})
+    live = client.post("/api/analyses", json={
         "session_id": "welcome", "objective": "再次汇报", "agent_id": agent["id"],
         "source_ids": [source["id"]],
     })
-    assert draft.status_code == 403, draft.get_json()
-    assert "已发布" in draft.get_json()["error"]
+    assert live.status_code == 201, live.get_json()
+    _confirm_and_wait(client, live.get_json()["item"]["id"])
+    live_prompt = completions.calls[-1]["messages"][0]["content"]
+    assert "所有金额使用万元。" in live_prompt
+    assert "所有金额使用元。" not in live_prompt
 
 
 def _wait_for_job(client, job_id: str) -> dict:

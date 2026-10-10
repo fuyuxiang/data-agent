@@ -357,6 +357,42 @@ def public_document(document: dict) -> dict:
     return value
 
 
+def document_reference_map(
+    database: Database, workspace_id: str, *, actor_id: str | None = None,
+) -> dict[str, list[dict]]:
+    """References in editable definitions and the version currently serving users."""
+    from .agent_definitions import published_agent
+
+    references: dict[str, list[dict]] = {}
+    # A dependency check must also include older definitions beyond list()'s cap.
+    with database.connect() as connection:
+        records = connection.execute(
+            "SELECT payload FROM records WHERE collection='agent_definitions' "
+            "AND workspace_id=? AND archived_at IS NULL", (workspace_id,),
+        ).fetchall()
+    for record in records:
+        agent = json.loads(record["payload"])
+        live = published_agent(database, agent)
+        draft_ids = {str(value) for value in agent.get("knowledge_document_ids") or []}
+        live_ids = {str(value) for value in (live or {}).get("knowledge_document_ids") or []}
+        hidden = (actor_id is not None and agent.get("created_by") != actor_id
+                  and (agent.get("visibility") == "private" or (live or {}).get("visibility") == "private"))
+        for document_id in draft_ids | live_ids:
+            references.setdefault(document_id, []).append({
+                "id": None if hidden else agent["id"],
+                "name": "其他成员的私有智能体" if hidden else agent.get("name") or agent["id"],
+                "private": hidden,
+                "scopes": [scope for scope, ids in (("draft", draft_ids), ("published", live_ids)) if document_id in ids],
+            })
+    return references
+
+
+def document_references(
+    database: Database, document_id: str, workspace_id: str, *, actor_id: str | None = None,
+) -> list[dict]:
+    return document_reference_map(database, workspace_id, actor_id=actor_id).get(document_id, [])
+
+
 def _entry_text(entry: dict) -> str:
     entry_type = entry.get("type")
     if entry_type == "metric":
@@ -389,7 +425,11 @@ def _search_rows(workspace_id: str, document_ids: set[str] | None = None) -> lis
         if not isinstance(index, list) or len(index) != len(chunks):
             index = _build_chunk_index(chunks, workspace_id)
             document.update({"chunk_index": index, "index_version": 2})
-            _db().put("knowledge_documents", document, workspace_id=workspace_id)
+            if not _db().patch("knowledge_documents", document["id"], {
+                "chunk_index": index, "index_version": 2,
+            }, workspace_id=workspace_id):
+                # An in-flight index rebuild must never restore an archived document.
+                continue
         for chunk_number, (chunk, indexed) in enumerate(zip(chunks, index)):
             rows.append({
                 "id": f"{document['id']}:{chunk_number}", "document_id": document["id"],
@@ -449,22 +489,32 @@ def search(
 
 def save_entry(payload: dict, workspace_id: str, entry_id: str | None = None) -> dict:
     current = _db().get("knowledge_entries", entry_id) if entry_id else None
+    if entry_id and not current:
+        raise FileNotFoundError("知识条目不存在")
     entry_type = str(payload.get("type") or (current or {}).get("type") or "context_note")
     if entry_type not in {"metric", "business_rule", "context_note"}:
         raise ValueError("知识条目类型必须是 metric、business_rule 或 context_note")
-    name = str(payload.get("name") or payload.get("topic") or "").strip()
+    name = str(payload.get("name") or payload.get("topic") or (current or {}).get("name") or "").strip()
     if not name:
         raise ValueError("知识条目名称不能为空")
     if current and current.get("workspace_id", "default") != workspace_id:
         raise PermissionError("知识条目不属于当前工作空间")
+    enabled = payload.get("enabled", (current or {}).get("enabled", True))
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled 必须是布尔值")
     record = {
         **(current or {}), **payload,
         "id": entry_id or _db().new_id("kb"), "workspace_id": workspace_id,
-        "type": entry_type, "name": name[:160], "enabled": bool(payload.get("enabled", True)),
+        "type": entry_type, "name": name[:160], "enabled": enabled,
     }
     text = _entry_text(record)
     record.update({
         "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "tokens": _tokens(text), "embedding": _embedding(text, workspace_id),
     })
+    if entry_id:
+        updated = _db().patch("knowledge_entries", entry_id, record, workspace_id=workspace_id)
+        if not updated:
+            raise FileNotFoundError("知识条目不存在")
+        return updated
     return _db().put("knowledge_entries", record, workspace_id=workspace_id)

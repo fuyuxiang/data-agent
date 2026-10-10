@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from flask import Blueprint
+from functools import wraps
 
+from flask import Blueprint, request
+
+from ..services.agent_definitions import agent_source_ids, dynamic_source_scope, preserve_publication, published_agent
 from ..services.authorization import actor_role
 from .common import (
     api_errors, body, current_user_id, db, ok, require_source_access,
@@ -14,19 +17,42 @@ from .common import (
 bp = Blueprint("agents", __name__)
 
 
+def _locked(handler):
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        # Serialize reference validation with resource deletion in this process.
+        with db().transaction():
+            return handler(*args, **kwargs)
+    return wrapped
+
+
 def _check_private_owner(item: dict) -> None:
-    if item.get("visibility") == "private" and item.get("created_by") != current_user_id():
+    live = published_agent(db(), item)
+    if item.get("created_by") == current_user_id():
+        return
+    if item.get("visibility") == "private":
+        raise FileNotFoundError("智能体不存在")
+    if (live or {}).get("visibility") == "private" and actor_role(db(), item["workspace_id"], current_user_id()) != "owner":
+        # A private author may share a draft for owner approval without making
+        # their previous live private version visible to other members.
         raise FileNotFoundError("智能体不存在")
 
 
 def _public(item: dict, *, admin: bool) -> dict:
     if admin:
-        return {**item, "skill_ids": list(item.get("skill_ids") or ([item["skill_id"]] if item.get("skill_id") else []))}
+        live = published_agent(db(), item)
+        return {
+            **item, "skill_ids": list(item.get("skill_ids") or ([item["skill_id"]] if item.get("skill_id") else [])),
+            "source_scope_mode": "authorized" if dynamic_source_scope(item) else "bound",
+            "published_version": live["version"] if live else None,
+            "published_visibility": live.get("visibility") if live else None,
+            "has_unpublished_changes": bool(live and int(item.get("version") or 1) != live["version"]),
+        }
     return {key: item.get(key) for key in (
         "id", "workspace_id", "name", "description", "version", "status", "source_ids",
         "knowledge_document_ids", "provider_id", "skill_id", "skill_ids", "metric_ids",
         "mcp_server_ids", "icon", "tags", "welcome", "suggested_questions", "visibility",
-        "published_at",
+        "published_at", "builtin", "created_by", "source_scope_mode", "published_version",
     )}
 
 
@@ -51,7 +77,13 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
             raise ValueError("智能体只能使用已启用的公共业务知识")
     provider_id = str(merged.get("provider_id") or "") or None
     if provider_id and provider_id != "environment-default":
-        require_workspace_record("providers", provider_id)
+        provider = require_workspace_record("providers", provider_id)
+        if not provider.get("enabled", True):
+            raise ValueError("智能体只能绑定已启用的模型服务")
+    elif provider_id:
+        provider = db().get("providers", provider_id)
+        if provider and not provider.get("enabled", True):
+            raise ValueError("智能体只能绑定已启用的模型服务")
 
     # Skills: a resource list, not a single prompt.  Every one must exist, be
     # published, and stay inside the governed tool surface.
@@ -76,17 +108,20 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
         skill_ids.append(definition.id)
 
     metric_ids = list(dict.fromkeys(str(value) for value in merged.get("metric_ids") or []))
+    metric_sources = agent_source_ids(db(), current, current_user_id()) if dynamic_source_scope(current or {}) else source_ids
     for metric_id in metric_ids:
         metric = require_workspace_record("semantic_metrics", metric_id, wid)
         model = require_workspace_record("semantic_models", str(metric.get("model_id") or ""), wid)
         if metric.get("status") != "approved" or not model.get("enabled", True):
             raise ValueError("智能体只能绑定已发布且模型可用的指标")
-        if model.get("source_id") not in source_ids:
+        if model.get("source_id") not in metric_sources:
             raise ValueError("智能体绑定指标的数据源必须在已选范围内")
 
     mcp_server_ids = list(dict.fromkeys(str(value) for value in merged.get("mcp_server_ids") or []))
     for server_id in mcp_server_ids:
-        require_workspace_record("mcp_servers", server_id, wid)
+        server = require_workspace_record("mcp_servers", server_id, wid)
+        if not server.get("enabled", True):
+            raise ValueError("智能体只能绑定已启用的 MCP 服务")
 
     from ..services.knowledge import strip_reasoning
 
@@ -110,6 +145,8 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
         "welcome": str(merged.get("welcome") or "")[:500],
         "suggested_questions": [str(value)[:200] for value in suggested],
         "visibility": visibility,
+        # Never trust a client-supplied scope mode or builtin flag.
+        "source_scope_mode": "authorized" if dynamic_source_scope(current or {}) else "bound",
     }
 
 
@@ -118,24 +155,43 @@ def _validated(payload: dict, current: dict | None = None) -> dict:
 def list_agents():
     wid = workspace_id()
     require_workspace_access(wid)
-    admin = actor_role(db(), wid, current_user_id()) in {"owner", "editor"}
+    role = actor_role(db(), wid, current_user_id())
+    admin = role in {"owner", "editor"} and request.args.get("view") != "published"
     items = []
     for item in db().list("agent_definitions", workspace_id=wid, limit=5000):
-        if not admin and item.get("status") != "published":
-            continue
+        if admin:
+            live = published_agent(db(), item)
+            private_draft = item.get("visibility") == "private"
+            private_live = (live or {}).get("visibility") == "private" and role != "owner"
+            if (private_draft and item.get("created_by") != current_user_id()
+                    and role == "owner" and live and live.get("visibility") != "private"):
+                # Owners retain governance of a shared live version without
+                # gaining access to the author's private draft configuration.
+                items.append({**_public(live, admin=True), "draft_private": True,
+                              "read_only_draft": True, "has_unpublished_changes": True})
+                continue
+            if ((private_draft or private_live)
+                    and item.get("created_by") != current_user_id()):
+                continue
+        if not admin:
+            item = published_agent(db(), item)
+            if not item:
+                continue
         if item.get("visibility") == "private" and item.get("created_by") != current_user_id():
             continue
-        try:
-            for source_id in item.get("source_ids") or []:
-                require_source_access(str(source_id), action="analyze")
-        except (FileNotFoundError, PermissionError):
-            continue
+        if not admin:
+            try:
+                for source_id in item.get("source_ids") or []:
+                    require_source_access(str(source_id), action="analyze")
+            except (FileNotFoundError, PermissionError):
+                continue
         items.append(_public(item, admin=admin))
     return ok(items=items)
 
 
 @bp.post("/api/agents")
 @api_errors
+@_locked
 def create_agent():
     wid = workspace_id()
     require_workspace_access(wid, write=True)
@@ -143,12 +199,14 @@ def create_agent():
     item = db().put("agent_definitions", {
         "id": db().new_id("agent"), "workspace_id": wid, **definition,
         "status": "draft", "version": 1, "created_by": current_user_id(),
+        "published_version": None,
     }, workspace_id=wid)
-    return ok(item=item), 201
+    return ok(item=_public(item, admin=True)), 201
 
 
 @bp.patch("/api/agents/<agent_id>")
 @api_errors
+@_locked
 def update_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
     require_workspace_access(item["workspace_id"], write=True)
@@ -156,24 +214,25 @@ def update_agent(agent_id: str):
     if body().get("visibility") == "private" and item.get("created_by") != current_user_id():
         raise PermissionError("只能将自己创建的智能体设为私有")
     definition = _validated(body(), item)
+    publication = preserve_publication(db(), item)
     updated = db().patch("agent_definitions", agent_id, {
         **definition, "status": "draft", "version": int(item.get("version") or 1) + 1,
-        "published_at": None,
+        **publication,
     }, workspace_id=item["workspace_id"])
-    return ok(item=updated)
+    return ok(item=_public(updated, admin=True))
 
 
 @bp.post("/api/agents/<agent_id>/publish")
 @api_errors
+@_locked
 def publish_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
     _check_private_owner(item)
-    require_workspace_access(
-        item["workspace_id"], write=True if item.get("visibility") == "private" else False,
-        owner=item.get("visibility") != "private",
-    )
+    live = published_agent(db(), item)
+    workspace_publication = item.get("visibility") != "private" or (live and live.get("visibility") != "private")
+    require_workspace_access(item["workspace_id"], write=True, owner=bool(workspace_publication))
     definition = _validated({}, item)
-    if not definition["source_ids"]:
+    if not definition["source_ids"] and not dynamic_source_scope(item):
         raise ValueError("数据分析智能体至少需要一个数据源")
     for server_id in definition["mcp_server_ids"]:
         server = require_workspace_record("mcp_servers", server_id, item["workspace_id"])
@@ -188,44 +247,50 @@ def publish_agent(agent_id: str):
         "published_by": current_user_id(), "published_at": utcnow(),
     }, workspace_id=item["workspace_id"])
     updated = db().patch("agent_definitions", agent_id, {
-        "status": "published", "published_at": utcnow(),
+        "status": "published", "published_at": utcnow(), "published_version": item["version"],
         "validation_status": "configuration_checked",
     }, workspace_id=item["workspace_id"])
     db().audit("agent.published", workspace_id=item["workspace_id"], actor=current_user_id(),
                object_type="agent_definition", object_id=agent_id, detail={"version": item["version"]})
-    return ok(item=updated)
+    return ok(item=_public(updated, admin=True))
 
 
 @bp.post("/api/agents/<agent_id>/rollback")
 @api_errors
+@_locked
 def rollback_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
     _check_private_owner(item)
-    require_workspace_access(
-        item["workspace_id"], write=True if item.get("visibility") == "private" else False,
-        owner=item.get("visibility") != "private",
-    )
+    live = published_agent(db(), item)
+    require_workspace_access(item["workspace_id"], write=True,
+                             owner=item.get("visibility") != "private" or bool(live and live.get("visibility") != "private"))
     version = int(body().get("version") or 0)
     old = require_workspace_record("agent_versions", f"{agent_id}:{version}", item["workspace_id"])
+    if old["snapshot"].get("visibility") == "private" and item.get("created_by") != current_user_id():
+        raise FileNotFoundError("智能体版本不存在")
     definition = _validated(old["snapshot"], item)
+    publication = preserve_publication(db(), item)
     updated = db().patch("agent_definitions", agent_id, {
         **definition, "status": "draft", "version": int(item["version"]) + 1,
-        "published_at": None,
+        **publication,
     }, workspace_id=item["workspace_id"])
-    return ok(item=updated)
+    return ok(item=_public(updated, admin=True))
 
 
 @bp.delete("/api/agents/<agent_id>")
 @api_errors
+@_locked
 def delete_agent(agent_id: str):
     item = require_workspace_record("agent_definitions", agent_id)
-    _check_private_owner(item)
+    live = published_agent(db(), item)
+    if live and live.get("visibility") != "private":
+        require_workspace_access(item["workspace_id"], write=True, owner=True)
+    else:
+        _check_private_owner(item)
     if item.get("builtin"):
         raise ValueError("内置智能体不可删除")
-    require_workspace_access(
-        item["workspace_id"], write=True,
-        owner=item.get("status") == "published" and item.get("visibility") != "private",
-    )
+    require_workspace_access(item["workspace_id"], write=True,
+                             owner=bool(live and live.get("visibility") != "private"))
     db().archive("agent_definitions", agent_id, workspace_id=item["workspace_id"])
     db().audit(
         "agent.deleted", workspace_id=item["workspace_id"], actor=current_user_id(),

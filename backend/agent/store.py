@@ -121,9 +121,13 @@ class RunStore:
             "cost": None,
         }
 
-    def get_run(self, run_id: str, *, workspace_id: str | None = None) -> dict[str, Any] | None:
-        query = "SELECT * FROM agent_runs WHERE id=? AND archived_at IS NULL"
+    def get_run(
+        self, run_id: str, *, workspace_id: str | None = None, include_archived: bool = False,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM agent_runs WHERE id=?"
         args: list[Any] = [run_id]
+        if not include_archived:
+            query += " AND archived_at IS NULL"
         if workspace_id is not None:
             query += " AND workspace_id=?"
             args.append(workspace_id)
@@ -131,14 +135,24 @@ class RunStore:
             row = connection.execute(query, args).fetchone()
         return self._run(dict(row)) if row else None
 
-    def list_runs(self, workspace_id: str, *, session_id: str | None = None, limit: int = 100) -> list[dict]:
-        query = "SELECT * FROM agent_runs WHERE workspace_id=? AND archived_at IS NULL"
+    def list_runs(
+        self, workspace_id: str, *, session_id: str | None = None, limit: int = 100,
+        include_archived: bool = False, actor_id: str | None = None, archived_only: bool = False,
+    ) -> list[dict]:
+        query = "SELECT * FROM agent_runs WHERE workspace_id=?"
         args: list[Any] = [workspace_id]
+        if archived_only:
+            query += " AND archived_at IS NOT NULL"
+        elif not include_archived:
+            query += " AND archived_at IS NULL"
+        if actor_id is not None:
+            query += " AND actor_id=?"
+            args.append(actor_id)
         if session_id:
             query += " AND session_id=?"
             args.append(session_id)
         query += " ORDER BY created_at DESC LIMIT ?"
-        args.append(max(1, min(int(limit), 500)))
+        args.append(max(1, min(int(limit), 5000 if archived_only else 500)))
         with self.db.connect() as connection:
             rows = connection.execute(query, args).fetchall()
         return [self._run(dict(row)) for row in rows]
@@ -148,7 +162,7 @@ class RunStore:
         now = utcnow()
         with self.db.transaction() as connection:
             row = connection.execute(
-                "SELECT execution_status,session_id,archived_at FROM agent_runs "
+                "SELECT execution_status,session_id,archived_at,actor_id FROM agent_runs "
                 "WHERE id=? AND workspace_id=?",
                 (run_id, workspace_id),
             ).fetchone()
@@ -162,9 +176,86 @@ class RunStore:
                 "UPDATE agent_runs SET archived_at=?,updated_at=?,version=version+1 WHERE id=?",
                 (now, now, run_id),
             )
-        self.db.remove_messages_for_run(session_id, run_id)
         self.db.audit(
-            "analysis.archived", workspace_id=workspace_id, actor=None,
+            "analysis.archived", workspace_id=workspace_id, actor=row["actor_id"],
+            object_type="agent_run", object_id=run_id,
+        )
+        return True
+
+    def restore_run(
+        self, run_id: str, *, workspace_id: str, session_id: str, actor_id: str | None = None,
+    ) -> bool:
+        """Restore a personal conversation turn without changing its execution history."""
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id=? AND workspace_id=?",
+                (run_id, workspace_id),
+            ).fetchone()
+            if not row or not row["archived_at"]:
+                return False
+            owner = str(row["actor_id"])
+            if str(row["session_id"]) != str(session_id) or (actor_id is not None and owner != actor_id):
+                raise PermissionError("分析任务不属于当前用户或会话")
+            session = connection.execute(
+                "SELECT payload,archived_at FROM records WHERE collection='sessions' AND id=? AND workspace_id=?",
+                (session_id, workspace_id),
+            ).fetchone()
+            if not session:
+                raise PermissionError("原会话不存在或不属于当前用户")
+            payload = _load(session["payload"], {})
+            session_owner = str(payload.get("owner_id") or "")
+            owns_session = session_owner == owner
+            legacy_owner = False
+            if not session_owner:
+                from ..services.authorization import actor_role
+                legacy_owner = actor_role(self.db, workspace_id, owner) == "owner"
+            if not owns_session and not legacy_owner:
+                if payload.get("visibility") != "workspace":
+                    raise PermissionError("原会话不存在或不属于当前用户")
+                if session["archived_at"]:
+                    raise PermissionError("原共享会话已归档，请由会话所有者先恢复")
+            now = utcnow()
+            if session["archived_at"]:
+                connection.execute(
+                    "UPDATE records SET archived_at=NULL,updated_at=? WHERE collection='sessions' AND id=? AND workspace_id=?",
+                    (now, session_id, workspace_id),
+                )
+            connection.execute(
+                "UPDATE agent_runs SET archived_at=NULL,updated_at=?,version=version+1 WHERE id=?",
+                (now, run_id),
+            )
+            # The original archive implementation removed messages. Recover the
+            # saved question and published answer once for these legacy records.
+            messages = connection.execute(
+                "SELECT role FROM messages WHERE session_id=? AND workspace_id=? AND json_extract(metadata,'$.run_id')=?",
+                (session_id, workspace_id, run_id),
+            ).fetchall()
+            contract = connection.execute(
+                "SELECT payload FROM task_contract_revisions WHERE run_id=? ORDER BY version LIMIT 1", (run_id,),
+            ).fetchone()
+            question = str(_load(contract["payload"], {}).get("objective") or "") if contract else ""
+            legacy_missing = not messages
+            recovered = [("user", question, row["created_at"])] if legacy_missing and question else []
+            manifest = connection.execute(
+                "SELECT m.payload FROM publications p JOIN result_manifests m ON m.id=p.manifest_id WHERE p.run_id=?",
+                (run_id,),
+            ).fetchone()
+            if not manifest and row["execution_status"] == "finished" and row["outcome"] in {"partial", "no_data"}:
+                manifest = connection.execute(
+                    "SELECT payload FROM result_manifests WHERE run_id=? ORDER BY version DESC LIMIT 1", (run_id,),
+                ).fetchone()
+            summary = _load(manifest["payload"], {}).get("summary") if manifest else None
+            answer = str(summary.get("answer") or summary.get("text") or "") if isinstance(summary, dict) else str(summary or "")
+            if legacy_missing and answer:
+                recovered.append(("assistant", answer, row["finished_at"] or row["created_at"]))
+            for role, content, created_at in recovered:
+                connection.execute(
+                    "INSERT INTO messages(id,session_id,workspace_id,role,content,metadata,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (self.db.new_id("msg"), session_id, workspace_id, role, content,
+                     _json({"run_id": run_id, "recovered": True}), created_at),
+                )
+        self.db.audit(
+            "analysis.restored", workspace_id=workspace_id, actor=actor_id or owner,
             object_type="agent_run", object_id=run_id,
         )
         return True
@@ -194,6 +285,8 @@ class RunStore:
             run = connection.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not run:
                 raise FileNotFoundError("分析任务不存在")
+            if run["archived_at"] or run["execution_status"] in {"finished", "failed", "cancelled", "cancelling"}:
+                raise ValueError("已结束或正在终止的任务不可修改契约")
             current = int(run["contract_version"])
             if current != int(expected_version):
                 raise ValueError(f"任务契约版本冲突：当前为 {current}")
@@ -308,6 +401,8 @@ class RunStore:
                 raise FileNotFoundError("分析任务不存在")
             if int(run["lease_epoch"]) != int(lease_epoch):
                 raise PermissionError("运行租约已失效")
+            if run["archived_at"] or run["execution_status"] in {"finished", "failed", "cancelled", "cancelling"}:
+                raise InterruptedError("任务已结束或正在终止，不能启动新的工具动作")
             allowed = set(_load(run["allowed_tool_ids"], []))
             if tool_id not in allowed:
                 raise PermissionError(f"任务范围未授权工具：{tool_id}")
@@ -441,7 +536,7 @@ class RunStore:
             raise ValueError("外部动作状态无效")
         now = utcnow()
         with self.db.transaction() as connection:
-            run = connection.execute("SELECT execution_status FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            run = connection.execute("SELECT execution_status,archived_at FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             action = connection.execute(
                 "SELECT * FROM agent_actions WHERE run_id=? AND external_job_id=?",
                 (run_id, external_job_id),
@@ -455,20 +550,22 @@ class RunStore:
                 (status, _json(result), error_code, now, action["id"]),
             )
             next_execution_status = (
-                "cancelled" if status == "cancelled"
+                run["execution_status"] if run["archived_at"] or run["execution_status"] in {"finished", "failed", "cancelled", "cancelling"}
+                else "cancelled" if status == "cancelled"
                 else "paused" if run["execution_status"] == "paused"
                 else "queued"
             )
-            connection.execute(
-                "UPDATE agent_runs SET execution_status=?,stop_reason=?,updated_at=?,version=version+1 WHERE id=?",
-                (
-                    next_execution_status,
-                    "external_job_cancelled" if status == "cancelled"
-                    else "external_job_reconciled_while_paused" if next_execution_status == "paused"
-                    else "external_job_reconciled",
-                    now, run_id,
-                ),
-            )
+            if not run["archived_at"] and run["execution_status"] not in {"finished", "failed", "cancelled", "cancelling"}:
+                connection.execute(
+                    "UPDATE agent_runs SET execution_status=?,stop_reason=?,updated_at=?,version=version+1 WHERE id=?",
+                    (
+                        next_execution_status,
+                        "external_job_cancelled" if status == "cancelled"
+                        else "external_job_reconciled_while_paused" if next_execution_status == "paused"
+                        else "external_job_reconciled",
+                        now, run_id,
+                    ),
+                )
             updated = connection.execute("SELECT * FROM agent_actions WHERE id=?", (action["id"],)).fetchone()
         self.append_event(run_id, f"action.{status}", {
             "action_id": action["id"], "external_job_id": external_job_id,
@@ -512,6 +609,13 @@ class RunStore:
                 raise FileNotFoundError("分析任务不存在")
             if expected_version is not None and int(row["version"]) != int(expected_version):
                 raise ValueError(f"任务版本冲突：当前为 {row['version']}")
+            # Finish and cancellation compete at the same transaction boundary.
+            # A late worker may never revive a completed/archived run or turn an
+            # accepted cancellation into an error/success.
+            if row["archived_at"] or row["execution_status"] in {"finished", "failed", "cancelled"}:
+                return self._run(dict(row))
+            if row["execution_status"] == "cancelling" and status not in {"cancelling", "cancelled"}:
+                return self._run(dict(row))
             values = {
                 "execution_status": status,
                 "outcome": outcome if outcome is not None else row["outcome"],
@@ -520,6 +624,8 @@ class RunStore:
                 "started_at": row["started_at"] or (now if status == "running" else None),
                 "finished_at": now if status in {"finished", "failed", "cancelled"} else row["finished_at"],
             }
+            if all(row[key] == value for key, value in values.items()):
+                return self._run(dict(row))
             connection.execute(
                 """UPDATE agent_runs SET execution_status=?,outcome=?,quality_status=?,stop_reason=?,
                        started_at=?,finished_at=?,updated_at=?,version=version+1 WHERE id=?""",
@@ -576,7 +682,7 @@ class RunStore:
         return cursor.rowcount == 1
 
     def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> dict:
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, include_archived=True)
         if not run:
             raise FileNotFoundError("分析任务不存在")
         event_id = self.db.new_id("event")

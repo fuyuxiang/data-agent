@@ -176,6 +176,18 @@ def save_model(
             "entities", "dimensions", "measures", "default_time_dimension", "enabled",
         )
     })
+    if current and current.get("definition_fingerprint") != record["definition_fingerprint"]:
+        from .agent_definitions import agent_references
+
+        with database.connect() as connection:
+            metric_rows = connection.execute(
+                "SELECT payload FROM records WHERE collection='semantic_metrics' AND workspace_id=? "
+                "AND archived_at IS NULL AND json_extract(payload, '$.model_id')=?",
+                (workspace_id, identifier),
+            ).fetchall()
+        metric_ids = {json.loads(row["payload"])["id"] for row in metric_rows}
+        if agent_references(database, workspace_id, "metric_ids", metric_ids):
+            raise ValueError("模型的指标仍被智能体的草稿或已发布版本绑定，请解除绑定并发布后再修改模型口径或停用")
     stored = database.put("semantic_models", record, workspace_id=workspace_id)
     _store_version(database, "semantic_model_versions", stored)
     invalidated = []
@@ -335,6 +347,23 @@ def save_metric(
             "time_semantics", "deduplication", "status",
         )
     })
+    if current:
+        definition_changed = current.get("definition_fingerprint") != record["definition_fingerprint"]
+        renamed = current.get("name") != record["name"]
+        if definition_changed or renamed:
+            with database.connect() as connection:
+                dependent_metric = connection.execute(
+                    "SELECT 1 FROM records WHERE collection='semantic_metrics' AND workspace_id=? "
+                    "AND archived_at IS NULL AND EXISTS (SELECT 1 FROM json_each(records.payload, '$.dependency_metric_ids') "
+                    "WHERE json_each.value=?) LIMIT 1", (workspace_id, identifier),
+                ).fetchone()
+            if dependent_metric:
+                raise ValueError("指标仍被其他指标引用，请解除引用后再修改指标名称或口径")
+            if definition_changed:
+                from .agent_definitions import agent_references
+
+                if agent_references(database, workspace_id, "metric_ids", identifier):
+                    raise ValueError("指标仍被智能体的草稿或已发布版本绑定，请解除绑定并发布后再修改指标口径")
     stored = database.put("semantic_metrics", record, workspace_id=workspace_id)
     _store_version(database, "semantic_metric_versions", stored)
     database.audit(

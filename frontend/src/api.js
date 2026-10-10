@@ -53,7 +53,7 @@ export async function api(path, options = {}) {
 export const get = (path) => api(path);
 export const post = (path, body) => api(path, { method: 'POST', body });
 export const patch = (path, body) => api(path, { method: 'PATCH', body });
-export const remove = (path) => api(path, { method: 'DELETE' });
+export const remove = (path, body) => api(path, { method: 'DELETE', body });
 
 export function upload(path, file, extra = {}) {
   const form = new FormData();

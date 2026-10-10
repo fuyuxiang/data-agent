@@ -90,7 +90,7 @@ def _actor_visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in items:
         run_id = str(item.get("run_id") or "")
         if run_id:
-            run = RunStore(db()).get_run(run_id, workspace_id=workspace_id())
+            run = RunStore(db()).get_run(run_id, workspace_id=workspace_id(), include_archived=True)
             if not run or run.get("actor_id") != actor:
                 continue
             try:
@@ -192,7 +192,7 @@ def download(record_id: str):
     if record.get("run_id"):
         from .delivery import _artifact_policy_access
 
-        run = RunStore(db()).get_run(str(record["run_id"]), workspace_id=workspace_id())
+        run = RunStore(db()).get_run(str(record["run_id"]), workspace_id=workspace_id(), include_archived=True)
         _artifact_policy_access(record, action="export", source_ids=(run or {}).get("source_scope") or [])
     path = safe_child(current_app.config["SETTINGS"].export_dir, Path(str(record.get("path") or "")))
     if not path.is_file():

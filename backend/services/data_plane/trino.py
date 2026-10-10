@@ -177,6 +177,11 @@ class TrinoAdapter:
         if not record.get("next_uri"):
             return self.public_query(record)
         response = self._request("GET", str(record["next_uri"]))
+        if response.status_code in {404, 410} and record.get("cancel_dispatched_at"):
+            return self.public_query(self.db.patch(
+                "warehouse_queries", query_id, {"status": "cancelled", "next_uri": None, "updated_at": utcnow()},
+                workspace_id=self.workspace_id,
+            ) or record)
         payload = self._payload(response)
         preview = list(record.get("preview") or [])
         room = max(0, self.config.max_preview_rows - len(preview))
@@ -207,12 +212,15 @@ class TrinoAdapter:
         record = self._query(query_id)
         if not record.get("next_uri"):
             return {"query_id": query_id, "cancel_requested": False, "status": record.get("status")}
+        self.db.patch("warehouse_queries", query_id, {"cancel_requested_at": utcnow()}, workspace_id=self.workspace_id)
         response = self._request("DELETE", str(record["next_uri"]))
-        if response.status_code not in {200, 202, 204}:
+        if response.status_code not in {200, 202, 204, 404, 410}:
             raise ConnectionError(f"Trino 取消请求失败：HTTP {response.status_code}")
         updated = self.db.patch(
             "warehouse_queries", query_id,
-            {"status": "cancelling", "cancel_requested_at": utcnow(), "updated_at": utcnow()},
+            {"status": "cancelled" if response.status_code in {204, 404, 410} else "cancelling",
+             **({"next_uri": None} if response.status_code in {204, 404, 410} else {}),
+             "cancel_requested_at": utcnow(), "cancel_dispatched_at": utcnow(), "updated_at": utcnow()},
             workspace_id=self.workspace_id,
         )
         return {"query_id": query_id, "cancel_requested": True, "status": (updated or {}).get("status")}

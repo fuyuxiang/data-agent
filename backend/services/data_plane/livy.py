@@ -124,7 +124,13 @@ class LivyBatchAdapter:
 
     def poll(self, job_id: str) -> dict[str, Any]:
         record = self._job(job_id)
-        value = _payload(self._request("GET", f"/batches/{record['batch_id']}"), {200})
+        response = self._request("GET", f"/batches/{record['batch_id']}")
+        if response.status_code in {404, 410} and record.get("cancel_dispatched_at"):
+            return self.public(self.db.patch(
+                "remote_batches", job_id, {"state": "cancelled", "updated_at": utcnow()},
+                workspace_id=self.workspace_id,
+            ) or record)
+        value = _payload(response, {200})
         state = str(value.get("state") or record.get("state") or "unknown")
         record = self.db.patch(
             "remote_batches", job_id,
@@ -142,11 +148,15 @@ class LivyBatchAdapter:
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         record = self._job(job_id)
+        terminal = record.get("state") in {"success", "dead", "error", "killed", "cancelled"}
+        self.db.patch("remote_batches", job_id, {"cancel_requested_at": utcnow()}, workspace_id=self.workspace_id)
         response = self._request("DELETE", f"/batches/{record['batch_id']}")
-        _payload(response, {200, 201})
+        if response.status_code not in {204, 404, 410}:
+            _payload(response, {200, 201, 202})
         record = self.db.patch(
             "remote_batches", job_id,
-            {"state": "cancelling", "cancel_requested_at": utcnow(), "updated_at": utcnow()},
+            {"state": record["state"] if terminal else "cancelled" if response.status_code in {404, 410} else "cancelling",
+             "cancel_requested_at": utcnow(), "cancel_dispatched_at": utcnow(), "updated_at": utcnow()},
             workspace_id=self.workspace_id,
         ) or record
         return {"job_id": job_id, "cancel_requested": True, **self.public(record)}

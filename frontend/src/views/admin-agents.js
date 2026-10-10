@@ -22,6 +22,14 @@ const SECTIONS = [
   { key: 'permission', label: '权限', icon: 'shield' },
 ];
 
+// Vue's reactive objects cannot be passed directly to structuredClone.
+const copyConfiguration = value => JSON.parse(JSON.stringify(value));
+const withMissingBindings = (items, selectedIds, label) => {
+  const known = new Set(items.map(item => item.id));
+  return [...items, ...(selectedIds || []).filter(id => !known.has(id))
+    .map(id => ({ id, name: `失效或不可访问的${label}（${id}）`, status: '不可用', enabled: false, missing: true }))];
+};
+
 export const AgentBuilderView = {
   name: 'AgentBuilderView',
   components: { EmptyState, Icon, Modal, SearchInput, Status, Tabs },
@@ -57,8 +65,33 @@ export const AgentBuilderView = {
     visibleProviders() {
       return this.providers.filter(item => item.enabled !== false);
     },
+    providerBindings() {
+      return withMissingBindings(this.visibleProviders, this.draft?.provider_id ? [this.draft.provider_id] : [], '模型');
+    },
+    skillBindings() {
+      return withMissingBindings(this.skills.filter(item => item.status === 'published'
+        || this.draft?.skill_ids?.includes(item.id)), this.draft?.skill_ids, '技能');
+    },
+    metricBindings() {
+      return withMissingBindings(this.metrics, this.draft?.metric_ids, '指标');
+    },
+    mcpBindings() {
+      return withMissingBindings(this.mcpServers, this.draft?.mcp_server_ids, 'MCP 服务');
+    },
     sections() {
       return SECTIONS;
+    },
+    sourceBindings() {
+      const ids = new Set(this.sources.map(item => item.id));
+      return [...this.sources, ...(this.draft?.source_ids || [])
+        .filter(id => !ids.has(id))
+        .map(id => ({ id, name: `失效或不可访问的数据源（${id}）`, status: '不可用', missing: true }))];
+    },
+    documentBindings() {
+      const ids = new Set(this.documents.map(item => item.id));
+      return [...this.documents, ...(this.draft?.knowledge_document_ids || [])
+        .filter(id => !ids.has(id))
+        .map(id => ({ id, name: `失效的知识文档（${id}）`, enabled: false, missing: true }))];
     },
     questionText: {
       get() { return (this.draft?.suggested_questions || []).join('\n'); },
@@ -76,7 +109,7 @@ export const AgentBuilderView = {
     async load() {
       this.loading = true;
       try {
-        const [agents, sources, skills, metrics, documents, mcp, providers] = await Promise.all([
+        const [agents, sources, skills, metrics, documents, mcp, providers, published] = await Promise.all([
           actions.get('/api/agents'),
           actions.get('/api/sources'),
           actions.get('/api/skills'),
@@ -84,6 +117,7 @@ export const AgentBuilderView = {
           actions.get('/api/knowledge/documents'),
           actions.get('/api/mcp/servers'),
           actions.get('/api/providers'),
+          actions.get('/api/agents?view=published'),
         ]);
         this.agents = agents.items || [];
         this.sources = sources.items || [];
@@ -92,14 +126,8 @@ export const AgentBuilderView = {
         this.documents = documents.items || [];
         this.mcpServers = mcp.items || [];
         this.providers = providers.items || [];
-        // The workbench composer reads the shared bootstrap state rather than
-        // this admin view's local list. Keep that state in sync after a draft
-        // is published or an existing agent is edited while the SPA remains
-        // open; otherwise the newly published agent only appears after a
-        // full page reload.
-        state.agents = this.agents
-          .filter(item => item.status === 'published')
-          .map(item => ({ ...item }));
+        // The workbench always receives the live configuration, never a draft.
+        state.agents = copyConfiguration(published.items || []);
       } catch (error) {
         toast(error.message, '加载失败', 'error');
       } finally {
@@ -120,15 +148,16 @@ export const AgentBuilderView = {
       this.testLog = [];
     },
     edit(agent) {
+      const configuration = copyConfiguration(agent);
       this.editing = {
         ...this.blank(),
-        ...agent,
-        skill_ids: agent.skill_ids || (agent.skill_id ? [agent.skill_id] : []),
-        source_ids: agent.source_ids || [],
-        metric_ids: agent.metric_ids || [],
-        knowledge_document_ids: agent.knowledge_document_ids || [],
-        mcp_server_ids: agent.mcp_server_ids || [],
-        suggested_questions: agent.suggested_questions || [],
+        ...configuration,
+        skill_ids: configuration.skill_ids || (configuration.skill_id ? [configuration.skill_id] : []),
+        source_ids: configuration.source_ids || [],
+        metric_ids: configuration.metric_ids || [],
+        knowledge_document_ids: configuration.knowledge_document_ids || [],
+        mcp_server_ids: configuration.mcp_server_ids || [],
+        suggested_questions: configuration.suggested_questions || [],
         isNew: false,
       };
       this.section = 'basic';
@@ -141,11 +170,12 @@ export const AgentBuilderView = {
     },
     canPublish(agent) {
       return state.workspaceRole === 'owner'
-        || (agent?.visibility === 'private' && agent?.created_by === (state.user?.id || 'local-default'));
+        || (agent?.visibility === 'private' && agent?.created_by === (state.user?.id || 'local-default')
+          && (!agent.published_version || agent.published_visibility === 'private'));
     },
     canDelete(agent) {
       if (agent.builtin) return false;
-      return agent.status !== 'published' || this.canPublish(agent);
+      return !agent.published_version || this.canPublish(agent);
     },
     async save({ silent = false } = {}) {
       this.saving = true;
@@ -153,8 +183,8 @@ export const AgentBuilderView = {
         const response = this.editing.isNew
           ? await actions.post('/api/agents', this.editing)
           : await actions.patch(`/api/agents/${this.editing.id}`, this.editing);
-        this.editing = { ...response.item, isNew: false };
-        if (!silent) toast('智能体已保存', '完成');
+        this.editing = { ...copyConfiguration(response.item), isNew: false };
+        if (!silent) toast(response.item.published_version ? '草稿已保存，线上版本继续可用；发布后生效' : '智能体草稿已保存', '完成');
         await this.load();
         return response.item;
       } catch (error) {
@@ -195,10 +225,14 @@ export const AgentBuilderView = {
       this.testLog.push({ role: 'user', text: question });
       this.testQuestion = '';
       try {
+        const preview = copyConfiguration(this.editing);
+        if (preview.source_scope_mode === 'authorized') {
+          preview.source_ids = this.sources.filter(item => item.status === 'ready').map(item => item.id);
+        }
         const created = await actions.post('/api/analyses', {
           objective: question,
-          source_ids: this.editing.source_ids,
-          agent_preview: this.editing,
+          source_ids: preview.source_ids,
+          agent_preview: preview,
           execution_mode: 'quick',
         });
         const entry = {
@@ -258,18 +292,21 @@ export const AgentBuilderView = {
               <div class="row row--between">
                 <b>{{ agent.name }}</b>
                 <Status :status="agent.status" />
+                <span v-if="agent.has_unpublished_changes" class="badge">有未发布修改</span>
               </div>
               <p class="small muted" style="margin-top:4px">{{ agent.description || '暂无描述' }}</p>
             </div>
           </div>
           <div class="tag-row">
             <span class="badge"><Icon name="layers" :size="12" />{{ (agent.skill_ids || []).length }} 个技能</span>
-            <span class="badge"><Icon name="database" :size="12" />{{ (agent.source_ids || []).length }} 个数据源</span>
+            <span class="badge"><Icon name="database" :size="12" />{{ agent.source_scope_mode === 'authorized' ? '当前用户授权的数据' : (agent.source_ids || []).length + ' 个数据源' }}</span>
+            <span v-if="agent.published_version" class="badge">线上 v{{ agent.published_version }}</span>
             <span v-if="agent.builtin" class="badge badge--brand">内置</span>
           </div>
           <div class="row" style="margin-top:auto">
-            <button class="btn btn--sm" @click="edit(agent)"><Icon name="edit" :size="14" />编辑</button>
-            <button v-if="agent.status !== 'published'" class="btn btn--sm" @click="edit(agent); section = 'skills'">配置</button>
+            <button v-if="!agent.read_only_draft" class="btn btn--sm" @click="edit(agent)"><Icon name="edit" :size="14" />编辑</button>
+            <span v-else class="xs muted">作者的私有草稿仅本人可编辑；这里显示线上共享版本。</span>
+            <button v-if="!agent.read_only_draft && agent.status !== 'published'" class="btn btn--sm" @click="edit(agent); section = 'skills'">配置</button>
             <span class="grow"></span>
             <button v-if="canDelete(agent)" class="icon-btn icon-btn--danger" aria-label="删除"
                     @click="removeTarget = agent"><Icon name="trash" :size="15" /></button>
@@ -315,13 +352,17 @@ export const AgentBuilderView = {
           <template v-else-if="section === 'model'">
             <p class="small muted">不选则使用工作空间默认模型。</p>
             <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <label v-for="item in visibleProviders" :key="item.id" class="card card--interactive"
+              <label class="card card--interactive" style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                <input type="radio" :value="null" v-model="draft.provider_id" />
+                <b>使用工作空间默认模型</b>
+              </label>
+              <label v-for="item in providerBindings" :key="item.id" class="card card--interactive"
                      style="display:flex;align-items:center;gap:10px;cursor:pointer">
-                <input type="radio" :value="item.id" v-model="draft.provider_id" />
+                <input type="radio" :value="item.id" v-model="draft.provider_id" :disabled="item.missing" />
                 <span class="grow">
                   <b>{{ item.name }}</b>
                   <span class="small muted" style="display:block">
-                    {{ item.model || '未指定模型' }} · {{ item.base_url || '默认地址' }}
+                    {{ item.missing ? '请选择可用模型或改用默认模型，解除失效绑定' : (item.model || '未指定模型') + ' · ' + (item.base_url || '默认地址') }}
                   </span>
                 </span>
                 <Status :status="item.status || 'configured'" />
@@ -332,13 +373,14 @@ export const AgentBuilderView = {
           <template v-else-if="section === 'skills'">
             <p class="small muted">技能决定这个智能体会做什么。只绑定它真正需要的。</p>
             <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <label v-for="skill in skills" :key="skill.id" class="card card--interactive"
+              <label v-for="skill in skillBindings" :key="skill.id" class="card card--interactive"
                      style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
                 <input type="checkbox" :checked="draft.skill_ids.includes(skill.id)"
+                       :disabled="skill.status !== 'published' && !draft.skill_ids.includes(skill.id)"
                        @change="toggle(draft.skill_ids, skill.id)" style="margin-top:3px" />
                 <span class="grow">
                   <b>{{ skill.name }}</b>
-                  <span class="small muted" style="display:block">{{ skill.description }}</span>
+                  <span class="small muted" style="display:block">{{ skill.status !== 'published' ? '已停用或失效，可取消绑定' : skill.description }}</span>
                 </span>
                 <span class="badge">{{ skill.category }}</span>
               </label>
@@ -346,8 +388,9 @@ export const AgentBuilderView = {
           </template>
 
           <template v-else-if="section === 'data'">
-            <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <label v-for="item in sources" :key="item.id" class="card card--interactive"
+            <p v-if="draft.source_scope_mode === 'authorized'" class="small muted">内置智能体使用提问者当前有权分析的数据。每次提问都可以缩小范围。</p>
+            <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
+              <label v-for="item in sourceBindings" :key="item.id" class="card card--interactive"
                      style="display:flex;align-items:center;gap:10px;cursor:pointer">
                 <input type="checkbox" :checked="draft.source_ids.includes(item.id)"
                        @change="toggle(draft.source_ids, item.id)" />
@@ -357,44 +400,48 @@ export const AgentBuilderView = {
                 </span>
               </label>
             </div>
-            <p v-if="!sources.length" class="small muted">还没有数据源。发布前至少要绑定一个。</p>
+            <p v-if="draft.source_scope_mode !== 'authorized' && !sourceBindings.length" class="small muted">还没有数据源。发布前至少要绑定一个。</p>
+            <p v-if="sourceBindings.some(item => item.missing)" class="small muted">失效绑定可取消勾选；保存并发布后更新线上范围。</p>
           </template>
 
           <template v-else-if="section === 'metrics'">
             <p class="small muted">绑定后，这个智能体回答时会优先使用这些正式指标的口径。</p>
             <div class="tag-row">
-              <button v-for="item in metrics" :key="item.id" class="chip"
+              <button v-for="item in metricBindings" :key="item.id" class="chip"
                       :class="{ active: draft.metric_ids.includes(item.id) }"
                       @click="toggle(draft.metric_ids, item.id)">{{ item.label || item.name }}</button>
             </div>
-            <p v-if="!metrics.length" class="small muted">还没有已发布的指标。</p>
+            <p v-if="!metricBindings.length" class="small muted">还没有已发布的指标。</p>
+            <p v-if="metricBindings.some(item => item.missing)" class="small muted">失效指标可点击取消绑定，保存并发布后更新线上配置。</p>
           </template>
 
           <template v-else-if="section === 'knowledge'">
             <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <label v-for="item in documents" :key="item.id" class="card card--interactive"
+              <label v-for="item in documentBindings" :key="item.id" class="card card--interactive"
                      style="display:flex;align-items:center;gap:10px;cursor:pointer">
                 <input type="checkbox" :checked="draft.knowledge_document_ids.includes(item.id)"
+                       :disabled="item.enabled === false && !draft.knowledge_document_ids.includes(item.id)"
                        @change="toggle(draft.knowledge_document_ids, item.id)" />
-                <span class="grow"><b>{{ item.name }}</b></span>
+                <span class="grow"><b>{{ item.name }}</b><small v-if="item.enabled === false" class="muted"> · 已停用或失效，可取消绑定</small></span>
               </label>
             </div>
-            <p v-if="!documents.length" class="small muted">
+            <p v-if="!documentBindings.length" class="small muted">
               还没有知识文档。术语与业务规则在「知识」里维护，会自动参与检索。
             </p>
           </template>
 
           <template v-else-if="section === 'mcp'">
             <div class="stack" style="display:flex;flex-direction:column;gap:8px">
-              <label v-for="item in mcpServers" :key="item.id" class="card card--interactive"
+              <label v-for="item in mcpBindings" :key="item.id" class="card card--interactive"
                      style="display:flex;align-items:center;gap:10px;cursor:pointer">
                 <input type="checkbox" :checked="draft.mcp_server_ids.includes(item.id)"
+                       :disabled="item.enabled === false && !draft.mcp_server_ids.includes(item.id)"
                        @change="toggle(draft.mcp_server_ids, item.id)" />
-                <span class="grow"><b>{{ item.name }}</b></span>
+                <span class="grow"><b>{{ item.name }}</b><small v-if="item.enabled === false" class="muted"> · 已停用或失效，可取消绑定</small></span>
                 <Status :status="item.status || 'configured'" />
               </label>
             </div>
-            <p v-if="!mcpServers.length" class="small muted">还没有连接的 MCP 服务。MCP 是外部系统连接能力，与技能是两类东西。</p>
+            <p v-if="!mcpBindings.length" class="small muted">还没有连接的 MCP 服务。MCP 是外部系统连接能力，与技能是两类东西。</p>
           </template>
 
           <template v-else-if="section === 'experience'">
@@ -419,6 +466,7 @@ export const AgentBuilderView = {
             <dl class="definition">
               <dt>状态</dt><dd>{{ draft.status }}</dd>
               <dt>版本</dt><dd>v{{ draft.version || 1 }}</dd>
+              <template v-if="draft.published_version"><dt>线上版本</dt><dd>v{{ draft.published_version }}{{ draft.has_unpublished_changes ? '（有未发布修改）' : '' }}</dd></template>
             </dl>
           </template>
         </div>
@@ -448,8 +496,8 @@ export const AgentBuilderView = {
       <template #footer>
         <button class="btn" @click="editing = null">关闭</button>
         <button class="btn" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
-        <button v-if="!editing?.isNew && editing?.status !== 'published' && canPublish(editing)" class="btn btn--primary"
-                @click="publish">发布</button>
+        <button v-if="!editing?.isNew && canPublish(editing)" class="btn btn--primary" :disabled="saving"
+                @click="publish">{{ editing?.published_version ? '发布新版本' : '发布' }}</button>
       </template>
     </Modal>`,
 };

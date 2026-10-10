@@ -186,20 +186,23 @@ def update_skill(skill_id: str):
     wid = workspace_id()
     require_workspace_access(wid, write=True)
     _require_editable(skill_id, wid)
-    item = _require_record(skill_id, wid)
-    incoming = {key: value for key, value in body().items() if key != "id"}
-    merged = skill_from_payload(
-        {**item, **incoming, "id": item.get("slug") or item["id"]}, record=item,
-    )
-    payload = skill_to_record(merged, wid)
-    payload.update({
-        "version": str(int(item.get("version") or 1) + 1),
-        "status": "draft" if item.get("status") == "published" else item.get("status", "draft"),
-        "published_at": None,
-        "updated_at": utcnow(),
-    })
-    saved = db().patch(COLLECTION, item["id"], payload, workspace_id=wid)
-    _snapshot(skill_from_record(saved), wid, current_user_id())
+    with db().transaction():
+        item = _require_record(skill_id, wid)
+        if item.get("status") == "published" and _registry(wid).agents_using(skill_id):
+            raise ValueError("已发布技能仍被智能体的草稿或已发布版本使用，请解除绑定并发布后再编辑或停用")
+        incoming = {key: value for key, value in body().items() if key != "id"}
+        merged = skill_from_payload(
+            {**item, **incoming, "id": item.get("slug") or item["id"]}, record=item,
+        )
+        payload = skill_to_record(merged, wid)
+        payload.update({
+            "version": str(int(item.get("version") or 1) + 1),
+            "status": "draft" if item.get("status") == "published" else item.get("status", "draft"),
+            "published_at": None,
+            "updated_at": utcnow(),
+        })
+        saved = db().patch(COLLECTION, item["id"], payload, workspace_id=wid)
+        _snapshot(skill_from_record(saved), wid, current_user_id())
     db().audit("skill.updated", workspace_id=wid, actor=current_user_id(),
                object_type="skill", object_id=item["id"], detail={"version": payload["version"]})
     return ok(item=_stored_view(wid, saved))
@@ -213,10 +216,11 @@ def delete_skill(skill_id: str):
     _require_editable(skill_id, wid)
     item = _require_record(skill_id, wid)
     definition = skill_from_record(item)
-    used_by = _registry(wid).agents_using(definition.id)
-    if used_by:
-        raise ValueError(f"技能仍被 {len(used_by)} 个智能体使用，请先解除绑定")
-    db().archive(COLLECTION, item["id"], workspace_id=wid)
+    with db().transaction():
+        used_by = _registry(wid).agents_using(definition.id)
+        if used_by:
+            raise ValueError(f"技能仍被 {len(used_by)} 个智能体的草稿或已发布版本使用，请解除绑定并发布")
+        db().archive(COLLECTION, item["id"], workspace_id=wid)
     db().audit("skill.deleted", workspace_id=wid, actor=current_user_id(),
                object_type="skill", object_id=item["id"], detail={"slug": definition.id})
     return ok(item=_stored_view(wid, item))

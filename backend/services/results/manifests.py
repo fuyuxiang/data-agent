@@ -218,6 +218,8 @@ class ResultService:
         contract = self.store.latest_contract(run_id)
         if not run or not contract:
             return {"published": False, "quality_status": "blocked", "issues": ["run_or_contract_missing"]}
+        if run["execution_status"] in {"cancelling", "cancelled"}:
+            raise InterruptedError("分析正在终止，不能发布成果")
         authorized = self.authorize(run)
         rules = [
             Rule("contract_confirmed", "1", "execution", "blocking", 2, lambda _ctx: outcome(
@@ -374,6 +376,11 @@ class ResultService:
         }
         try:
             with self.db.transaction() as connection:
+                current = connection.execute(
+                    "SELECT execution_status,archived_at FROM agent_runs WHERE id=?", (run["id"],),
+                ).fetchone()
+                if not current or current["archived_at"] or current["execution_status"] in {"cancelling", "cancelled", "failed"}:
+                    raise InterruptedError("任务已终止，不能发布成果")
                 connection.execute(
                     """INSERT INTO publications(
                            id,workspace_id,run_id,manifest_id,contract_version,policy_version,payload,created_at
@@ -384,6 +391,16 @@ class ResultService:
                     ),
                 )
                 connection.execute("UPDATE result_manifests SET status='published' WHERE id=?", (manifest["id"],))
+                # Cancellation and publication use this same transaction. A
+                # publication that wins is complete; a cancellation that wins
+                # prevents both the publication and its terminal success state.
+                connection.execute(
+                    "UPDATE agent_runs SET execution_status='finished',outcome='complete',quality_status='passed',"
+                    "stop_reason='published',finished_at=?,updated_at=?,version=version+1 WHERE id=?",
+                    (now, now, run["id"]),
+                )
+        except InterruptedError:
+            raise
         except Exception:
             existing = self.publication(run["id"], workspace_id=run["workspace_id"])
             if existing:

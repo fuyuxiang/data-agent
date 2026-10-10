@@ -414,7 +414,7 @@ def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
         parent_id = ancestor.get("parent_run_id")
         if not parent_id or parent_id in lineage:
             break
-        parent = RunStore(database).get_run(parent_id, workspace_id=run["workspace_id"])
+        parent = RunStore(database).get_run(parent_id, workspace_id=run["workspace_id"], include_archived=True)
         if not parent or parent.get("actor_id") != run["actor_id"]:
             break
         lineage.add(parent_id)
@@ -720,7 +720,7 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
         skills=governed_skills,
         should_cancel=cancel.is_set,
     )
-    completed_usage = (store.get_run(run_id) or run).get("usage") or {}
+    completed_usage = (store.get_run(run_id, include_archived=True) or run).get("usage") or {}
     model_delta = max(0, int(completed_usage.get("model_tokens") or 0) - starting_tokens)
     if model_delta:
         record_usage(

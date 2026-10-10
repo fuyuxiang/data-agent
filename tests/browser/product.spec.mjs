@@ -51,6 +51,7 @@ test('指标中心按内部四个分组组织，不拆一级 Tab', async ({ page
   await page.goto('/#/metrics');
   await expect(page.locator('.page-head__title')).toHaveText('指标中心');
   await expect(page.locator('.tabs button').first()).toBeVisible();
+  await expect.poll(async () => Number((await page.locator('.tabs button').first().innerText()).replace('指标', ''))).toBeGreaterThanOrEqual(8);
   const tabs = await page.locator('.tabs button').allInnerTexts();
   expect(tabs[0]).toMatch(/^指标\d+$/);
   expect(Number(tabs[0].replace('指标', ''))).toBeGreaterThanOrEqual(8);

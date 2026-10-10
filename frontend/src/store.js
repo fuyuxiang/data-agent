@@ -101,8 +101,8 @@ export const readySources = computed(
 
 /* ------------------------------------------------------------------ 会话 */
 
-export async function bootstrap() {
-  state.authChecking = true;
+export async function bootstrap({ quiet = false } = {}) {
+  if (!quiet) state.authChecking = true;
   try {
     const identity = await get('/api/auth/me');
     state.user = identity.user;
@@ -133,7 +133,8 @@ export async function bootstrap() {
     state.recommendedQuestions = data.recommended_questions || [];
     state.onboarding = data.onboarding;
     state.capabilities = data.capabilities || {};
-    state.activeSessionId = data.active_session?.id || state.sessions[0]?.id || '';
+    state.activeSessionId = quiet && state.sessions.some(item => item.id === state.activeSessionId)
+      ? state.activeSessionId : data.active_session?.id || state.sessions[0]?.id || '';
     state.ready = true;
   } catch (error) {
     if (error?.status === 401) {
@@ -143,7 +144,7 @@ export async function bootstrap() {
       fail(error);
     }
   } finally {
-    state.authChecking = false;
+    if (!quiet) state.authChecking = false;
   }
 }
 
@@ -245,7 +246,7 @@ export const actions = {
   get: (path) => get(path),
   post: (path, body) => post(path, body),
   patch: (path, body) => patch(path, body),
-  remove: (path) => remove(path),
+  remove: (path, body) => remove(path, body),
   download,
   uploadAttachments(runId, files) {
     const form = new FormData();

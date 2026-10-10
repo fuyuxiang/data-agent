@@ -11,7 +11,7 @@ from flask import Blueprint, current_app, request, session as flask_session
 from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
-from ..services.authorization import filter_authorized_sessions, filter_authorized_sources
+from ..services.authorization import actor_role, decide_source_access, filter_authorized_sessions, filter_authorized_sources
 from ..services.security import SecretVault
 from ..services.demo_sales import SAMPLE_SEED_ID, sample_questions
 from ..services.product import SUPER_AGENT_ID, product_status, seed_demo_workspace
@@ -28,6 +28,7 @@ from .common import (
     require_system_owner,
     require_workspace_access,
     require_workspace_record,
+    safe_child,
     workspace_id,
     workspace_membership,
 )
@@ -70,6 +71,7 @@ def bootstrap():
     from ..skills.models import CATEGORIES
     from ..skills.permissions import available_resources, filter_visible
     from ..skills.registry import SkillRegistry
+    from ..services.agent_definitions import agent_source_ids, published_agents
 
     wid = workspace_id()
     product = product_status(db(), wid, current_user_id())
@@ -83,13 +85,13 @@ def bootstrap():
     available = available_resources(db(), wid, current_user_id())
     skill_registry = SkillRegistry(db(), wid)
     skills = filter_visible(skill_registry.definitions(include_disabled=False), available)
-    agents = [
-        item for item in db().list("agent_definitions", workspace_id=wid, limit=5000)
-        if item.get("status") == "published"
-        and (item.get("visibility", "workspace") == "workspace"
-             or item.get("created_by") == current_user_id())
-        and all(source_id in available.source_ids for source_id in item.get("source_ids") or [])
-    ]
+    agents = []
+    for item in published_agents(db(), wid):
+        if item.get("visibility", "workspace") == "private" and item.get("created_by") != current_user_id():
+            continue
+        sources = agent_source_ids(db(), item, current_user_id())
+        if all(source_id in available.source_ids for source_id in sources):
+            agents.append({**item, "source_ids": sources})
     demo_accessible = any(
         (item.get("sample_seed") or {}).get("id") == SAMPLE_SEED_ID
         and item["id"] in available.source_ids
@@ -102,6 +104,9 @@ def bootstrap():
         agents=[
             {
                 "id": item["id"], "name": item.get("name"),
+                "status": "published", "version": item.get("version"),
+                "source_scope_mode": item.get("source_scope_mode") or "bound",
+                "visibility": item.get("visibility") or "workspace",
                 "description": item.get("description") or "",
                 "icon": item.get("icon") or "sparkle",
                 "builtin": bool(item.get("builtin")),
@@ -160,16 +165,16 @@ def _recommended_questions(wid: str, demo_accessible: bool) -> list[str]:
     """
     if demo_accessible:
         return sample_questions()[:4]
+    from ..services.agent_definitions import agent_source_ids, published_agents
+
     questions: list[str] = []
-    for agent in db().list("agent_definitions", workspace_id=wid, limit=5000):
-        if agent.get("status") != "published":
-            continue
+    for agent in published_agents(db(), wid):
         if agent.get("id") == SUPER_AGENT_ID:
             continue
         if agent.get("visibility") == "private" and agent.get("created_by") != current_user_id():
             continue
         try:
-            for source_id in agent.get("source_ids") or []:
+            for source_id in agent_source_ids(db(), agent, current_user_id()):
                 require_source_access(str(source_id), wid, action="analyze")
         except (FileNotFoundError, PermissionError):
             continue
@@ -796,26 +801,136 @@ def usage_metrics():
     return ok(totals=totals, by_model=by_model, events=events[:200])
 
 
+_TRASH_COLLECTIONS = {
+    "sessions", "sources", "knowledge_documents", "knowledge_entries",
+    "artifacts", "saved_sessions", "agent_runs",
+}
+
+
+def _trash_access(collection: str, item: dict, wid: str, role: str) -> bool:
+    """Recycle-bin access retains the original resource's ownership and ACL."""
+    actor = current_user_id()
+    if collection in {"knowledge_documents", "knowledge_entries"}:
+        return role in {"owner", "editor"} and item.get("visibility") != "analysis_attachment"
+    if collection == "sources":
+        return role == "owner" and decide_source_access(
+            db(), item, workspace_id=wid, actor_id=actor,
+        ).allowed
+    if collection == "agent_runs":
+        return item.get("actor_id") == actor
+    if collection in {"sessions", "saved_sessions"}:
+        owner = item.get("owner_id") or (item.get("session") or {}).get("owner_id")
+        return owner == actor or not owner and role == "owner"
+    if collection == "artifacts":
+        from .library import _actor_visible
+
+        return bool(_actor_visible([item]))
+    return False
+
+
+def _trash_record(collection: str, record_id: str) -> tuple[dict, str]:
+    wid = workspace_id()
+    require_workspace_access(wid)
+    role = actor_role(db(), wid, current_user_id())
+    if collection not in _TRASH_COLLECTIONS or collection == "agent_runs":
+        raise FileNotFoundError("回收站记录不存在")
+    item = db().get(collection, record_id, workspace_id=wid, include_archived=True)
+    if not item or not item.get("archived_at") or not _trash_access(collection, item, wid, role):
+        raise FileNotFoundError("回收站记录不存在")
+    return item, role
+
+
+def _session_has_analysis(session_id: str, wid: str) -> bool:
+    with db().connect() as connection:
+        return bool(connection.execute(
+            "SELECT 1 FROM agent_runs WHERE session_id=? AND workspace_id=? LIMIT 1",
+            (session_id, wid),
+        ).fetchone())
+
+
+def _analysis_restore_block_reason(item: dict, wid: str, role: str) -> str:
+    if role not in {"owner", "editor", "analyst"}:
+        return "当前为只读权限，无法恢复分析。"
+    missing_sources = [str(source_id) for source_id in item.get("source_scope") or []
+                       if not db().get("sources", str(source_id), workspace_id=wid)]
+    if any(not db().get("sources", source_id, workspace_id=wid, include_archived=True)
+           for source_id in missing_sources):
+        return "分析使用的数据源已永久删除，无法恢复原分析；可用新数据重新发起分析。"
+    if missing_sources:
+        return "请先恢复分析使用的数据源；无管理权限时，请联系工作空间所有者。"
+    from ..services.advanced_agent import _source_authorized
+
+    if not _source_authorized(db(), item):
+        return "数据权限或授权规则已变更，请联系工作空间所有者恢复原授权。"
+    parent = db().get("sessions", item["session_id"], workspace_id=wid, include_archived=True)
+    if not parent:
+        return "原会话已不存在，无法恢复到原会话。"
+    owner = parent.get("owner_id")
+    if owner == current_user_id() or (not owner and role == "owner"):
+        return ""
+    if parent.get("visibility") == "workspace":
+        return "请先由会话所有者恢复原会话。" if parent.get("archived_at") else ""
+    return "原会话的归属已变更，无法恢复到其他成员的私有会话。"
+
+
 @bp.get("/api/trash")
+@api_errors
 def trash():
-    require_workspace_access(workspace_id(), owner=True)
-    collections = request.args.getlist("collection") or ["sessions", "sources", "knowledge_documents", "artifacts"]
+    from ..agent.store import RunStore
+
+    wid = workspace_id()
+    require_workspace_access(wid)
+    role = actor_role(db(), wid, current_user_id())
+    collections = request.args.getlist("collection") or sorted(_TRASH_COLLECTIONS)
+    if any(collection not in _TRASH_COLLECTIONS for collection in collections):
+        raise ValueError("回收站类型无效")
     items = []
-    for collection in collections:
-        for item in db().list(collection, workspace_id=workspace_id(), include_archived=True):
-            if item.get("archived_at"):
-                items.append({"collection": collection, **item})
+    store = RunStore(db())
+    for collection in dict.fromkeys(collections):
+        records = (
+            store.list_runs(wid, archived_only=True, actor_id=current_user_id(), limit=5000)
+            if collection == "agent_runs" else
+            db().list(collection, workspace_id=wid, archived_only=True, limit=5000)
+        )
+        for item in records:
+            if not item.get("archived_at") or not _trash_access(collection, item, wid, role):
+                continue
+            contract = store.latest_contract(item["id"]) if collection == "agent_runs" else None
+            title = (contract or {}).get("payload", {}).get("objective") or item.get("name") or item.get("title")
+            restore_reason = _analysis_restore_block_reason(item, wid, role) if collection == "agent_runs" else ""
+            items.append({
+                "id": item["id"], "collection": collection,
+                "title": str(title or item.get("filename") or "未命名内容")[:200],
+                "name": item.get("name") or "", "archived_at": item["archived_at"],
+                "session_id": item.get("session_id") or "",
+                "can_restore": role in {"owner", "editor", "analyst"} and not restore_reason,
+                "restore_block_reason": restore_reason,
+                "can_delete": (role == "owner" and collection != "agent_runs"
+                               and not (collection == "sessions" and _session_has_analysis(item["id"], wid))),
+            })
+    items.sort(key=lambda item: item["archived_at"], reverse=True)
     return ok(items=items)
 
 
 @bp.post("/api/trash/<collection>/<record_id>/restore")
 @api_errors
 def restore_trash(collection: str, record_id: str):
-    require_workspace_access(workspace_id(), owner=True)
-    allowed = {"sessions", "sources", "knowledge_documents", "artifacts"}
-    item = db().get(collection, record_id, include_archived=True) if collection in allowed else None
-    if not item or item.get("workspace_id", "default") != workspace_id() or not db().restore(collection, record_id):
+    with db().transaction():
+        return _restore_trash(collection, record_id)
+
+
+def _restore_trash(collection: str, record_id: str):
+    item, role = _trash_record(collection, record_id)
+    if role not in {"owner", "editor", "analyst"}:
+        raise PermissionError("当前成员只有只读权限")
+    if collection == "artifacts" and item.get("trash_id"):
+        from ..services.lifecycle import restore_artifact
+
+        restore_artifact(db(), workspace_id(), item["trash_id"])
+    elif not db().restore(collection, record_id, workspace_id=workspace_id()):
         raise FileNotFoundError("回收站记录不存在")
+    db().audit("trash.restored", workspace_id=workspace_id(), actor=current_user_id(),
+               object_type=collection, object_id=record_id)
     return ok(restored=True)
 
 
@@ -825,15 +940,35 @@ def delete_trash(collection: str, record_id: str):
     require_workspace_access(workspace_id(), owner=True)
     if body().get("confirm") is not True:
         raise ValueError("永久删除需要 confirm=true")
-    item = db().get(collection, record_id, include_archived=True)
-    if not item or item.get("workspace_id", "default") != workspace_id() or not item.get("archived_at"):
-        raise FileNotFoundError("回收站记录不存在")
-    for key in ("path",):
+    with db().transaction():
+        return _delete_trash(collection, record_id)
+
+
+def _delete_trash(collection: str, record_id: str):
+    item, _role = _trash_record(collection, record_id)
+    if collection == "sessions" and _session_has_analysis(record_id, workspace_id()):
+        raise ValueError("会话包含需保留的分析记录，可恢复但不能永久删除")
+    if collection == "sources":
+        from ..services.agent_definitions import agent_references
+
+        if agent_references(db(), workspace_id(), "source_ids", record_id):
+            raise ValueError("数据源仍被智能体草稿或发布版本引用，请先解除引用再永久删除")
+    if collection == "knowledge_documents":
+        from ..services.knowledge import document_references
+
+        references = document_references(db(), record_id, workspace_id(), actor_id=current_user_id())
+        if references:
+            return {"ok": False, "error": "文档仍被智能体引用，请先解除引用再永久删除", "references": references}, 409
+    for key in ("path", "trash_path"):
         path_value = item.get(key)
         if path_value:
-            try:
-                Path(path_value).unlink(missing_ok=True)
-            except OSError:
-                pass
-    db().delete(collection, record_id)
+            safe_child(current_app.config["SETTINGS"].storage_dir, Path(path_value)).unlink(missing_ok=True)
+    if collection == "sessions":
+        with db().transaction() as connection:
+            connection.execute("DELETE FROM messages WHERE session_id=?", (record_id,))
+    if collection == "artifacts" and item.get("trash_id"):
+        db().delete("lifecycle_file_trash", item["trash_id"], workspace_id=workspace_id())
+    db().delete(collection, record_id, workspace_id=workspace_id())
+    db().audit("trash.deleted", workspace_id=workspace_id(), actor=current_user_id(),
+               object_type=collection, object_id=record_id)
     return ok(deleted=True)

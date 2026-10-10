@@ -12,6 +12,7 @@ from ..agent.contracts import TaskContract
 from ..agent.store import RunStore
 from ..core.database import utcnow
 from ..services.advanced_agent import _source_authorized, available_formal_tools
+from ..services.agent_definitions import agent_source_ids, dynamic_source_scope, published_agent
 from ..services.authorization import require_sources_access
 from ..services.authorization import actor_role
 from ..services.jobs import get_job_manager
@@ -39,8 +40,8 @@ def _require_analyzer(wid: str) -> None:
         raise PermissionError("当前成员只有只读权限")
 
 
-def _require_run(run_id: str, *, write: bool = False) -> dict[str, Any]:
-    run = _store().get_run(run_id, workspace_id=workspace_id())
+def _require_run(run_id: str, *, write: bool = False, include_archived: bool = False) -> dict[str, Any]:
+    run = _store().get_run(run_id, workspace_id=workspace_id(), include_archived=include_archived)
     if not run or run.get("actor_id") != current_user_id():
         # Analysis runs are private even between users in one workspace.
         raise FileNotFoundError("分析任务不存在")
@@ -62,11 +63,32 @@ def _snapshot(run: dict[str, Any]) -> dict[str, Any]:
     publication = service.publication(run["id"], workspace_id=run["workspace_id"])
     manifest = service.manifest(publication["manifest_id"], workspace_id=run["workspace_id"]) if publication else None
     analysis_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    cancel_errors = []
+    if run["execution_status"] == "cancelling":
+        with db().connect() as connection:
+            rows = connection.execute(
+                "SELECT collection,id,payload FROM records WHERE collection IN ('warehouse_queries','remote_batches') "
+                "AND workspace_id=? AND json_extract(payload,'$.run_id')=?",
+                (run["workspace_id"], run["id"]),
+            ).fetchall()
+        for row in rows:
+            record = json.loads(row["payload"])
+            if record.get("cancellation_error"):
+                cancel_errors.append({"job_id": row["id"], "engine_type": row["collection"], "message": record["cancellation_error"]})
+        known_ids = {str(row["id"]) for row in rows}
+        for action in _store().actions(run["id"]):
+            external_id = str(action.get("external_job_id") or "")
+            if action.get("status") in {"accepted", "unknown"} and external_id and external_id not in known_ids:
+                cancel_errors.append({
+                    "job_id": external_id, "engine_type": "external",
+                    "message": "外部作业记录缺失，尚无法确认终止；系统会继续重试",
+                })
     return {
         **run, "contract": _store().latest_contract(run["id"]),
         "plan": _store().latest_plan(run["id"]), "publication": publication, "manifest": manifest,
         "agent_id": (analysis_context.get("agent_snapshot") or {}).get("id"),
         "agent_version": (analysis_context.get("agent_snapshot") or {}).get("version"),
+        "cancel_errors": cancel_errors,
     }
 
 
@@ -239,7 +261,9 @@ def create_analysis():
     }
     source_ids, business_space_id = _analysis_scope(payload, session, wid)
     agent_id = str(payload.get("agent_id") or "")
-    agent = require_workspace_record("agent_definitions", agent_id, wid) if agent_id else None
+    agent = published_agent(db(), require_workspace_record("agent_definitions", agent_id, wid)) if agent_id else None
+    if agent_id and agent is None:
+        raise PermissionError("只能使用已发布的智能体")
     preview = payload.get("agent_preview")
     if preview is not None:
         if agent_id or not isinstance(preview, dict):
@@ -257,13 +281,13 @@ def create_analysis():
             raise PermissionError("只能使用已发布的智能体")
         if agent.get("visibility") == "private" and agent.get("created_by") != current_user_id():
             raise FileNotFoundError("智能体不存在")
-        agent_source_list = list(dict.fromkeys(str(value) for value in agent.get("source_ids") or []))
-        agent_source_ids = set(agent_source_list)
-        if not source_ids and "source_ids" not in payload:
+        agent_source_list = agent_source_ids(db(), agent, current_user_id())
+        permitted_sources = set(agent_source_list)
+        if not source_ids and ("source_ids" not in payload or dynamic_source_scope(agent)):
             source_ids = agent_source_list
             for source_id in source_ids:
                 require_source_access(source_id, wid, action="analyze")
-        if not set(source_ids).issubset(agent_source_ids):
+        if not set(source_ids).issubset(permitted_sources):
             raise PermissionError("所选数据源超出智能体已发布范围")
     selected_knowledge = payload.get("knowledge_document_ids")
     if agent:
@@ -319,6 +343,12 @@ def create_analysis():
                 "name": agent["name"], "instruction": agent.get("instruction") or "",
                 "metric_ids": list(agent.get("metric_ids") or []),
                 "mcp_server_ids": list(agent.get("mcp_server_ids") or []),
+                "source_ids": list(source_ids),
+                "source_scope_mode": agent.get("source_scope_mode") or "bound",
+                "knowledge_document_ids": list(agent.get("knowledge_document_ids") or []),
+                "skill_ids": list(agent.get("skill_ids") or []),
+                "provider_id": agent.get("provider_id"),
+                "visibility": agent.get("visibility"),
             } if agent else None,
         }, workspace_id=wid)
         db().patch("sessions", session["id"], {
@@ -384,6 +414,8 @@ def list_analyses():
         _snapshot(item) for item in _store().list_runs(
             workspace_id(), session_id=str(request.args.get("session_id") or "") or None,
             limit=int(request.args.get("limit", 100)),
+            include_archived=request.args.get("include_archived", "").lower() in {"1", "true"},
+            actor_id=current_user_id(),
         ) if item.get("actor_id") == current_user_id() and _source_authorized(db(), item)
     ]
     return ok(items=items)
@@ -399,11 +431,23 @@ def get_analysis(run_id: str):
 @api_errors
 def archive_analysis(run_id: str):
     run = _require_run(run_id)
+    _require_analyzer(run["workspace_id"])
     if not _store().archive_run(
         run_id, workspace_id=run["workspace_id"], session_id=run["session_id"],
     ):
         raise FileNotFoundError("分析任务不存在")
     return ok(archived=True)
+
+
+@bp.post("/api/analyses/<run_id>/restore")
+@api_errors
+def restore_analysis(run_id: str):
+    run = _require_run(run_id, include_archived=True)
+    _require_analyzer(run["workspace_id"])
+    restored = _store().restore_run(
+        run_id, workspace_id=run["workspace_id"], session_id=run["session_id"], actor_id=current_user_id(),
+    )
+    return ok(item=_snapshot(_store().get_run(run_id) or run), restored=restored, idempotent=not restored)
 
 
 @bp.get("/api/analyses/<run_id>/execution")
@@ -703,10 +747,13 @@ def review_analysis_feedback(feedback_id: str):
 
 
 def _active_job(run_id: str) -> dict[str, Any] | None:
-    return next((
-        item for item in db().list("jobs", workspace_id=workspace_id(), limit=5000)
-        if item.get("run_id") == run_id and item.get("status") in {"queued", "running"}
-    ), None)
+    with db().connect() as connection:
+        row = connection.execute(
+            "SELECT id,status FROM typed_jobs WHERE run_id=? AND workspace_id=? "
+            "AND status IN ('queued','running','waiting_external','cancelling') ORDER BY created_at DESC LIMIT 1",
+            (run_id, workspace_id()),
+        ).fetchone()
+    return (db().get("jobs", row["id"], workspace_id=workspace_id()) or dict(row)) if row else None
 
 
 @bp.post("/api/analyses/<run_id>/control")
@@ -726,22 +773,17 @@ def control_analysis(run_id: str):
             return ok(item=_snapshot(run), idempotent=True)
         updated = _store().update_status(run_id, "paused", stop_reason="user_paused")
     elif action == "cancel":
-        if run["execution_status"] == "cancelled":
+        if run["execution_status"] in {"finished", "failed", "cancelled"}:
             return ok(item=_snapshot(run), idempotent=True)
-        if not job:
-            updated = _store().update_status(
-                run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled",
-            )
-        else:
-            updated = _store().update_status(run_id, "cancelling", stop_reason="cancel_requested")
-            if not manager.cancel(job["id"]):
-                updated = _store().update_status(
-                    run_id, "cancelled", outcome="cancelled", stop_reason="user_cancelled",
-                )
+        updated = manager.cancel_run(run_id, expected_version=int(expected) if expected is not None else None)
     elif action == "resume":
         if run["execution_status"] not in {"paused", "waiting_input"}:
             raise ValueError("只有已暂停或等待澄清的任务可继续；远程作业由调度器自动恢复")
-        updated = _store().update_status(run_id, "queued", stop_reason="user_resumed")
+        if job:
+            raise ValueError("当前任务仍在收尾，请稍后继续")
+        updated = _store().update_status(run_id, "queued", stop_reason="user_resumed", expected_version=int(run["version"]))
+        if updated["execution_status"] != "queued":
+            return ok(item=_snapshot(updated), idempotent=True)
         job = manager.submit_spec(
             workspace_id=run["workspace_id"], session_id=run["session_id"],
             job_type="analysis_run", title="继续分析", spec={"run_id": run_id}, run_id=run_id,
@@ -761,9 +803,13 @@ def answer_clarification(run_id: str):
     answer = str(body().get("answer") or "").strip()
     if not answer:
         raise ValueError("澄清回答不能为空")
+    updated = _store().update_status(
+        run_id, "queued", stop_reason="clarification_answered", expected_version=int(run["version"]),
+    )
+    if updated["execution_status"] != "queued":
+        raise ValueError("分析已结束或正在终止，不能继续澄清")
     db().add_message(run["session_id"], "user", answer, {"run_id": run_id, "kind": "clarification"})
     _store().append_event(run_id, "clarification.answered", {"answer": answer})
-    _store().update_status(run_id, "queued", stop_reason="clarification_answered")
     job = get_job_manager(current_app._get_current_object()).submit_spec(
         workspace_id=run["workspace_id"], session_id=run["session_id"], job_type="analysis_run",
         title="继续分析", spec={"run_id": run_id}, run_id=run_id,

@@ -28,11 +28,20 @@ export const KnowledgeView = {
       searchQuery: '',
       results: [],
       searching: false,
+      searchVersion: 0,
       editor: null,
       uploadOpen: false,
+      entryDeleteTarget: null,
+      deletingEntry: false,
+      entryDeleteError: '',
+      changingEntries: [],
+      changingDocuments: [],
       documentDeleteTarget: null,
       deletingDocument: false,
       documentDeleteError: '',
+      loadingDocumentReferences: false,
+      documentReferencesChecked: false,
+      documentReferenceVersion: 0,
       loading: true,
     };
   },
@@ -50,7 +59,18 @@ export const KnowledgeView = {
   async mounted() {
     await this.load();
   },
+  beforeUnmount() {
+    this.searchVersion += 1;
+    this.documentReferenceVersion += 1;
+  },
   methods: {
+    invalidateSearch(documentId = null) {
+      this.searchVersion += 1;
+      this.searching = false;
+      this.results = documentId
+        ? this.results.filter(item => item.document_id !== documentId)
+        : [];
+    },
     async load() {
       this.loading = true;
       try {
@@ -97,6 +117,7 @@ export const KnowledgeView = {
           : await actions.post('/api/knowledge/entries', this.editor);
         this.entries = this.entries
           .filter(item => item.id !== response.item.id).concat(response.item);
+        this.invalidateSearch(response.item.id);
         this.editor = null;
         toast('知识条目已保存', '完成');
       } catch (error) {
@@ -104,42 +125,110 @@ export const KnowledgeView = {
       }
     },
     async toggle(entry) {
+      if (!canAdmin.value || this.changingEntries.includes(entry.id) || this.deletingEntry) return;
+      this.changingEntries.push(entry.id);
       try {
-        await actions.patch(`/api/knowledge/entries/${entry.id}`, { enabled: !entry.enabled });
-        entry.enabled = !entry.enabled;
+        const response = await actions.patch(`/api/knowledge/entries/${encodeURIComponent(entry.id)}`, {
+          enabled: entry.enabled === false,
+        });
+        Object.assign(entry, response.item);
+        this.invalidateSearch(entry.id);
       } catch (error) {
         toast(error.message, '操作失败', 'error');
+      } finally {
+        this.changingEntries = this.changingEntries.filter(id => id !== entry.id);
       }
     },
-    async remove(entry) {
+    openEntryDelete(entry) {
+      if (!canAdmin.value || this.deletingEntry || this.changingEntries.includes(entry.id)) return;
+      this.entryDeleteTarget = entry;
+      this.entryDeleteError = '';
+    },
+    closeEntryDelete() {
+      if (!this.deletingEntry) this.entryDeleteTarget = null;
+    },
+    async removeEntry() {
+      const entry = this.entryDeleteTarget;
+      if (!entry || !canAdmin.value || this.deletingEntry) return;
+      this.deletingEntry = true;
+      this.entryDeleteError = '';
       try {
-        await actions.remove(`/api/knowledge/entries/${entry.id}`);
+        await actions.remove(`/api/knowledge/entries/${encodeURIComponent(entry.id)}`);
         this.entries = this.entries.filter(item => item.id !== entry.id);
-        toast('已移入回收站', '完成');
+        this.invalidateSearch(entry.id);
+        this.entryDeleteTarget = null;
+        toast('知识条目已移入回收站', '完成');
       } catch (error) {
-        toast(error.message, '删除失败', 'error');
+        this.entryDeleteError = error.message;
+      } finally {
+        this.deletingEntry = false;
       }
     },
-    openDocumentDelete(document) {
-      if (!canAdmin.value || this.deletingDocument) return;
+    async toggleDocument(document) {
+      if (!canAdmin.value || this.changingDocuments.includes(document.id) || this.deletingDocument) return;
+      this.changingDocuments.push(document.id);
+      try {
+        const response = await actions.patch(`/api/knowledge/documents/${encodeURIComponent(document.id)}`, {
+          enabled: document.enabled === false,
+        });
+        Object.assign(document, response.item);
+        this.invalidateSearch(document.id);
+      } catch (error) {
+        if (error.payload?.references) document.references = error.payload.references;
+        const names = (error.payload?.references || []).map(item => item.name).join('、');
+        toast(names ? `${error.message}：${names}` : error.message, '操作失败', 'error');
+      } finally {
+        this.changingDocuments = this.changingDocuments.filter(id => id !== document.id);
+      }
+    },
+    async openDocumentDelete(document) {
+      if (!canAdmin.value || this.deletingDocument || this.changingDocuments.includes(document.id)) return;
       this.documentDeleteTarget = document;
       this.documentDeleteError = '';
+      await this.loadDocumentReferences();
+    },
+    async loadDocumentReferences() {
+      const document = this.documentDeleteTarget;
+      if (!document || this.deletingDocument) return;
+      const version = ++this.documentReferenceVersion;
+      this.loadingDocumentReferences = true;
+      this.documentReferencesChecked = false;
+      this.documentDeleteError = '';
+      try {
+        const response = await actions.get(`/api/knowledge/documents/${encodeURIComponent(document.id)}/references`);
+        if (version !== this.documentReferenceVersion) return;
+        document.references = response.references || [];
+        this.documentReferencesChecked = true;
+      } catch (error) {
+        if (version === this.documentReferenceVersion) this.documentDeleteError = error.message;
+      } finally {
+        if (version === this.documentReferenceVersion) this.loadingDocumentReferences = false;
+      }
+    },
+    referenceScopes(reference) {
+      return (reference.scopes || []).map(scope => scope === 'published' ? '已发布版本' : '草稿配置').join('、');
     },
     closeDocumentDelete() {
-      if (!this.deletingDocument) this.documentDeleteTarget = null;
+      if (!this.deletingDocument) {
+        this.documentReferenceVersion += 1;
+        this.loadingDocumentReferences = false;
+        this.documentDeleteTarget = null;
+      }
     },
     async removeDocument() {
       const document = this.documentDeleteTarget;
-      if (!document || !canAdmin.value || this.deletingDocument) return;
+      if (!document || !canAdmin.value || this.deletingDocument || !this.documentReferencesChecked
+          || this.loadingDocumentReferences || document.references?.length) return;
       this.deletingDocument = true;
       this.documentDeleteError = '';
       try {
         await actions.remove(`/api/knowledge/documents/${encodeURIComponent(document.id)}`);
         this.documents = this.documents.filter(item => item.id !== document.id);
-        this.results = this.results.filter(item => item.document_id !== document.id);
+        this.invalidateSearch(document.id);
         this.documentDeleteTarget = null;
         toast('知识文档已移入回收站', '完成');
       } catch (error) {
+        if (error.payload?.references) document.references = error.payload.references;
         this.documentDeleteError = error.message;
       } finally {
         this.deletingDocument = false;
@@ -147,14 +236,15 @@ export const KnowledgeView = {
     },
     async search() {
       if (!this.searchQuery.trim()) return;
+      const version = ++this.searchVersion;
       this.searching = true;
       try {
         const response = await actions.post('/api/knowledge/search', { query: this.searchQuery });
-        this.results = response.items || [];
+        if (version === this.searchVersion) this.results = response.items || [];
       } catch (error) {
-        toast(error.message, '检索失败', 'error');
+        if (version === this.searchVersion) toast(error.message, '检索失败', 'error');
       } finally {
-        this.searching = false;
+        if (version === this.searchVersion) this.searching = false;
       }
     },
     async upload(event) {
@@ -176,6 +266,7 @@ export const KnowledgeView = {
         const payload = await response.json();
         if (!response.ok || payload.ok === false) throw new Error(payload.error || '导入失败');
         await this.load();
+        this.invalidateSearch();
         this.uploadOpen = false;
         toast('文档已索引', '完成');
       } catch (error) {
@@ -231,9 +322,11 @@ export const KnowledgeView = {
                 </div>
                 <div class="row" style="gap:4px">
                   <Switch :model-value="item.enabled !== false" :label="'启用 ' + entryTitle(item)"
+                          :disabled="deletingEntry || changingEntries.includes(item.id)"
                           @update:model-value="toggle(item)" />
                   <button class="icon-btn" aria-label="编辑" @click="edit(item)"><Icon name="edit" :size="15" /></button>
-                  <button class="icon-btn icon-btn--danger" aria-label="删除" @click="remove(item)">
+                  <button class="icon-btn icon-btn--danger" :aria-label="'删除条目 ' + entryTitle(item)"
+                          :disabled="deletingEntry || changingEntries.includes(item.id)" @click="openEntryDelete(item)">
                     <Icon name="trash" :size="15" />
                   </button>
                 </div>
@@ -254,12 +347,16 @@ export const KnowledgeView = {
             <div>
               <b>{{ item.name }}</b>
               <p class="small muted">{{ item.format }} · {{ item.chunk_count || 0 }} 片段 · {{ item.characters || 0 }} 字符</p>
+              <p v-if="item.references?.length" class="small muted">被 {{ item.references.length }} 个智能体引用，解除引用后可删除或停用。</p>
             </div>
           </div>
           <div class="row">
+            <Switch v-if="canAdmin" :model-value="item.enabled !== false" :label="'启用文档 ' + item.name"
+                    :disabled="deletingDocument || changingDocuments.includes(item.id)"
+                    @update:model-value="toggleDocument(item)" />
             <Status :status="item.enabled === false ? 'disabled' : 'ready'" />
             <button v-if="canAdmin" class="btn btn--sm" style="color:var(--danger)"
-                    :aria-label="'删除文档 ' + item.name" :disabled="deletingDocument"
+                    :aria-label="'删除文档 ' + item.name" :disabled="deletingDocument || changingDocuments.includes(item.id)"
                     @click="openDocumentDelete(item)">
               <Icon name="trash" :size="14" />删除
             </button>
@@ -291,15 +388,42 @@ export const KnowledgeView = {
       </div>
     </div>
 
+    <Modal :open="!!entryDeleteTarget" title="删除知识条目" @close="closeEntryDelete">
+      <p v-if="entryDeleteTarget" class="small">
+        确定删除知识条目「{{ entryTitle(entryDeleteTarget) }}」吗？后续检索将不再使用它，
+        已完成的分析记录会保留。可到 <a href="#/admin/trash?collection=knowledge_entries">回收站</a> 恢复。
+      </p>
+      <p v-if="entryDeleteError" class="small" style="color:var(--danger)">{{ entryDeleteError }}</p>
+      <template #footer>
+        <button class="btn" :disabled="deletingEntry" @click="closeEntryDelete">取消</button>
+        <button class="btn btn--primary" :disabled="deletingEntry" @click="removeEntry">
+          {{ deletingEntry ? '删除中…' : '确认删除' }}
+        </button>
+      </template>
+    </Modal>
+
     <Modal :open="!!documentDeleteTarget" title="删除知识文档" @close="closeDocumentDelete">
       <p v-if="documentDeleteTarget" class="small">
         确定删除知识文档「{{ documentDeleteTarget.name }}」吗？文档将移入回收站，
-        后续知识检索将不再使用它。可在回收站恢复。
+        后续知识检索将不再使用它，已完成的分析记录会保留。
+        可到 <a href="#/admin/trash?collection=knowledge_documents">回收站</a> 恢复。
       </p>
+      <p v-if="loadingDocumentReferences" class="small muted">正在检查智能体引用…</p>
+      <div v-if="documentDeleteTarget?.references?.length" class="stack" style="margin-top:12px">
+        <p class="small">请先解除以下智能体的引用。已发布版本的引用需要修改配置并重新发布后才会解除。</p>
+        <p v-for="(reference, index) in documentDeleteTarget.references" :key="reference.id || index" class="small">
+          <b>{{ reference.name }}</b> · {{ referenceScopes(reference) }}
+          <span v-if="reference.private">（请联系其创建者解除绑定）</span>
+        </p>
+        <a href="#/admin/agents" class="small">管理智能体引用</a>
+      </div>
       <p v-if="documentDeleteError" class="small" style="color:var(--danger)">{{ documentDeleteError }}</p>
       <template #footer>
         <button class="btn" :disabled="deletingDocument" @click="closeDocumentDelete">取消</button>
-        <button class="btn btn--primary" :disabled="deletingDocument" @click="removeDocument">
+        <button class="btn" :disabled="deletingDocument || loadingDocumentReferences" @click="loadDocumentReferences">刷新引用</button>
+        <button class="btn btn--primary"
+                :disabled="deletingDocument || loadingDocumentReferences || !documentReferencesChecked || !!documentDeleteTarget?.references?.length"
+                @click="removeDocument">
           {{ deletingDocument ? '删除中…' : '确认删除' }}
         </button>
       </template>

@@ -111,7 +111,7 @@ export const RunsView = {
           <tbody>
             <tr v-for="item in filtered" :key="item.id">
               <td>{{ item.created_at }}</td>
-              <td class="run-row__q" :title="item.question">{{ item.question || '—' }}</td>
+              <td class="run-row__q" :title="item.question">{{ item.question || '—' }}<span v-if="item.archived_at" class="xs muted" style="display:block">已从会话删除 · 执行记录保留</span></td>
               <td>{{ (item.skill_ids || []).join('、') || '自动' }}</td>
               <td class="is-numeric">{{ item.duration_seconds ? item.duration_seconds + 's' : '—' }}</td>
               <td><Status :status="item.execution_status" /></td>
@@ -155,6 +155,7 @@ export const RunsView = {
             </div>
           </div>
           <dl class="definition">
+            <template v-if="detail.run.archived_at"><dt>会话显示</dt><dd>已从会话删除，执行记录保留</dd></template>
             <dt>结束原因</dt><dd class="mono xs">{{ detail.run.stop_reason || '—' }}</dd>
             <dt>数据范围</dt><dd class="mono xs">{{ detail.run.source_scope.join('、') || '—' }}</dd>
             <dt>起始</dt><dd>{{ formatDate(detail.run.started_at) }}</dd>

@@ -6,13 +6,14 @@ from pathlib import Path
 from flask import Blueprint, current_app, jsonify, request
 
 from ..services.knowledge import (
+    document_reference_map,
     index_document_path,
     parse_knowledge_path,
     save_entry,
     search,
 )
 from .common import (
-    api_errors, body, db, ok, require_workspace_record, workspace_id,
+    api_errors, body, current_user_id, db, ok, require_workspace_record, workspace_id,
 )
 
 
@@ -81,11 +82,22 @@ def knowledge_files():
 @bp.delete("/api/knowledge/files/<path:filename>")
 @api_errors
 def delete_knowledge_file(filename: str):
-    record = _import_record(Path(filename).name)
-    Path(record["path"]).unlink(missing_ok=True)
-    db().archive("knowledge_imports", record["id"])
-    for document in db().list("knowledge_documents", workspace_id=record["workspace_id"], limit=5000):
-        if document.get("source_import_filename") == record["filename"]:
+    with db().transaction():
+        record = _import_record(Path(filename).name)
+        documents = [
+            document for document in db().list("knowledge_documents", workspace_id=record["workspace_id"], limit=5000)
+            if document.get("source_import_filename") == record["filename"]
+        ]
+        reference_map = document_reference_map(db(), record["workspace_id"], actor_id=current_user_id())
+        references = [reference for document in documents for reference in reference_map.get(document["id"], [])]
+        if references:
+            return jsonify({
+                "ok": False, "error": "源文件的知识文档仍被智能体引用，请先解除草稿和已发布版本的引用",
+                "references": references,
+            }), 409
+        Path(record["path"]).unlink(missing_ok=True)
+        db().archive("knowledge_imports", record["id"])
+        for document in documents:
             db().archive("knowledge_documents", document["id"])
     return ok()
 
@@ -189,7 +201,8 @@ def _delete_entry(entry_id: str):
         require_workspace_record("knowledge_entries", entry_id)
     except FileNotFoundError:
         return jsonify({"error": "Not found"}), 404
-    db().archive("knowledge_entries", entry_id)
+    if not db().archive("knowledge_entries", entry_id):
+        return jsonify({"error": "Not found"}), 404
     return ok()
 
 
@@ -199,6 +212,8 @@ def _toggle_entry(entry_id: str):
     except FileNotFoundError:
         return jsonify({"error": "Not found"}), 404
     item = db().patch("knowledge_entries", entry_id, {"enabled": not item.get("enabled", True)})
+    if not item:
+        return jsonify({"error": "Not found"}), 404
     return jsonify(_public(item))
 
 
