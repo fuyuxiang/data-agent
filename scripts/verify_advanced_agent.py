@@ -51,7 +51,18 @@ def command(
             check_id, "BLOCKED", f"无法启动验证工具：{exc}", argv,
             round(time.monotonic() - started, 3),
         )
-    output = ((completed.stdout or "") + (completed.stderr or ""))[-20_000:]
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    limit = 20_000
+    if len(stdout) + len(stderr) > limit:
+        # Preserve both streams: verbose server stderr must not hide test
+        # failures, summaries or skipped-test evidence printed to stdout.
+        stdout_limit = min(len(stdout), limit // 2)
+        stderr_limit = min(len(stderr), limit - stdout_limit)
+        stdout_limit = min(len(stdout), limit - stderr_limit)
+        stdout = stdout[-stdout_limit:] if stdout_limit else ""
+        stderr = stderr[-stderr_limit:] if stderr_limit else ""
+    output = stdout + stderr
     summaries = re.findall(
         r"(?:^|\s)(\d+ passed(?:, \d+ (?:failed|skipped|deselected|warnings?))*(?: in [0-9.]+s)?)",
         output,

@@ -43,15 +43,19 @@ jobs:
           mysql -h 127.0.0.1 -u meridian -pMeridianCI2026_Pass -e 'SELECT 1'
       - name: Install Python dependencies
         run: python -m pip install --require-hashes --requirement requirements-dev.lock
-      - name: Verify Python
+      - name: Check Python lint
+        run: ruff check backend scripts tests app.py
+      - name: Check Python security
+        run: ruff check --select S backend scripts app.py
+      - name: Compile Python
+        run: python -m compileall -q backend scripts app.py
+      - name: Test Python and overall coverage
         run: |
-          ruff check backend scripts tests app.py
-          ruff check --select S backend scripts app.py
-          python -m compileall -q backend scripts app.py
           pytest -q -m "not database_integration" \
             --cov=backend/agent --cov=backend/api --cov=backend/core --cov=backend/services \
             --cov-report=term --cov-fail-under=60
-          coverage report --include='backend/agent/*' --fail-under=85
+      - name: Check agent core coverage
+        run: coverage report --include='backend/agent/*' --fail-under=85
       - name: Verify PostgreSQL and MySQL connectors
         env:
           MERIDIAN_DATABASE_ALLOW_PRIVATE_NETWORK: "1"

@@ -378,6 +378,30 @@ def test_dynamic_builtin_metric_dependency_keeps_its_source_until_republished_wi
     assert client.delete(path).status_code == 200
 
 
+@pytest.mark.parametrize('workspace_id,expected_ids', [
+    ('default', {'reference-default'}),
+    ('other', {'reference-other'}),
+    (None, {'reference-default', 'reference-other'}),
+    ('missing', set()),
+    ('', set()),
+    ("default' OR 1=1 --", set()),
+])
+def test_dependency_guards_preserve_workspace_scope_and_exclude_archived_agents(app, workspace_id, expected_ids):
+    database = app.extensions['meridian_db']
+    for wid in ('default', 'other'):
+        database.put('agent_definitions', {
+            'id': f'reference-{wid}', 'name': '仍在使用模型的草稿',
+            'status': 'draft', 'published_version': None, 'provider_id': 'shared-provider',
+        }, workspace_id=wid)
+        archived = database.put('agent_definitions', {
+            'id': f'archived-reference-{wid}', 'name': '已回收的草稿',
+            'status': 'draft', 'published_version': None, 'provider_id': 'shared-provider',
+        }, workspace_id=wid)
+        database.archive('agent_definitions', archived['id'], workspace_id=wid)
+    references = agent_references(database, workspace_id, 'provider_id', 'shared-provider')
+    assert {item['id'] for item in references} == expected_ids
+
+
 def test_dependency_guards_include_agents_beyond_the_catalog_page_limit(app, client):
     database = app.extensions['meridian_db']
     provider = database.put('providers', {'id': 'old-bound-provider', 'name': '保留模型'})

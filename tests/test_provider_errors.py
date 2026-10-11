@@ -218,6 +218,11 @@ def test_provider_resolution_can_opt_into_system_proxy(app, monkeypatch):
         return SimpleNamespace()
 
     _stub_public_dns(monkeypatch)
+    # Exercise an explicit HTTP proxy without inheriting desktop SOCKS proxies
+    # or bypass rules, which require optional dependencies and vary by host.
+    for name in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     monkeypatch.setenv("MERIDIAN_MODEL_TRUST_ENV_PROXY", "1")
     monkeypatch.setattr("backend.services.models.OpenAI", fake_openai)
     with app.app_context():

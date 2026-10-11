@@ -77,11 +77,15 @@ def agent_references(database: Database, workspace_id: str | None, field: str, r
     result = []
     # Dependency guards must not use the UI catalog's 5000-row listing limit.
     with database.connect() as connection:
-        where = " AND workspace_id=?" if workspace_id is not None else ""
-        rows = connection.execute(
-            "SELECT payload FROM records WHERE collection='agent_definitions' "
-            f"AND archived_at IS NULL{where}", (workspace_id,) if workspace_id is not None else (),
-        ).fetchall()
+        if workspace_id is None:
+            rows = connection.execute(
+                "SELECT payload FROM records WHERE collection='agent_definitions' AND archived_at IS NULL",
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT payload FROM records WHERE collection='agent_definitions' "
+                "AND archived_at IS NULL AND workspace_id=?", (workspace_id,),
+            ).fetchall()
     for row in rows:
         item = json.loads(row["payload"])
         for configuration in (item, published_agent(database, item)):
