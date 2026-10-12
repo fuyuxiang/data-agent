@@ -208,10 +208,23 @@ def update_source(source_id: str):
         if source.get("kind") == "warehouse":
             raise ValueError("数仓行列权限须由目标仓身份或安全视图执行，当前连接不接受本地规则")
         policy_source = {**source, "row_policy": None, "column_policies": None}
+        if source.get("kind") == "database":
+            from ..services.database_catalog import ensure_columns
+            policies = [payload.get("row_policy", source.get("row_policy")),
+                        payload.get("column_policies", source.get("column_policies"))]
+            # Policy validation needs complete columns for the tables named by
+            # these administrator-supplied rules, never a truncated catalog.
+            requested = {str(rule.get("table") or "") for policy in policies
+                         for rule in (policy if isinstance(policy, list) else [policy] if isinstance(policy, dict) else [])}
+            names = [table["name"] for table in source.get("tables") or []
+                     if not requested or "" in requested or table["name"] in requested]
+            policy_source = ensure_columns(policy_source, names)
         rows, columns = normalize_policies(
             payload.get("row_policy", source.get("row_policy")),
             payload.get("column_policies", source.get("column_policies")),
-            schema_for_source(policy_source),
+            {"tables": [{"name": table["name"], "columns": table.get("schema", [])}
+                        for table in policy_source["tables"]]} if source.get("kind") == "database"
+            else schema_for_source(policy_source),
         )
         allowed["row_policy"] = rows
         allowed["column_policies"] = columns
@@ -292,7 +305,23 @@ def refresh(source_id: str):
 @bp.get("/api/sources/<source_id>/schema")
 @api_errors
 def source_schema(source_id: str):
-    return ok(schema=schema_for_source(require_source_access(source_id), actor_id=current_user_id()))
+    table = request.args.get("table")
+    return ok(schema=schema_for_source(require_source_access(source_id), actor_id=current_user_id(),
+        table_names=[table] if table else None, query=request.args.get("q"), cursor=request.args.get("cursor", ""),
+        limit=int(request.args.get("limit", 25)), column_offset=int(request.args.get("column_offset", 0)),
+        column_limit=int(request.args.get("column_limit", 50)), column_query=request.args.get("column_query", "")))
+
+
+@bp.get("/api/sources/<source_id>/catalog")
+@api_errors
+def source_catalog(source_id: str):
+    from ..services.database_catalog import catalog_page
+
+    source = require_source_access(source_id)
+    if source.get("kind") != "database":
+        raise ValueError("当前数据源不支持数据库目录探查")
+    return ok(**catalog_page(source, query=request.args.get("q", ""), cursor=request.args.get("cursor", ""),
+        limit=int(request.args.get("limit", 25)), actor_id=current_user_id()))
 
 
 @bp.get("/api/sources/<source_id>/preview")
@@ -308,21 +337,79 @@ def source_profile(source_id: str):
     source = require_source_access(source_id)
     table_name = request.args.get("table")
     if source.get("kind") == "database":
-        # Remote databases must stay on the controlled read-only path. Pull a
-        # bounded sample through the same policy-aware preview used by the
-        # preview tab, then run the quality calculations on that sample.
-        preview = preview_source(source, table_name, 1000, actor_id=current_user_id())
-        frame = pd.DataFrame(preview.get("data") or [], columns=preview.get("columns") or [])
-        result = profile(frame)
-        result.update({
-            "table": preview.get("table"),
-            "sampled": True,
-            "sample_rows": int(preview.get("rows") or 0),
-            "sample_truncated": bool(preview.get("truncated")),
-        })
-        return ok(profile=result)
+        from ..services.database_profile import profile_database
+
+        return ok(profile=profile_database(source, table_name=table_name, actor_id=current_user_id(),
+            mode=request.args.get("mode", "sample"), columns=request.args.getlist("column") or None,
+            sample_rows=int(request.args.get("sample_rows", 500)), time_column=request.args.get("time_column", ""),
+            time_start=request.args.get("time_start", ""), time_end=request.args.get("time_end", ""),
+            time_format=request.args.get("time_format", "iso")))
     _, frame = source_table(source, table_name, actor_id=current_user_id())
     return ok(profile=profile(frame))
+
+
+def _database_query_job(app, spec, progress, cancel):
+    progress(10, "正在检查查询范围与计算成本")
+    result = execute_query(spec["source_ids"], spec["sql"], spec["workspace_id"], spec.get("limit", 1000),
+                           actor_id=spec["actor_id"], should_cancel=cancel.is_set)
+    return {"result": {key: value for key, value in result.items() if key != "path"}}
+
+
+def _database_profile_job(app, spec, progress, cancel):
+    from ..services.database_profile import profile_database
+
+    progress(10, "正在检查探查范围")
+    source = db().get("sources", spec["source_id"], workspace_id=spec["workspace_id"])
+    return {"profile": profile_database(source, actor_id=spec["actor_id"], should_cancel=cancel.is_set,
+        **{key: spec[key] for key in ("table_name", "mode", "columns", "sample_rows", "time_column", "time_start", "time_end", "time_format") if key in spec})}
+
+
+@bp.post("/api/query/jobs")
+@api_errors
+def submit_query_job():
+    from ..services.authorization import require_sources_access
+    from ..services.jobs import get_job_manager
+
+    payload = body()
+    wid, actor = workspace_id(), current_user_id()
+    ids = list(dict.fromkeys(str(value) for value in payload.get("source_ids") or []))
+    if not ids:
+        raise ValueError("请选择数据源")
+    sources = require_sources_access(db(), ids, workspace_id=wid, actor_id=actor, action="query")
+    from ..services.data_policy import policy_fingerprint
+    job = get_job_manager(current_app._get_current_object()).submit_spec(
+        workspace_id=wid, session_id=None, job_type="database_query", title="数据查询",
+        spec={"source_ids": ids, "sql": str(payload.get("sql") or ""), "limit": int(payload.get("limit", 1000)),
+              "workspace_id": wid, "actor_id": actor,
+              "policy_fingerprint": policy_fingerprint(sources, actor_id=actor, role=actor_role(db(), wid, actor))},
+    )
+    return ok(job=job), 202
+
+
+@bp.post("/api/sources/<source_id>/profile-jobs")
+@api_errors
+def submit_profile_job(source_id: str):
+    from ..services.jobs import get_job_manager
+
+    source = require_source_access(source_id, action="analyze")
+    from ..services.data_policy import policy_fingerprint
+    if source.get("kind") != "database":
+        raise ValueError("当前数据源不需要数据库探查任务")
+    payload = body()
+    spec = {key: payload[key] for key in ("mode", "columns", "sample_rows", "time_column", "time_start", "time_end", "time_format") if key in payload}
+    spec.update(table_name=payload.get("table"), source_id=source_id, source_ids=[source_id],
+                workspace_id=source["workspace_id"], actor_id=current_user_id(),
+                policy_fingerprint=policy_fingerprint([source], actor_id=current_user_id(),
+                    role=actor_role(db(), source["workspace_id"], current_user_id())))
+    job = get_job_manager(current_app._get_current_object()).submit_spec(
+        workspace_id=source["workspace_id"], session_id=None, job_type="database_profile", title="数据探查", spec=spec)
+    return ok(job=job), 202
+
+
+from ..services.jobs import register_job_handler  # noqa: E402
+
+register_job_handler("database_query", _database_query_job)
+register_job_handler("database_profile", _database_profile_job)
 
 
 @bp.post("/api/sources/<source_id>/clean/preview")

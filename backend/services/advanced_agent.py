@@ -23,7 +23,7 @@ from ..skills.models import FORMAL_AGENT_TOOLS
 from .agent_tools import AgentToolContext, execute_tool, tool_schemas
 from .authorization import actor_role, require_sources_access
 from .data_policy import policy_fingerprint
-from .data_plane.contracts import BoundedTransferPolicy, DatasetRef, DatasetRefStore
+from .data_plane.contracts import DatasetRef, DatasetRefStore
 from .data_plane.factory import livy_adapter, local_analysis_runner, trino_adapter
 from .datasets import frame_records
 from .query_results import normalize_result_columns, write_result_frame
@@ -287,7 +287,12 @@ def _local_analysis_tool(database: Database, run: dict[str, Any], args: dict[str
     if ref.computation_state != "complete" or ref.result_completeness != "complete":
         raise ValueError("仅完整计算且未截断的 DatasetRef 可进入本地隔离分析")
     usage = run.get("usage") or {}
-    BoundedTransferPolicy().approve(ref, run_egress_bytes=int(usage.get("result_bytes") or 0))
+    from .data_plane.router import ExecutionRoute, ExecutionRouter
+
+    route = ExecutionRouter().choose([ref], operation="local_analysis", warehouse_available=False,
+        spark_available=False, run_egress_bytes=int(usage.get("result_bytes") or 0))
+    if route.route != ExecutionRoute.BOUNDED_SANDBOX:
+        raise ValueError(route.reason)
     result_id = str(ref.location.get("query_result_id") or "")
     source_result = database.get("query_results", result_id, workspace_id=run["workspace_id"])
     if not source_result:
@@ -456,6 +461,7 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         semantic_metric_ids=metric_ids or None,
         mcp_server_ids=list(agent_snapshot.get("mcp_server_ids") or []) if agent_snapshot else None,
         actor_id=run["actor_id"],
+        run_id=run["id"],
     )
     registry = ToolRegistry()
     approved_mcp = {

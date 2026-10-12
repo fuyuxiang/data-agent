@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import PurePath
+import re
 from typing import Iterable
 
 import sqlglot
 from sqlglot import expressions as exp
+from sqlglot.optimizer.scope import traverse_scope
 
 
 EXTERNAL_FUNCTIONS = frozenset({
@@ -54,6 +56,8 @@ EXTERNAL_FUNCTIONS = frozenset({
     "sleep",
     "writefile",
     "xp_cmdshell",
+    "s3", "hdfs", "jdbc", "odbc", "local", "numbers",
+    "files", "http", "query", "backends", "frontends",
 })
 
 BLOCKED_NODE_TYPES = (
@@ -64,6 +68,8 @@ BLOCKED_NODE_TYPES = (
     exp.Delete,
     exp.Drop,
     exp.Insert,
+    exp.Into,
+    exp.Lock,
     exp.Merge,
     exp.Transaction,
     exp.Update,
@@ -99,6 +105,8 @@ def validate_read_only_sql(sql: str, dialect: str | None = None) -> str:
     statement = str(sql or "").strip().rstrip(";").strip()
     if not statement:
         raise ValueError("查询不能为空")
+    if re.search(r"/\*\+[\s\S]*?\bSET_VAR\s*\(", statement, re.I):
+        raise ValueError("查询不能覆盖数据库的资源与超时设置")
     try:
         parsed = [item for item in sqlglot.parse(statement, read=dialect) if item is not None]
     except sqlglot.errors.ParseError as exc:
@@ -135,6 +143,18 @@ def bounded_read_only_sql(sql: str, limit: int, dialect: str | None = None) -> s
     return root.sql(dialect=dialect)
 
 
+def base_query_tables(root: exp.Expression) -> list[exp.Table]:
+    """Resolve CTE/subquery scopes rather than skipping every matching name."""
+    tables = []
+    seen = set()
+    for scope in traverse_scope(root):
+        for _alias, (_node, source) in scope.selected_sources.items():
+            if isinstance(source, exp.Table) and id(source) not in seen:
+                seen.add(id(source))
+                tables.append(source)
+    return tables
+
+
 def validate_query_tables(
     sql: str,
     allowed_tables: Iterable[str],
@@ -144,15 +164,10 @@ def validate_query_tables(
     statement = validate_read_only_sql(sql, dialect)
     root = sqlglot.parse_one(statement, read=dialect)
     allowed = {str(value).strip().lower() for value in allowed_tables if str(value).strip()}
-    cte_names = {
-        str(node.alias_or_name or "").strip().lower()
-        for node in root.find_all(exp.CTE)
-        if str(node.alias_or_name or "").strip()
-    }
     referenced: list[str] = []
-    for table in root.find_all(exp.Table):
+    for table in base_query_tables(root):
         name = str(table.name or "").strip()
-        if not name or name.lower() in cte_names:
+        if not name:
             continue
         database_name = str(table.db or "").strip()
         catalog_name = str(table.catalog or "").strip()

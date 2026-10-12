@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 import sqlglot
 from sqlglot import exp
+from sqlglot.optimizer.scope import traverse_scope
+from .sql_security import base_query_tables
 
 
 def _rules(value: Any, name: str) -> list[dict]:
@@ -143,15 +145,12 @@ def rewrite_database_sql(sql: str, source: dict, *, actor_id: str, role: str, di
     if not source.get("row_policy") and not source.get("column_policies"):
         return sql
     statement = sqlglot.parse_one(sql, read=dialect)
-    cte_names = {cte.alias_or_name.lower() for cte in statement.find_all(exp.CTE)}
     catalogs = {
         str(alias).lower(): table for table in source.get("tables") or []
         for alias in (table.get("name"), table.get("source_name")) if alias
     }
-    for relation in list(statement.find_all(exp.Table)):
+    for relation in base_query_tables(statement):
         name = relation.name.lower()
-        if name in cte_names and not relation.db:
-            continue
         table = catalogs.get(name)
         if table is None:
             raise PermissionError("权限策略无法识别查询的数据表")
@@ -175,14 +174,35 @@ def rewrite_database_sql(sql: str, source: dict, *, actor_id: str, role: str, di
 
 def reject_denied_columns(sql: str, sources: list[dict], *, actor_id: str, role: str, dialect: str | None) -> None:
     """Return an authorization error before a SQL engine can expose a hidden field."""
-    denied = set()
+    parsed = sqlglot.parse_one(sql, read=dialect)
+    by_table = {}
     for source in sources:
         for table in source.get("tables") or []:
-            denied.update(effective_policy(
+            denied = {value.lower() for value in effective_policy(
                 source, str(table.get("name") or table.get("source_name")), actor_id, role,
-            )[1])
-    if not denied:
+            )[1]}
+            for name in (table.get("name"), table.get("source_name")):
+                if name:
+                    by_table.setdefault(str(name).lower(), set()).update(denied)
+    if not any(by_table.values()):
         return
-    parsed = sqlglot.parse_one(sql, read=dialect)
-    if any(column.name in denied for column in parsed.find_all(exp.Column)):
-        raise PermissionError("查询引用了未授权字段")
+    for scope in traverse_scope(parsed):
+        for column in scope.columns:
+            current = scope
+            denied = set()
+            while current:
+                sources_here = current.sources
+                if column.table:
+                    relation = sources_here.get(column.table)
+                    if relation is not None:
+                        if isinstance(relation, exp.Table):
+                            denied = by_table.get(relation.name.lower(), set())
+                        break
+                else:
+                    for relation in sources_here.values():
+                        if isinstance(relation, exp.Table):
+                            denied.update(by_table.get(relation.name.lower(), set()))
+                    break
+                current = current.parent
+            if column.name.lower() in denied:
+                raise PermissionError("查询引用了未授权字段")

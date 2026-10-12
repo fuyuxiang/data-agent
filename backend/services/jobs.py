@@ -283,6 +283,8 @@ class JobManager:
                 "run_id": run_id, "kind": job_type, "title": title, "status": "queued",
                 "progress": 0, "message": "等待执行", "result": None, "error": None,
                 "cancel_requested": False, "typed": True,
+                "actor_id": spec.get("actor_id"), "source_ids": spec.get("source_ids", []),
+                "policy_fingerprint": spec.get("policy_fingerprint"),
             }, workspace_id=workspace_id)
             with self._lock:
                 self.cancel_flags[job_id] = cancel
@@ -350,11 +352,19 @@ class JobManager:
                 current = self._mirror(job_id, progress=max(0, min(100, round(value, 1))), message=message)
                 self.db.job_event(job_id, "progress", current or {})
 
+            capacity_released = False
+            def release_capacity():
+                nonlocal capacity_released
+                if not capacity_released:
+                    self._release(workspace_id)
+                    capacity_released = True
+
             try:
                 result = handler(self.app, typed["spec"], progress, cancel)
                 current = self._typed_job(job_id) or {}
                 status = "cancelled" if cancel.is_set() or current.get("cancel_requested") or result.get("status") == "cancelled" else "completed"
                 self._finish_typed(job_id, status, result, None)
+                release_capacity()
                 final = self._mirror(
                     job_id, status=status, progress=100 if status == "completed" else 0,
                     message="执行完成" if status == "completed" else "已取消",
@@ -368,6 +378,7 @@ class JobManager:
                 current = self._typed_job(job_id) or {}
                 if cancel.is_set() or current.get("cancel_requested"):
                     self._finish_typed(job_id, "cancelled", None, "cancel_requested")
+                    release_capacity()
                     final = self._mirror(
                         job_id, status="cancelled", progress=0, message="已取消",
                         finished_at=utcnow(),
@@ -377,6 +388,7 @@ class JobManager:
                     self._ensure_cancel_reconciler()
                 else:
                     self._finish_typed(job_id, "failed", None, type(exc).__name__)
+                    release_capacity()
                     final = self._mirror(
                         job_id, status="failed", message="执行失败", error=str(exc),
                         trace=traceback.format_exc(limit=12), finished_at=utcnow(),
@@ -386,7 +398,7 @@ class JobManager:
                 with self._lock:
                     self.cancel_flags.pop(job_id, None)
                     self._futures.pop(job_id, None)
-                self._release(workspace_id)
+                release_capacity()
 
     def _finish_typed(self, job_id: str, status: str, result: dict | None, error_code: str | None) -> None:
         with self.db.transaction() as connection:

@@ -264,6 +264,17 @@ def require_job_access(
 ) -> dict:
     if not job or str(job.get("workspace_id") or "default") != workspace_id:
         raise FileNotFoundError("后台任务不存在")
+    if job.get("actor_id") and not job.get("run_id"):
+        if job["actor_id"] != actor_id:
+            raise FileNotFoundError("后台任务不存在")
+        sources = require_sources_access(database, job.get("source_ids") or [], workspace_id=workspace_id, actor_id=actor_id)
+        from .data_policy import policy_fingerprint
+
+        recorded = job.get("policy_fingerprint")
+        if recorded and job.get("result") is not None and recorded != policy_fingerprint(sources, actor_id=actor_id,
+                                                      role=actor_role(database, workspace_id, actor_id)):
+            raise PermissionError("数据权限已变化，请按当前范围重新提交任务")
+        return job
     run_id = str(job.get("run_id") or "")
     if run_id:
         with database.connect() as connection:

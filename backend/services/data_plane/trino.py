@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import sqlglot
 from requests.auth import HTTPBasicAuth
 
 from ...core.database import Database, utcnow
@@ -29,6 +30,7 @@ class TrinoConfig:
     timeout_seconds: int = 60
     max_preview_rows: int = 300
     max_response_bytes: int = 16 * 1024 * 1024
+    read_only: bool = True
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "TrinoConfig":
@@ -45,6 +47,7 @@ class TrinoConfig:
             timeout_seconds=max(1, min(int(value.get("timeout_seconds") or 60), 3600)),
             max_preview_rows=max(1, min(int(value.get("max_preview_rows") or 300), 5000)),
             max_response_bytes=max(1024, min(int(value.get("max_response_bytes") or 16 * 1024 * 1024), 64 * 1024 * 1024)),
+            read_only=value.get("read_only", True) is not False,
         )
 
 
@@ -64,20 +67,31 @@ class TrinoAdapter:
         self.config = config
 
     def discover(self, *, catalog: str | None = None, schema: str | None = None, limit: int = 100, cursor: str = "") -> dict:
+        size = max(1, min(int(limit), 500))
+        cursor_literal = sqlglot.exp.Literal.string(cursor).sql(dialect="trino")
         chosen_catalog = _identifier(catalog or self.config.catalog)
         if not chosen_catalog:
-            rows = self._execute_small("SHOW CATALOGS", limit=limit + 1, validate=False)
-            names = [str(row[0]) for row in rows if str(row[0]) > cursor]
+            rows = self._execute_small(
+                f"SELECT catalog_name FROM system.metadata.catalogs WHERE catalog_name>{cursor_literal} "
+                f"ORDER BY catalog_name LIMIT {size + 1}", limit=size + 1)
+            names = [str(row[0]) for row in rows]
             return _page_names(names, limit)
         chosen_schema = _identifier(schema or "")
         if not chosen_schema:
-            rows = self._execute_small(f"SHOW SCHEMAS FROM {_quote(chosen_catalog)}", limit=limit + 1, validate=False)
-            names = [str(row[0]) for row in rows if str(row[0]) > cursor]
+            rows = self._execute_small(
+                f"SELECT schema_name FROM {_quote(chosen_catalog)}.information_schema.schemata "
+                f"WHERE schema_name>{cursor_literal} ORDER BY schema_name LIMIT {size + 1}", limit=size + 1)
+            names = [str(row[0]) for row in rows]
             return _page_names(names, limit)
+        # Push the cursor before the row bound. Re-reading the first N SHOW
+        # rows and filtering afterwards permanently hides later catalog pages.
+        schema_literal = sqlglot.exp.Literal.string(chosen_schema).sql(dialect="trino")
         rows = self._execute_small(
-            f"SHOW TABLES FROM {_quote(chosen_catalog)}.{_quote(chosen_schema)}", limit=limit + 1, validate=False,
+            f"SELECT table_name FROM {_quote(chosen_catalog)}.information_schema.tables "
+            f"WHERE table_schema={schema_literal} AND table_name>{cursor_literal} "
+            f"ORDER BY table_name LIMIT {size + 1}", limit=size + 1,
         )
-        names = [str(row[0]) for row in rows if str(row[0]) > cursor]
+        names = [str(row[0]) for row in rows]
         return _page_names(names, limit)
 
     def search(self, query: str, *, catalog: str | None = None, schema: str | None = None, limit: int = 50) -> dict:
@@ -127,8 +141,12 @@ class TrinoAdapter:
         materialized_location = None
         submitted_statement = statement
         if mode == "materialize":
+            if self.config.read_only:
+                raise ValueError("该数仓连接为只读，不能创建结果表；请缩小结果或使用只读预览")
             if not self.config.scratch_catalog or not self.config.scratch_schema:
                 raise ValueError("Trino 大结果物化需要配置 scratch_catalog 与 scratch_schema")
+            if (self.config.scratch_catalog, self.config.scratch_schema) == (self.config.catalog, self.config.schema):
+                raise ValueError("结果物化必须使用与业务来源分离的受管结果模式")
             prefix = _identifier(self.config.scratch_prefix)
             table = f"{prefix}_{hashlib.sha256(f'{run_id}:{action_id}:{statement}'.encode()).hexdigest()[:24]}"
             qualified = ".".join(

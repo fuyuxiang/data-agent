@@ -39,6 +39,7 @@ def create_engine():
             "user": config.user, "source": config.source, "scratch_catalog": config.scratch_catalog,
             "scratch_schema": config.scratch_schema, "scratch_prefix": config.scratch_prefix,
             "timeout_seconds": config.timeout_seconds, "max_preview_rows": config.max_preview_rows,
+            "read_only": config.read_only,
         }
         credential = vault.seal({"username": config.username, "password": config.password})
         capabilities = TrinoAdapter.capabilities
@@ -69,6 +70,7 @@ def create_engine():
             "kind": "warehouse", "category": "warehouse", "engine_id": engine_id,
             "catalog": config.catalog, "schema": config.schema, "status": "ready",
             "tables": [], "lazy_catalog": True,
+            "read_only": config.read_only,
         }, workspace_id=wid)
         item = db().patch("warehouse_engines", engine_id, {"source_id": source["id"]}, workspace_id=wid) or item
     db().audit(

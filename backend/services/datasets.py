@@ -9,6 +9,8 @@ import re
 import socket
 import time
 import zipfile
+from datetime import date, datetime, time as datetime_time, timedelta
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
@@ -19,8 +21,8 @@ import numpy as np
 import pandas as pd
 import sqlglot
 from sqlglot import expressions as sql_exp
-from flask import current_app
-from sqlalchemy import create_engine, event, inspect, text
+from flask import current_app, has_app_context
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, NoSuchModuleError
 from werkzeug.datastructures import FileStorage
@@ -46,6 +48,9 @@ def settings():
 
 
 def _dialect_name(engine) -> str:
+    family = getattr(engine, "_meridian_family", "")
+    if family in {"doris", "starrocks"}:
+        return family
     return {
         "postgresql": "postgres",
         "mssql": "tsql",
@@ -67,6 +72,9 @@ def _configure_read_only(connection, timeout_seconds: int) -> None:
     elif dialect == "mysql":
         connection.exec_driver_sql("SET TRANSACTION READ ONLY")
         connection.exec_driver_sql(f"SET SESSION MAX_EXECUTION_TIME = {timeout_ms}")
+        if getattr(connection.engine, "_meridian_family", "") in {"doris", "starrocks"}:
+            memory_bytes = max(32, min(int(os.getenv("MERIDIAN_DATABASE_QUERY_MEMORY_MB", "512")), 8192)) * 1024 * 1024
+            connection.exec_driver_sql(f"SET SESSION exec_mem_limit = {memory_bytes}")
     elif dialect == "mssql":
         connection.exec_driver_sql(f"SET LOCK_TIMEOUT {timeout_ms}")
         connection.exec_driver_sql("SET DEADLOCK_PRIORITY LOW")
@@ -76,6 +84,8 @@ def _database_engine(url: str):
     parsed = make_url(url)
     connect_args = {}
     if parsed.get_backend_name() == "mysql":
+        timeout = settings().query_timeout_seconds if has_app_context() else max(1, int(os.getenv("MERIDIAN_QUERY_TIMEOUT_SECONDS", "30")))
+        connect_args.update(read_timeout=timeout + 5, write_timeout=10)
         query = dict(parsed.query)
         for key in ("ssl_ca", "ssl_cert", "ssl_key", "ssl_capath"):
             if key in query:
@@ -102,7 +112,7 @@ def _qualified_table(engine, table: dict) -> str:
 
 
 def _json_safe(value: Any) -> Any:
-    if value is None or value is pd.NA:
+    if value is None or value is pd.NA or value is pd.NaT:
         return None
     if isinstance(value, (np.integer,)):
         return int(value)
@@ -110,8 +120,14 @@ def _json_safe(value: Any) -> Any:
         return None if np.isnan(value) or np.isinf(value) else float(value)
     if isinstance(value, (np.bool_,)):
         return bool(value)
-    if isinstance(value, (pd.Timestamp,)):
+    if isinstance(value, (pd.Timestamp, datetime, date, datetime_time)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value) if value.is_finite() else None
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return '0x' + bytes(value).hex()
     if isinstance(value, np.ndarray):
         return [_json_safe(item) for item in value.tolist()]
     if isinstance(value, dict):
@@ -418,7 +434,8 @@ def _build_database_url(config: dict, workspace_id: str) -> str:
     driver = str(config.get("driver") or config.get("dialect") or "sqlite").strip().lower()
     dialects = {
         "postgresql": "postgresql+psycopg2", "postgres": "postgresql+psycopg2",
-        "mysql": "mysql+pymysql", "sqlserver": "mssql+pyodbc", "mssql": "mssql+pyodbc",
+        "mysql": "mysql+pymysql", "doris": "mysql+pymysql", "starrocks": "mysql+pymysql",
+        "sqlserver": "mssql+pyodbc", "mssql": "mssql+pyodbc",
     }
     if driver == "sqlite":
         raw = URL.create("sqlite", database=str(config.get("database") or ""))
@@ -495,24 +512,13 @@ def register_database(config: dict, workspace_id: str) -> dict:
     except (ImportError, ModuleNotFoundError, NoSuchModuleError) as exc:
         raise ValueError("数据库驱动未安装，请联系管理员安装对应的 Python 驱动") from exc
     schema_name = str(config.get("schema") or "").strip()[:128] or None
-    tables = []
+    from .database_catalog import discover
+
     try:
         with engine.connect() as connection:
             _configure_read_only(connection, settings().query_timeout_seconds)
             connection.execute(text("SELECT 1"))
-            inspector = inspect(connection)
-            objects = [(name, "table") for name in inspector.get_table_names(schema=schema_name)]
-            objects.extend((name, "view") for name in inspector.get_view_names(schema=schema_name))
-            for name, object_type in objects[:200]:
-                columns = inspector.get_columns(name, schema=schema_name)
-                tables.append({
-                    "name": name, "source_name": name, "schema_name": schema_name,
-                    "object_type": object_type, "columns": len(columns),
-                    "schema": [
-                        {"name": col["name"], "type": str(col["type"]), "nullable": bool(col.get("nullable", True))}
-                        for col in columns
-                    ],
-                })
+            tables, engine_family = discover(connection, schema_name)
     except DBAPIError as exc:
         raise ValueError(_database_connection_error(exc, backend)) from exc
     finally:
@@ -527,7 +533,8 @@ def register_database(config: dict, workspace_id: str) -> dict:
             "workspace_id": workspace_id,
             "name": str(config.get("name") or config.get("database") or parsed.host or "SQL 数据源"),
             "kind": "database",
-            "driver": str(config.get("driver") or parsed.get_backend_name()),
+            "driver": parsed.get_backend_name(), "engine_family": engine_family,
+            "port": parsed.port, "catalog_total": len(tables), "read_only": True,
             "endpoint": parsed.host or "local",
             "schema_name": schema_name,
             "credential": vault.seal({"url": url}),
@@ -919,6 +926,11 @@ def public_source(source: dict, *, include_policy: bool = False) -> dict:
     value = dict(source)
     value.pop("credential", None)
     value.pop("path", None)
+    if source.get("kind") == "database":
+        value["catalog_total"] = len(source.get("tables") or [])
+        value["tables"] = [{key: item for key, item in table.items() if key != "schema"}
+                           for table in (source.get("tables") or [])[:100]]
+        value["catalog_has_more"] = value["catalog_total"] > 100
     if not include_policy:
         value.pop("row_policy", None)
         value.pop("column_policies", None)
@@ -1094,7 +1106,9 @@ def source_table(source: dict, table_name: str | None = None, *, actor_id: str |
     return _sanitize_table_name(name), frame
 
 
-def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
+def schema_for_source(source: dict, *, actor_id: str | None = None, table_names: list[str] | None = None,
+                      query: str | None = None, cursor: str = "", limit: int = 25,
+                      column_offset: int = 0, column_limit: int = 50, column_query: str = "") -> dict:
     role = actor_role(db(), str(source.get("workspace_id") or "default"), actor_id) if actor_id else ""
     if source.get("kind") == "warehouse":
         return {
@@ -1104,6 +1118,16 @@ def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
             "catalog_url": f"/api/warehouse/engines/{source.get('engine_id')}/catalog",
         }
     if source.get("kind") == "database":
+        from .database_catalog import catalog_page, describe_page, ensure_columns, scoped_tables, upgrade_source
+
+        source = upgrade_source(source)
+        if table_names is not None:
+            return describe_page(source, table_names, actor_id=actor_id, offset=column_offset, limit=column_limit, query=column_query)
+        if query is not None or source.get("engine_family") != "sqlite":
+            page = catalog_page(source, query=query or "", cursor=cursor, limit=limit, actor_id=actor_id)
+            return {**page, "tables": [{**table, "column_count": table.get("columns"), "columns": []}
+                                      for table in page["items"]], "mode": "catalog", "lazy": True}
+        source = ensure_columns(source, [table["name"] for table in scoped_tables(source)])
         return {
             "source_id": source["id"],
             "tables": [
@@ -1113,7 +1137,8 @@ def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
                     "columns": [
                         {
                             "name": column["name"], "type": column.get("type", "unknown"),
-                            "nullable": bool(column.get("nullable", True)), "distinct": None, "sample": [],
+                            "nullable": bool(column.get("nullable", True)), "comment": column.get("comment", ""),
+                            "distinct": None, "sample": [],
                         }
                         for column in table.get("schema", [])
                         if not actor_id or column["name"] not in effective_policy(
@@ -1121,7 +1146,7 @@ def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
                         )[1]
                     ],
                 }
-                for table in source.get("tables", [])
+                for table in scoped_tables(source)
             ],
         }
     tables = []
@@ -1146,7 +1171,11 @@ def schema_for_source(source: dict, *, actor_id: str | None = None) -> dict:
 
 
 def _database_preview(source: dict, table_name: str | None, limit: int, actor_id: str | None = None) -> dict:
-    tables = list(source.get("tables") or [])
+    from .database_catalog import scoped_tables, ensure_columns, upgrade_source
+    from .database_queries import admission, estimate_query, read_bounded, watch_query
+
+    source = upgrade_source(source)
+    tables = scoped_tables(source)
     if not tables:
         raise ValueError("数据库中没有可预览的数据表或视图")
     selected = None
@@ -1160,16 +1189,21 @@ def _database_preview(source: dict, table_name: str | None, limit: int, actor_id
             raise ValueError(f"数据表不存在：{requested}")
     else:
         selected = tables[0]
+    source = ensure_columns(source, [selected["name"]])
+    selected = next(table for table in source["tables"] if table["name"] == selected["name"])
+    if selected.get("schema_error"):
+        raise ValueError(selected["schema_error"])
 
     vault = SecretVault(current_app.config["VAULT_KEY"])
     url = (vault.open(source.get("credential", ""), {}) or {}).get("url")
     if not url:
         raise ValueError("数据库凭据不可用，请重新建立连接")
     engine = _database_engine(url)
+    engine._meridian_family = source.get("engine_family", "")
     backend = engine.dialect.name
     bounded_limit = max(1, min(int(limit), 500))
     try:
-        with engine.connect() as connection:
+        with admission(source), engine.connect() as connection:
             _configure_read_only(connection, settings().query_timeout_seconds)
             qualified = _qualified_table(engine, selected)
             statement = f"SELECT * FROM {qualified}"  # noqa: S608 - SQLAlchemy dialect quotes both identifier parts
@@ -1180,7 +1214,10 @@ def _database_preview(source: dict, table_name: str | None, limit: int, actor_id
                     dialect=_dialect_name(engine),
                 )
             statement = bounded_read_only_sql(statement, bounded_limit + 1, _dialect_name(engine))
-            frame = pd.read_sql(text(statement), connection)
+            with watch_query(connection, settings().query_timeout_seconds):
+                estimate_query(connection, statement, source)
+                frame, _ = read_bounded(connection, statement, max_rows=bounded_limit + 1,
+                    max_bytes=settings().max_query_bytes, max_cell_bytes=settings().max_query_cell_bytes)
     except DBAPIError as exc:
         raise ValueError(_database_connection_error(exc, backend)) from exc
     finally:
@@ -1197,6 +1234,8 @@ def _database_preview(source: dict, table_name: str | None, limit: int, actor_id
         "data": frame_records(frame, bounded_limit),
         "sampled": True,
         "truncated": truncated,
+        "accuracy": "sample_based", "sampling_method": "bounded_preview",
+        "sampling_note": "有界预览样本，未进行随机或分层抽样，不能代表全表分布。",
     }
 
 
@@ -1262,7 +1301,7 @@ def _enforce_result_size(frame: pd.DataFrame) -> None:
 
 def execute_query(
     source_ids: list[str], sql: str, workspace_id: str, limit: int = 1000, *,
-    actor_id: str = "local-default",
+    actor_id: str = "local-default", should_cancel=None,
 ) -> dict:
     source_ids = list(dict.fromkeys(str(value) for value in source_ids if str(value)))
     if not source_ids:
@@ -1270,6 +1309,10 @@ def execute_query(
     sources = require_sources_access(
         db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="query",
     )
+    from .database_catalog import upgrade_source
+
+    sources = [upgrade_source(source) if source.get("kind") == "database" else source for source in sources]
+    initial_policy = policy_fingerprint(sources, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id))
     if len(sources) > 1 and any(source.get("kind") == "database" for source in sources):
         raise ValueError("数据库数据源不能与其他数据源直接联邦查询；请先生成受控快照后再关联")
     limit = max(1, min(int(limit), settings().max_query_rows))
@@ -1279,10 +1322,18 @@ def execute_query(
         vault = SecretVault(current_app.config["VAULT_KEY"])
         url = vault.open(sources[0].get("credential", ""), {}).get("url")
         engine = _database_engine(url)
+        engine._meridian_family = sources[0].get("engine_family", "")
         dialect = _dialect_name(engine)
     try:
         statement = validate_read_only_sql(sql, dialect)
         referenced_tables = validate_query_tables(statement, _query_table_scope(sources, actor_id=actor_id), dialect)
+        if engine is not None:
+            from .database_catalog import ensure_columns
+            names = {table.name for table in sqlglot.parse_one(statement, read=dialect).find_all(sql_exp.Table)}
+            selected_names = [table["name"] for table in sources[0].get("tables") or []
+                              if table.get("source_name", table["name"]) in names]
+            if sources[0].get("row_policy") or sources[0].get("column_policies"):
+                sources[0] = ensure_columns(sources[0], selected_names)
         reject_denied_columns(
             statement, sources, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id), dialect=dialect,
         )
@@ -1301,18 +1352,32 @@ def execute_query(
     probe_limit = limit if requested_top_n is not None and requested_top_n <= limit else limit + 1
     # A single database source executes on its native engine to preserve dialect.
     if len(sources) == 1 and sources[0]["kind"] == "database":
+        from .database_queries import admission, estimate_query, read_bounded, watch_query
         source = sources[0]
         if engine is None:
             raise RuntimeError("数据库查询引擎未初始化")
         try:
-            with engine.connect() as connection:
+            with admission(source, should_cancel), engine.connect() as connection:
                 _configure_read_only(connection, settings().query_timeout_seconds)
                 secured_statement = rewrite_database_sql(
                     statement, source, actor_id=actor_id,
                     role=actor_role(db(), workspace_id, actor_id), dialect=_dialect_name(engine),
                 )
                 bounded = bounded_read_only_sql(secured_statement, probe_limit, _dialect_name(engine))
-                frame = pd.read_sql(text(bounded), connection)
+                with watch_query(connection, settings().query_timeout_seconds, should_cancel):
+                    query_estimate = estimate_query(connection, bounded, source)
+                    frame, received_bytes = read_bounded(connection, bounded, max_rows=probe_limit,
+                        max_bytes=settings().max_query_bytes, max_cell_bytes=settings().max_query_cell_bytes,
+                        should_cancel=should_cancel)
+        except DBAPIError as exc:
+            message = str(getattr(exc, "orig", exc)).lower()
+            if "timeout" in message or "timed out" in message or "maximum statement execution time" in message:
+                raise ValueError("查询超过数据库时间限制，请缩小时间或业务范围") from exc
+            if "memory" in message and ("limit" in message or "exceed" in message):
+                raise ValueError("查询超过数据库资源限制，请减少关联、字段或扫描范围") from exc
+            if "unknown column" in message or "no such column" in message or "unknown table" in message:
+                raise ValueError("查询引用的表或字段不可用，请刷新目录并检查视图依赖") from exc
+            raise ValueError("数据库查询未完成，请检查字段类型、视图依赖和访问权限") from exc
         finally:
             engine.dispose()
     else:
@@ -1346,6 +1411,11 @@ def execute_query(
             connection.close()
     # The extra probe row is private evidence that the server bound, including an
     # oversized user LIMIT, changed the requested result. Never publish that row.
+    if should_cancel and should_cancel():
+        raise InterruptedError("查询已取消")
+    latest = require_sources_access(db(), source_ids, workspace_id=workspace_id, actor_id=actor_id, action="query")
+    if initial_policy != policy_fingerprint(latest, actor_id=actor_id, role=actor_role(db(), workspace_id, actor_id)):
+        raise PermissionError("数据权限在查询期间发生变化，请按当前授权范围重新查询")
     system_truncated = len(frame) > limit
     if system_truncated:
         frame = frame.head(limit).copy()
@@ -1353,6 +1423,10 @@ def execute_query(
     _enforce_result_size(frame)
     source_partial = any(source.get("ingestion_completeness") == "partial" for source in sources)
     completeness = "system_truncated" if system_truncated else "source_partial" if source_partial else "complete"
+    approximate = any(isinstance(node, sql_exp.Func) and (
+        str(node.name if isinstance(node, sql_exp.Anonymous) else node.sql_name()).lower().startswith("approx")
+        or str(node.name if isinstance(node, sql_exp.Anonymous) else node.sql_name()).lower() in {"ndv", "hll_cardinality", "hll_union_agg"}
+    ) for node in parsed.walk())
     query_id = db().new_id("qry")
     result_path = settings().export_dir / f"{query_id}.parquet"
     result_path = write_result_frame(frame, result_path)
@@ -1376,8 +1450,11 @@ def execute_query(
             "returned_rows": int(len(frame)),
             "total_rows": int(len(frame)) if completeness == "complete" else None,
             "completeness": completeness,
-            "accuracy": "exact",
+            "accuracy": "approximate" if approximate else "exact",
             "user_top_n": requested_top_n,
+            "query_estimate": query_estimate if engine is not None else None,
+            "received_bytes": received_bytes if engine is not None else None,
+            "warnings": query_estimate.get("warnings", []) if engine is not None else [],
             "columns": [str(column) for column in frame.columns],
             "data": frame_records(frame, 300),
             "path": str(result_path),
@@ -1408,6 +1485,30 @@ def load_result_frame(result_id: str) -> pd.DataFrame:
 
 
 def refresh_source(source: dict) -> dict:
+    if source["kind"] == "database":
+        from .database_catalog import discover
+
+        url = SecretVault(current_app.config["VAULT_KEY"]).open(source.get("credential", ""), {}).get("url")
+        if not url:
+            raise ValueError("数据库凭据不可用，请重新建立连接")
+        engine = _database_engine(url)
+        try:
+            with engine.connect() as connection:
+                _configure_read_only(connection, settings().query_timeout_seconds)
+                tables, family = discover(connection, source.get("schema_name"))
+        except DBAPIError as exc:
+            raise ValueError(_database_connection_error(exc, engine.dialect.name)) from exc
+        finally:
+            engine.dispose()
+        source.update(tables=tables, engine_family=family, catalog_total=len(tables), last_refreshed_at=utcnow())
+        with db().transaction() as connection:
+            connection.execute("DELETE FROM records WHERE collection IN ('database_schemas','database_profiles') "
+                               "AND workspace_id=? AND json_extract(payload,'$.source_id')=?",
+                               (source.get("workspace_id", "default"), source["id"]))
+        if isinstance(source.get("analysis_tables"), list):
+            available = {table["name"] for table in tables}
+            source["analysis_tables"] = [name for name in source["analysis_tables"] if name in available]
+        return db().put("sources", source, workspace_id=source.get("workspace_id", "default"))
     if source["kind"] == "http":
         vault = SecretVault(current_app.config["VAULT_KEY"])
         secret = vault.open(source.get("credential", ""), {})

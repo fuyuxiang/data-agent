@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import sqlglot
@@ -110,10 +111,30 @@ def _normalize_items(
             value["type"] = str(item.get("type") or "categorical").lower()
             if value["type"] not in DIMENSION_TYPES:
                 raise ValueError(f"维度类型无效：{value['type']}")
+            date_format = str(item.get("date_format") or "")
+            if date_format not in {"", "iso", "yyyyMMdd", "yyyyMMddHH"} or date_format and value["type"] != "time":
+                raise ValueError("日期格式只适用于时间维度，支持 iso、yyyyMMdd、yyyyMMddHH")
+            if date_format:
+                value["date_format"] = date_format
         else:
             value["aggregation"] = aggregation
             if value["aggregation"] not in AGGREGATIONS:
                 raise ValueError(f"度量聚合方式无效：{value['aggregation']}")
+            cast = str(item.get("numeric_cast") or "").lower()
+            if cast not in {"", "decimal", "double", "bigint"}:
+                raise ValueError("数值转换必须为 decimal、double 或 bigint")
+            try:
+                scale = Decimal(str("1" if item.get("scale") in (None, "") else item["scale"]))
+            except InvalidOperation as exc:
+                raise ValueError("单位换算系数必须为有限正数") from exc
+            if not scale.is_finite() or not Decimal("0.000000000001") <= scale <= Decimal("1000000000000"):
+                raise ValueError("单位换算系数必须在 0.000000000001 至 1000000000000 之间")
+            if aggregation in {"count", "count_distinct"} and (cast or scale != 1):
+                raise ValueError("计数度量不能设置数值转换或单位换算")
+            if cast:
+                value["numeric_cast"] = cast
+            if scale != 1:
+                value["scale"] = format(scale, "f")
         output.append(value)
     return output
 
@@ -128,6 +149,10 @@ def save_model(
         database, source_id, workspace_id=workspace_id, actor_id=actor_id, action="update",
     )
     table_name = str(payload.get("table") or (current or {}).get("table") or "").strip()
+    if source.get("kind") == "database":
+        from .database_catalog import ensure_columns
+
+        source = ensure_columns(source, [table_name])
     table = _table(source, table_name)
     denied = effective_policy(
         source, str(table.get("name") or table.get("source_name")), actor_id,
@@ -149,6 +174,17 @@ def save_model(
     entities = _normalize_items(merged.get("entities"), kind="entities", columns=columns)
     dimensions = _normalize_items(merged.get("dimensions"), kind="dimensions", columns=columns)
     measures = _normalize_items(merged.get("measures"), kind="measures", columns=columns, required=True)
+    if source.get("kind") == "database":
+        types = {column["name"]: str(column.get("type", "")).lower() for column in table.get("schema") or []}
+        for measure in measures:
+            if (measure["aggregation"] in {"sum", "avg"}
+                    and any(token in types.get(measure["column"], "") for token in ("char", "text"))
+                    and not measure.get("numeric_cast")):
+                raise ValueError(f"字段 {measure['column']} 为字符串，请明确设置数值转换后再用于数值度量")
+        for dimension in dimensions:
+            if (dimension["type"] == "time" and not dimension.get("date_format")
+                    and any(token in types.get(dimension["column"], "") for token in ("char", "text"))):
+                raise ValueError(f"时间字段 {dimension['column']} 为字符串，请明确选择日期格式")
     default_time_dimension = str(merged.get("default_time_dimension") or "").strip()
     if default_time_dimension:
         time_dimensions = {item["name"] for item in dimensions if item["type"] == "time"}
@@ -422,6 +458,27 @@ def _column(value: str) -> str:
     return exp.column(value, quoted=True).sql(dialect="duckdb")
 
 
+def _time_expression(dimension: dict) -> str:
+    column = _column(dimension["column"])
+    date_format = dimension.get("date_format")
+    if date_format == "iso":
+        return f"CAST({column} AS TIMESTAMP)"
+    if date_format in {"yyyyMMdd", "yyyyMMddHH"}:
+        pattern = "%Y%m%d%H" if date_format == "yyyyMMddHH" else "%Y%m%d"
+        return f"STRPTIME(CAST({column} AS VARCHAR), '{pattern}')"
+    return column
+
+
+def _time_literal(value: Any, dimension: dict) -> str:
+    date_format = dimension.get("date_format")
+    if date_format in {"yyyyMMdd", "yyyyMMddHH"}:
+        try:
+            value = datetime.fromisoformat(str(value)).strftime("%Y%m%d%H" if date_format == "yyyyMMddHH" else "%Y%m%d")
+        except ValueError as exc:
+            raise ValueError("时间范围请使用 ISO 日期时间格式") from exc
+    return _literal(value)
+
+
 def _filter_sql(raw: dict, dimensions: dict[str, dict]) -> str:
     if not isinstance(raw, dict):
         raise ValueError("过滤条件必须是对象")
@@ -437,19 +494,21 @@ def _filter_sql(raw: dict, dimensions: dict[str, dict]) -> str:
     if operator == "in":
         if not isinstance(value, list) or not value or len(value) > 100:
             raise ValueError("in 过滤需要 1-100 个值")
-        return f"{column} IN ({', '.join(_literal(item) for item in value)})"
+        return f"{column} IN ({', '.join(_time_literal(item, dimension) for item in value)})"
     if operator == "between":
         if not isinstance(value, list) or len(value) != 2:
             raise ValueError("between 过滤需要两个边界值")
-        return f"{column} BETWEEN {_literal(value[0])} AND {_literal(value[1])}"
+        return f"{column} BETWEEN {_time_literal(value[0], dimension)} AND {_time_literal(value[1], dimension)}"
     if operator == "is_null":
         return f"{column} IS NULL"
     if operator == "is_not_null":
         return f"{column} IS NOT NULL"
-    return f"{column} {operator.upper()} {_literal(value)}"
+    return f"{column} {operator.upper()} {_time_literal(value, dimension)}"
 
 
 def _dialect(source: dict) -> str:
+    if source.get("engine_family") in {"doris", "starrocks"}:
+        return source["engine_family"]
     if source.get("kind") != "database":
         return "duckdb"
     driver = str(source.get("driver") or "").lower()
@@ -468,6 +527,9 @@ def _atomic_metric_expression(metric: dict, measures: dict[str, dict], dimension
         raise ValueError(f"指标引用的度量不存在：{metric.get('measure')}")
     aggregation = measure["aggregation"]
     column = "*" if measure["column"] == "*" else _column(measure["column"])
+    casts = {"decimal": "DECIMAL(38,6)", "double": "DOUBLE", "bigint": "BIGINT"}
+    if measure.get("numeric_cast"):
+        column = f"CAST({column} AS {casts[measure['numeric_cast']]})"
     fixed = [_filter_sql(item, dimensions) for item in metric.get("filters") or []]
     predicate = " AND ".join(f"({item})" for item in fixed)
     if predicate:
@@ -475,12 +537,14 @@ def _atomic_metric_expression(metric: dict, measures: dict[str, dict], dimension
             return f"COUNT(DISTINCT CASE WHEN {predicate} THEN {column} END)"
         if aggregation == "count":
             return f"COUNT(CASE WHEN {predicate} THEN 1 END)"
-        return f"{aggregation.upper()}(CASE WHEN {predicate} THEN {column} END)"
+        aggregate = f"{aggregation.upper()}(CASE WHEN {predicate} THEN {column} END)"
+        return f"({aggregate} * {measure['scale']})" if measure.get("scale") else aggregate
     if aggregation == "count_distinct":
         return f"COUNT(DISTINCT {column})"
     if aggregation == "count":
         return f"COUNT({column})"
-    return f"{aggregation.upper()}({column})"
+    aggregate = f"{aggregation.upper()}({column})"
+    return f"({aggregate} * {measure['scale']})" if measure.get("scale") else aggregate
 
 
 def _compiled_metric_expression(
@@ -539,7 +603,7 @@ def compile_metric_query(
         dimension = dimensions.get(name)
         if not dimension:
             raise ValueError(f"指标不支持分组维度：{name}")
-        expression = _column(dimension["column"])
+        expression = _time_expression(dimension) if dimension.get("type") == "time" else _column(dimension["column"])
         grain = str(config.get("grain") or "").lower()
         if grain:
             if dimension.get("type") != "time" or grain not in TIME_GRAINS:
@@ -570,7 +634,7 @@ def compile_metric_query(
         if not time_dimension or time_dimension.get("type") != "time":
             raise ValueError("指标未定义可用的时间维度")
         if time_range.get("start") is not None:
-            predicates.append(f"{_column(time_dimension['column'])} >= {_literal(time_range['start'])}")
+            predicates.append(f"{_column(time_dimension['column'])} >= {_time_literal(time_range['start'], time_dimension)}")
         if time_range.get("end") is not None:
             end = time_range["end"]
             if isinstance(end, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
@@ -578,7 +642,7 @@ def compile_metric_query(
                     end = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
                 except ValueError as exc:
                     raise ValueError("结束日期格式无效") from exc
-            predicates.append(f"{_column(time_dimension['column'])} < {_literal(end)}")
+            predicates.append(f"{_column(time_dimension['column'])} < {_time_literal(end, time_dimension)}")
     # Every identifier is schema-validated and quoted; every value is emitted
     # by sqlglot's literal serializer above.
     sql = f"SELECT {', '.join(selections)} FROM {table_sql}"  # noqa: S608
@@ -632,12 +696,13 @@ def execute_metric_query(
     database: Database, request: dict, workspace_id: str, actor_id: str, *,
     allowed_source_ids: list[str] | None = None,
     allow_draft: bool = False,
+    should_cancel=None,
 ) -> dict:
     plan = compile_metric_query(database, request, workspace_id, actor_id, allow_draft=allow_draft)
     if allowed_source_ids is not None and plan["source_id"] not in {str(value) for value in allowed_source_ids}:
         raise PermissionError("指标不属于任务已确认的数据源范围")
     result = execute_query(
-        [plan["source_id"]], plan["sql"], workspace_id, plan["limit"], actor_id=actor_id,
+        [plan["source_id"]], plan["sql"], workspace_id, plan["limit"], actor_id=actor_id, should_cancel=should_cancel,
     )
     semantic = {
         "metric_id": plan["metric"]["id"], "metric_name": plan["metric"]["name"],

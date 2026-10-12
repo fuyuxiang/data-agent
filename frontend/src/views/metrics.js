@@ -53,6 +53,9 @@ export const MetricsView = {
       modelTablesLoading: false,
       modelTablesError: '',
       modelTablesRequest: 0,
+      modelColumnsRequest: 0,
+      modelTableQuery: '',
+      modelTableNext: null,
       saving: false,
       deleting: false,
       changingMetrics: [],
@@ -66,6 +69,7 @@ export const MetricsView = {
   beforeUnmount() {
     this.trialRequest += 1;
     this.modelTablesRequest += 1;
+    this.modelColumnsRequest += 1;
   },
   watch: {
     trial: {
@@ -308,37 +312,77 @@ export const MetricsView = {
         name: '', description: '', source_id: source.id, table: '', grain: '',
         dimensions: [], measures: [], entities: [], default_time_dimension: '', enabled: true,
       };
+      this.modelTableQuery = '';
       this.loadModelTables();
     },
     editModel(model) {
       this.modelEditor = JSON.parse(JSON.stringify(model));
+      this.modelTableQuery = '';
       this.loadModelTables();
     },
-    async loadModelTables() {
+    async loadModelTables(cursor = '') {
+      if (typeof cursor !== 'string') cursor = '';
       if (!this.modelEditor?.source_id) return;
       const editor = this.modelEditor;
       const sourceId = editor.source_id;
       const requestId = ++this.modelTablesRequest;
-      this.modelTables = [];
+      const previous = cursor ? this.modelTables : [];
+      this.modelTables = previous;
       this.modelColumns = [];
       this.modelTablesLoading = true;
       this.modelTablesError = '';
       try {
-        const response = await actions.get(`/api/sources/${sourceId}/schema`);
+        const remote = this.sources.find(source => source.id === sourceId)?.kind === 'database';
+        const response = await actions.get(remote
+          ? `/api/sources/${sourceId}/catalog?q=${encodeURIComponent(this.modelTableQuery)}&cursor=${encodeURIComponent(cursor)}&limit=50`
+          : `/api/sources/${sourceId}/schema`);
         if (requestId !== this.modelTablesRequest || this.modelEditor !== editor) return;
-        this.modelTables = response.schema?.tables || [];
+        this.modelTables = [...previous, ...(remote ? response.items || [] : response.schema?.tables || [])];
+        this.modelTableNext = response.next_cursor || null;
+        if (remote && editor.table && !this.modelTables.some(table => table.name === editor.table)) {
+          this.modelTables.unshift({ name: editor.table });
+        }
         if (!this.modelTables.find(item => item.name === this.modelEditor.table)) {
           this.modelEditor.table = this.modelTables[0]?.name || '';
         }
-        this.updateModelColumns();
+        await this.updateModelColumns();
       } catch (error) {
         if (requestId === this.modelTablesRequest && this.modelEditor === editor) this.modelTablesError = error.message;
       } finally {
         if (requestId === this.modelTablesRequest) this.modelTablesLoading = false;
       }
     },
-    updateModelColumns() {
-      this.modelColumns = this.modelTables.find(item => item.name === this.modelEditor?.table)?.columns || [];
+    async updateModelColumns() {
+      const editor = this.modelEditor;
+      const selected = this.modelTables.find(item => item.name === editor?.table);
+      const remote = this.sources.find(source => source.id === editor?.source_id)?.kind === 'database';
+      if (!remote) {
+        this.modelColumns = selected?.columns || [];
+        return;
+      }
+      if (!editor?.table) return;
+      const requestId = ++this.modelColumnsRequest;
+      const tableName = editor.table;
+      this.modelColumns = [];
+      this.modelTablesLoading = true;
+      this.modelTablesError = '';
+      try {
+        const columns = [];
+        let offset = 0;
+        do {
+          const response = await actions.get(`/api/sources/${editor.source_id}/schema?table=${encodeURIComponent(tableName)}&column_offset=${offset}&column_limit=100`);
+          if (this.modelEditor !== editor || editor.table !== tableName || requestId !== this.modelColumnsRequest) return;
+          const table = response.schema?.tables?.[0];
+          if (table?.schema_error) throw new Error(table.schema_error);
+          columns.push(...(table?.columns || []));
+          offset = table?.next_column_offset ?? null;
+        } while (offset !== null);
+        this.modelColumns = columns;
+      } catch (error) {
+        if (this.modelEditor === editor && requestId === this.modelColumnsRequest) this.modelTablesError = error.message;
+      } finally {
+        if (requestId === this.modelColumnsRequest && this.modelEditor === editor) this.modelTablesLoading = false;
+      }
     },
     addModelField(kind) {
       if (this.modelTablesLoading || !this.modelColumns.length) return;
@@ -346,7 +390,7 @@ export const MetricsView = {
       const name = column?.name || '';
       this.modelEditor[kind].push({
         name: /^[\w\u4e00-\u9fff]+$/.test(name) ? name : '',
-        column: name, label: name,
+        column: name, label: column?.comment || name, description: column?.comment || '',
         ...(kind === 'dimensions' ? { type: 'categorical' } : { aggregation: 'sum' }),
       });
     },
@@ -768,23 +812,37 @@ export const MetricsView = {
           <label class="field"><span>数据粒度</span><input v-model.trim="modelEditor.grain" class="input" placeholder="每行代表一笔订单" /></label>
         </div>
         <p v-if="modelTablesLoading" class="small muted" role="status">正在读取数据表与字段…</p>
-        <div v-else-if="modelTablesError" class="row"><p class="small" role="alert" style="color:var(--danger)">{{ modelTablesError }}</p><button class="btn btn--sm" @click="loadModelTables">重新读取</button></div>
+        <div v-if="sources.find(source => source.id === modelEditor.source_id)?.kind === 'database'" class="row">
+          <input v-model="modelTableQuery" class="input" placeholder="搜索业务数据表" aria-label="搜索模型数据表" @keyup.enter="loadModelTables()" />
+          <button class="btn btn--sm" :disabled="modelTablesLoading" @click="loadModelTables()">搜索数据表</button>
+          <button v-if="modelTableNext" class="btn btn--sm" :disabled="modelTablesLoading" @click="loadModelTables(modelTableNext)">更多数据表</button>
+        </div>
+        <div v-if="modelTablesError" class="row"><p class="small" role="alert" style="color:var(--danger)">{{ modelTablesError }}</p><button class="btn btn--sm" @click="loadModelTables">重新读取</button></div>
         <label class="field"><span>业务说明</span><textarea v-model.trim="modelEditor.description" class="textarea"></textarea></label>
         <div class="row row--between"><b>维度</b><button class="btn btn--sm" :disabled="modelTablesLoading || !modelColumns.length" @click="addModelField('dimensions')">添加维度</button></div>
-        <div v-for="(field, index) in modelEditor.dimensions" :key="'d' + index" class="row model-field-row">
+        <div v-for="(field, index) in modelEditor.dimensions" :key="'d' + index" class="stack">
+          <div class="row model-field-row">
           <input v-model.trim="field.name" class="input" placeholder="技术名称" aria-label="维度技术名称" />
           <input v-model.trim="field.label" class="input" placeholder="显示名称" aria-label="维度显示名称" />
           <select v-model="field.column" class="select" aria-label="维度数据字段"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
-          <select v-model="field.type" class="select" aria-label="维度类型"><option value="categorical">分类</option><option value="time">时间</option><option value="numeric">数值</option><option value="boolean">布尔</option></select>
+          <select v-model="field.type" class="select" aria-label="维度类型" @change="field.type !== 'time' && (field.date_format = '')"><option value="categorical">分类</option><option value="time">时间</option><option value="numeric">数值</option><option value="boolean">布尔</option></select>
           <button class="icon-btn" aria-label="删除维度" @click="modelEditor.dimensions.splice(index, 1)"><Icon name="close" :size="14" /></button>
+          </div>
+          <label v-if="field.type === 'time'" class="field"><span>时间字段格式</span><select v-model="field.date_format" class="select" aria-label="时间维度日期格式"><option value="">数据库日期类型</option><option value="iso">文本日期或日期时间（2026-10-12）</option><option value="yyyyMMdd">紧凑日期（20261012）</option><option value="yyyyMMddHH">紧凑小时（2026101214）</option></select></label>
         </div>
         <div class="row row--between"><b>度量 *</b><button class="btn btn--sm" :disabled="modelTablesLoading || !modelColumns.length" @click="addModelField('measures')">添加度量</button></div>
-        <div v-for="(field, index) in modelEditor.measures" :key="'m' + index" class="row model-field-row">
+        <div v-for="(field, index) in modelEditor.measures" :key="'m' + index" class="stack">
+          <div class="row model-field-row">
           <input v-model.trim="field.name" class="input" placeholder="技术名称" aria-label="度量技术名称" />
           <input v-model.trim="field.label" class="input" placeholder="显示名称" aria-label="度量显示名称" />
           <select v-model="field.column" class="select" aria-label="度量数据字段"><option v-for="column in modelColumns" :key="column.name" :value="column.name">{{ column.name }}</option></select>
           <select v-model="field.aggregation" class="select" aria-label="度量聚合方式"><option value="sum">求和</option><option value="count">计数</option><option value="avg">平均</option><option value="min">最小</option><option value="max">最大</option></select>
           <button class="icon-btn" aria-label="删除度量" @click="modelEditor.measures.splice(index, 1)"><Icon name="close" :size="14" /></button>
+          </div>
+          <div v-if="!['count', 'count_distinct'].includes(field.aggregation)" class="grid grid--2" style="gap:10px">
+            <label class="field"><span>数值转换</span><select v-model="field.numeric_cast" class="select" aria-label="度量数值转换"><option value="">保持原字段类型</option><option value="decimal">精确小数</option><option value="double">浮点数</option><option value="bigint">整数</option></select></label>
+            <label class="field"><span>单位换算系数</span><input v-model="field.scale" type="number" min="0.000000000001" step="any" class="input" placeholder="1；分转元填 0.01" aria-label="度量单位换算系数" /></label>
+          </div>
         </div>
         <label v-if="modelEditor.dimensions.some(item => item.type === 'time')" class="field"><span>默认时间维度</span>
           <select v-model="modelEditor.default_time_dimension" class="select"><option value="">不指定</option><option v-for="field in modelEditor.dimensions.filter(item => item.type === 'time')" :key="field.name" :value="field.name">{{ field.label || field.name }}</option></select>

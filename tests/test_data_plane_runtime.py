@@ -62,15 +62,16 @@ def test_trino_statement_protocol_catalog_query_materialization_and_cancel(app, 
         engine_id="trino", endpoint="https://trino.example.test", user="actor",
         catalog="lake", schema="analytics", scratch_catalog="lake", scratch_schema="scratch",
         max_preview_rows=3,
+        read_only=False,
     ))
 
     def small(sql: str, *, limit: int, validate: bool = True):
         assert limit > 0
-        if sql == "SHOW CATALOGS":
+        if sql.startswith("SELECT catalog_name FROM"):
             return [["system"], ["lake"], ["lake"]]
-        if sql.startswith("SHOW SCHEMAS"):
+        if sql.startswith("SELECT schema_name FROM"):
             return [["analytics"], ["scratch"]]
-        if sql.startswith("SHOW TABLES"):
+        if sql.startswith("SELECT table_name FROM"):
             return [["orders"], ["customers"]]
         if sql.startswith("DESCRIBE"):
             return [["amount", "decimal(18,2)", ""], ["region", "varchar", "partition key"]]
@@ -172,6 +173,40 @@ def test_trino_small_paging_and_response_validation(app, monkeypatch):
         adapter._payload(Response(ValueError("bad")))
     with pytest.raises(ConnectionError, match="对象格式"):
         adapter._payload(Response([]))
+
+
+def test_trino_catalog_schema_and_table_pages_reach_later_objects(app, monkeypatch):
+    import sqlglot
+    from sqlglot import exp
+
+    adapter = TrinoAdapter(app.extensions['meridian_db'], 'default', TrinoConfig(
+        engine_id='paged', endpoint='https://trino.example.test', user='actor', catalog='', schema=''))
+    names = [f'object_{index:03d}' for index in range(17)]
+    def small(sql, *, limit, **_kwargs):
+        statement = sqlglot.parse_one(sql, read='trino')
+        cursor = statement.find(exp.GT).expression.this
+        assert int(statement.args['limit'].expression.this) == limit
+        return [[name] for name in names if name > cursor][:limit]
+    monkeypatch.setattr(adapter, '_execute_small', small)
+    for scope in ({}, {'catalog':'lake'}, {'catalog':'lake','schema':'analytics'}):
+        collected, cursor = [], ''
+        while True:
+            page = adapter.discover(**scope, limit=3, cursor=cursor)
+            collected.extend(page['items'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        assert collected == names
+
+
+def test_trino_readonly_and_same_business_schema_never_issue_ctas(app, monkeypatch):
+    for read_only, scratch in ((True,'scratch'), (False,'analytics')):
+        adapter = TrinoAdapter(app.extensions['meridian_db'], 'default', TrinoConfig(
+            engine_id='safe', endpoint='https://trino.example.test', user='actor', catalog='lake',
+            schema='analytics', scratch_catalog='lake', scratch_schema=scratch, read_only=read_only))
+        monkeypatch.setattr(adapter, '_request', lambda *_args, **_kwargs: pytest.fail('CTAS must never be submitted'))
+        with pytest.raises(ValueError, match='只读|分离'):
+            adapter.submit('SELECT 1', run_id='review', action_id='blocked', result_mode='materialize')
 
 
 def test_livy_trusted_job_lifecycle_manifest_and_result_ref(app, monkeypatch):

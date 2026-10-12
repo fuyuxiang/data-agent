@@ -388,7 +388,18 @@ def _tool_message(value: Any, limit: int = 12_000) -> str:
     rendered = json.dumps(value, ensure_ascii=False, default=str)
     if len(rendered) <= limit:
         return rendered
-    return rendered[:limit] + "…[tool result truncated; use read_tool_result when available]"
+    summary = {key: value.get(key) for key in (
+        "ok", "status", "result_id", "dataset_ref_id", "artifact_id", "completeness", "accuracy",
+        "rows", "columns", "warnings", "tool_result_chars",
+    ) if isinstance(value, dict) and value.get(key) is not None}
+    summary["notice"] = "tool result truncated; use read_tool_result with artifact_id to search or page the full result"
+    summary["preview"] = rendered[:min(5000, limit // 2)]
+    result = json.dumps(summary, ensure_ascii=False, default=str)
+    if len(result) > limit:
+        summary.pop("columns", None)
+        summary.pop("warnings", None)
+        result = json.dumps(summary, ensure_ascii=False, default=str)
+    return result
 
 
 def _request_token_budget(

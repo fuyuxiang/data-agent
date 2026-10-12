@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 from .contracts import RunContext, ToolResult, ToolSpec, ToolStatus
@@ -93,6 +94,13 @@ class ToolExecutor:
             reserve_unit="seconds" if registered.spec.cost_kind == "remote_compute_seconds" else "calls",
         )
         try:
+            from ..services.authorization import actor_role, require_sources_access
+            from ..services.data_policy import policy_fingerprint
+
+            actor = context.actor_id or "local-default"
+            snapshot = {source_id: self.store.db.get("sources", source_id, workspace_id=context.workspace_id)
+                        for source_id in context.source_scope}
+            role = actor_role(self.store.db, context.workspace_id, actor)
             raw = registered.handler(arguments)
             if isinstance(raw, tuple) and len(raw) == 2:
                 value, raw_events = raw
@@ -100,6 +108,29 @@ class ToolExecutor:
             else:
                 value, events = raw, ()
             value = value if isinstance(value, dict) else {"value": value}
+            rendered = json.dumps(value, ensure_ascii=False, default=str)
+            if len(rendered) > 9000 and tool_id != "read_tool_result":
+                if len(rendered.encode("utf-8")) > 32 * 1024 * 1024:
+                    raise ValueError("工具结果超过可恢复结果上限，请缩小范围")
+                source_ids = value.get("source_ids") if isinstance(value.get("source_ids"), list) else list(context.source_scope)
+                if any(source_id not in context.source_scope for source_id in source_ids):
+                    raise PermissionError("工具结果引用了运行范围之外的数据源")
+                sources = require_sources_access(self.store.db, source_ids,
+                    workspace_id=context.workspace_id, actor_id=actor)
+                fingerprint = policy_fingerprint([snapshot[source_id] or {} for source_id in source_ids],
+                    actor_id=actor, role=role)
+                if fingerprint != policy_fingerprint(sources, actor_id=actor,
+                        role=actor_role(self.store.db, context.workspace_id, actor)):
+                    raise PermissionError("工具执行期间的数据权限已变化，请重新读取")
+                artifact_id = self.store.db.new_id("toolres")
+                self.store.db.put("tool_results", {
+                    "id": artifact_id, "workspace_id": context.workspace_id,
+                    "session_id": context.session_id, "actor_id": context.actor_id,
+                    "run_id": context.run_id, "source_ids": source_ids,
+                    "policy_fingerprint": fingerprint,
+                    "content": rendered, "tool": tool_id,
+                }, workspace_id=context.workspace_id)
+                value = {**value, "artifact_id": artifact_id, "tool_result_chars": len(rendered)}
             raw_status = str(value.get("status") or "").upper()
             if raw_status == ToolStatus.ACCEPTED.value:
                 tool_status, action_status = ToolStatus.ACCEPTED, "accepted"

@@ -690,6 +690,43 @@ def test_agent_tool_messages_are_bounded():
     assert "tool result truncated" in rendered
 
 
+def test_oversized_tool_results_are_recoverable_and_valid_json(app):
+    from backend.services.agent_tools import AgentToolContext, execute_tool
+
+    store, run = _confirmed_run(app, allowed=('large_schema',))
+    registry = ToolRegistry()
+    value = {'tables': [{'name':'late_orders', 'comment':'金额单位为分', 'schema':'x' * 18000}]}
+    registry.register(ToolSpec('large_schema','large schema',{'type':'object','properties':{}}),lambda _args:value)
+    context = store.acquire_lease(run['id'], 'schema-recovery')
+    decision = store.record_decision(run['id'],ModelResponse('scripted', 'test', '', (), 'stop', None, {}))
+    result = ToolExecutor(store,registry).execute(context=context,decision_id=decision['id'],call_id='large',
+                                                tool_id='large_schema',arguments={})
+    message = json.loads(_tool_message(result.value))
+    assert message['artifact_id'] == result.value['artifact_id']
+    tool_context = AgentToolContext(app.extensions['meridian_db'],'default',run['session_id'],[])
+    with app.app_context():
+        recovered, _ = execute_tool('read_tool_result', {'artifact_id':message['artifact_id'],'query':'金额单位'},tool_context)
+    assert recovered['matches'] and '金额单位为分' in recovered['matches'][0]['text']
+
+
+def test_recoverable_tool_result_rejects_changed_source_scope(app, source):
+    from backend.services.agent_tools import AgentToolContext, execute_tool
+
+    store, run = _confirmed_run(app, source_ids=(source['id'],), allowed=('large_schema',))
+    registry = ToolRegistry()
+    registry.register(ToolSpec('large_schema','schema',{'type':'object','properties':{}}),
+                      lambda _args: {'schema':'x' * 18000})
+    context = store.acquire_lease(run['id'],'policy-review')
+    decision = store.record_decision(run['id'],ModelResponse('scripted','test','',(), 'stop',None,{}))
+    result = ToolExecutor(store,registry).execute(context=context,decision_id=decision['id'],call_id='large',
+                                                tool_id='large_schema',arguments={})
+    assert result.result.status.value == 'SUCCEEDED'
+    store.db.patch('sources',source['id'],{'analysis_tables':[]},workspace_id='default')
+    tool_context = AgentToolContext(store.db,'default',run['session_id'],[source['id']])
+    with app.app_context(), pytest.raises(PermissionError,match='权限已变化'):
+        execute_tool('read_tool_result',{'artifact_id':result.value['artifact_id']},tool_context)
+
+
 def test_quota_limited_agent_reports_daily_budget_reason(app):
     store, run = _confirmed_run(
         app, allowed=(), budget=RunStore.default_budget() | {"model_tokens": 5_000},

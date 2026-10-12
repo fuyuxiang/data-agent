@@ -47,6 +47,8 @@ def api_errors(function: Callable):
             return jsonify({"ok": False, "error": str(exc)}), 403
         except ConnectionError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 502
+        except InterruptedError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
 
     return wrapped
 

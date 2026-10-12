@@ -9,7 +9,8 @@ import pandas as pd
 
 from ..core.database import Database
 from .analytics import ANALYSIS_METHODS, clean_frame, profile as profile_frame, run_analysis_with_frames
-from .authorization import require_result_access, require_sources_access
+from .authorization import actor_role, require_result_access, require_sources_access
+from .data_policy import policy_fingerprint
 from .charts import make_spec, normalize_chart_type, select_charts
 from .datasets import (
     delete_derived_tables,
@@ -42,7 +43,11 @@ BUILTIN_TOOLS = [
         {"question": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10}},
         ["question"],
     ),
-    _function("get_schema", "Return schemas for every selected data source and the exact table aliases usable in SQL."),
+    _function("get_schema", "Search/page the selected source catalog. For remote databases, first find tables, then pass tables to read their columns. Follow next_cursor/next_column_offset until the required schema is available.", {
+        "source_id": {"type": "string"}, "query": {"type": "string"}, "cursor": {"type": "string"},
+        "tables": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer"},
+        "column_offset": {"type": "integer"}, "column_limit": {"type": "integer"},
+    }),
     _function(
         "list_semantic_metrics",
         "List approved governed business metrics. Prefer these metrics over writing raw SQL for official KPIs.",
@@ -88,6 +93,10 @@ BUILTIN_TOOLS = [
             "source_id": {"type": "string"}, "table": {"type": "string"},
             "table_name": {"type": "string"}, "result_id": {"type": "string"},
             "columns": {"type": "array", "items": {"type": "string"}},
+            "mode": {"type": "string", "enum": ["metadata", "sample", "aggregate"]},
+            "sample_rows": {"type": "integer"}, "time_column": {"type": "string"},
+            "time_start": {"type": "string"}, "time_end": {"type": "string"},
+            "time_format": {"type": "string", "enum": ["iso", "yyyyMMdd", "yyyyMMddHH", "unix_seconds", "unix_milliseconds"]},
         },
     ),
     _function(
@@ -141,7 +150,7 @@ BUILTIN_TOOLS = [
 
 EXTRA_TOOLS = [
     _function("workspace_status", "Show mounted and system workspace roots and safety limits."),
-    _function("get_table_detail", "Return detailed schema for one exact table.", {"source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}}),
+    _function("get_table_detail", "Return paged columns and comments for one exact table. Follow next_column_offset for wide tables.", {"source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}, "column_offset": {"type": "integer"}, "column_limit": {"type": "integer"}}),
     _function("create_analysis_table", "Create a queryable derived table from read-only SQL.", {"sql": {"type": "string"}, "table_name": {"type": "string"}}, ["sql", "table_name"]),
     _function("delete_analysis_tables", "Delete named derived tables or archive exact derived sources only.", {"source_ids": {"type": "array", "items": {"type": "string"}}, "table_names": {"type": "array", "items": {"type": "string"}}, "confirm": {"type": "boolean"}}, ["confirm"]),
     _function("clean_data", "Apply non-destructive cleaning and create a derived source.", {"result_id": {"type": "string"}, "source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}, "operations": {"type": "array", "items": {"type": "object"}}, "operation": {"type": "string", "enum": ["fill_na", "winsorize", "trimming"]}, "columns": {"type": "array", "items": {"type": "string"}}, "fill_method": {"type": "string"}, "lower_pct": {"type": "number"}, "upper_pct": {"type": "number"}, "trim_column": {"type": "string"}, "min_val": {"type": "number"}, "max_val": {"type": "number"}, "output_table": {"type": "string"}, "name": {"type": "string"}}),
@@ -192,6 +201,14 @@ class AgentToolContext:
     semantic_metric_ids: list[str] | None = None
     mcp_server_ids: list[str] | None = None
     actor_id: str = ""
+    run_id: str = ""
+
+    def cancelled(self) -> bool:
+        if not self.run_id:
+            return False
+        from ..agent.store import RunStore
+
+        return (RunStore(self.database).get_run(self.run_id) or {}).get("execution_status") in {"cancelling", "cancelled"}
 
     def sources(self) -> list[dict]:
         return require_sources_access(
@@ -267,26 +284,37 @@ def tool_schemas(context: AgentToolContext) -> list[dict]:
     return schemas
 
 
-def _combined_schema(context: AgentToolContext) -> dict:
+def _combined_schema(context: AgentToolContext, args: dict | None = None) -> dict:
+    args = args or {}
     sources = context.sources()
+    if args.get("source_id"):
+        sources = [source for source in sources if source["id"] == args["source_id"]]
+        if not sources:
+            raise PermissionError("数据源不在当前分析范围")
     combined = []
     table_counts: dict[str, int] = {}
     schemas = []
     for source in sources:
-        schema = schema_for_source(source, actor_id=context.actor_id or "local-default")
+        options = {"table_names": args.get("tables"), "query": args.get("query", ""),
+                   "cursor": args.get("cursor", ""), "limit": int(args.get("limit", 25)),
+                   "column_offset": int(args.get("column_offset", 0)), "column_limit": int(args.get("column_limit", 50))}
+        schema = schema_for_source(source, actor_id=context.actor_id or "local-default",
+                                   **(options if source.get("kind") == "database" else {}))
         schemas.append((source, schema))
         for table in schema.get("tables", []):
             table_counts[table["name"]] = table_counts.get(table["name"], 0) + 1
     for source_index, (source, schema) in enumerate(schemas, 1):
         tables = []
         for table in schema.get("tables", []):
-            if not table.get("columns"):
+            if not table.get("columns") and schema.get("mode") != "catalog":
                 continue
             alias = table["name"]
             if table_counts.get(alias, 0) > 1 and source_index > 1:
                 alias = re.sub(r"[^\w\u4e00-\u9fff]+", "_", f"{source['name']}_{alias}").strip("_")[:80]
             tables.append({**table, "query_name": alias})
-        combined.append({"source_id": source["id"], "source_name": source.get("name"), "tables": tables})
+        combined.append({"source_id": source["id"], "source_name": source.get("name"), "tables": tables,
+                         "mode": schema.get("mode", "columns"), "next_cursor": schema.get("next_cursor"),
+                         "total": schema.get("total"), "lazy": schema.get("lazy", False)})
     semantic_metrics = [
         item for item in visible_metrics(
             context.database, context.workspace_id, context.actor_id or "local-default",
@@ -299,9 +327,12 @@ def _combined_schema(context: AgentToolContext) -> dict:
         "sources": combined,
         "semantic_metrics": semantic_metrics,
         "query_instructions": {
-            "dialect": "duckdb" if file_sources else str(sources[0].get("driver") or "native_sql"),
+            "dialect": "duckdb" if file_sources else str(sources[0].get("engine_family") or sources[0].get("driver") or "native_sql"),
             "table_reference": "只使用 tables[].query_name，不要添加 source_id 或数据源名称前缀",
             "identifier_quote": '上传文件使用双引号（"），不要使用反引号（`）',
+            "remote_schema": "目录结果只列出表；调用 get_schema(source_id, tables=[表名]) 读取字段，按 next_column_offset 继续。",
+            "query_budget": "查询超出扫描预算时请明确说明原因并请求用户确认范围，不得擅自缩小已确认的统计覆盖范围。",
+            "business_types": "字符串金额和日期必须核对字段注释与单位；已审批指标优先使用 query_metric。",
         },
     }
 
@@ -309,12 +340,17 @@ def _combined_schema(context: AgentToolContext) -> dict:
 def _frame(context: AgentToolContext, args: dict):
     result_id = str(args.get("result_id") or context.latest_result_id or "")
     if result_id:
+        parent = context.database.get("query_results", result_id, workspace_id=context.workspace_id) or {}
+        if not set(parent.get("source_ids") or []).issubset(set(context.source_ids)):
+            raise PermissionError("查询结果不在当前分析范围")
         require_result_access(
             context.database, context.database.get("query_results", result_id),
             workspace_id=context.workspace_id, actor_id=context.actor_id or "local-default",
         )
         return load_result_frame(result_id), result_id
     source_id = str(args.get("source_id") or (context.source_ids[0] if context.source_ids else ""))
+    if source_id not in context.source_ids:
+        raise PermissionError("数据源不在当前分析范围")
     source = require_sources_access(
         context.database, [source_id], workspace_id=context.workspace_id,
         actor_id=context.actor_id or "local-default", action="analyze",
@@ -427,7 +463,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         )
         return {"items": rows}, events
     if name == "get_schema":
-        return _combined_schema(context), events
+        return _combined_schema(context, args), events
     if name == "list_semantic_metrics":
         items = [
             item for item in visible_metrics(
@@ -453,6 +489,7 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         output = execute_metric_query(
             context.database, args, context.workspace_id, context.actor_id or "local-default",
             allowed_source_ids=context.source_ids,
+            should_cancel=context.cancelled,
         )
         result = output["result"]
         context.latest_result_id = result["id"]
@@ -472,12 +509,27 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         result = execute_query(
             requested_source_ids, str(args.get("sql") or ""), context.workspace_id,
             int(args.get("limit", 1000)), actor_id=context.actor_id or "local-default",
+            should_cancel=context.cancelled,
         )
         context.latest_result_id = result["id"]
         public = _public_record(result)
         events.extend([("plan", {"sql": result["sql"], "assumptions": []}), ("table", public)])
         return public, events
     if name == "profile_data":
+        if not args.get("result_id"):
+            chosen = str(args.get("source_id") or (context.source_ids[0] if context.source_ids else ""))
+            source = next((source for source in context.sources() if source["id"] == chosen), None)
+            if source and source.get("kind") == "database":
+                from .database_profile import profile_database
+
+                value = profile_database(source, actor_id=context.actor_id or "local-default",
+                    table_name=args.get("table") or args.get("table_name"), mode=args.get("mode", "sample"),
+                    columns=args.get("columns"), sample_rows=int(args.get("sample_rows", 500)),
+                    time_column=args.get("time_column", ""), time_start=args.get("time_start", ""),
+                    time_end=args.get("time_end", ""), time_format=args.get("time_format", "iso"),
+                    should_cancel=context.cancelled)
+                return {"result_id": value.get("result_id"), "profile": value,
+                        "completeness": value["completeness"], "accuracy": value["accuracy"]}, events
         frame, result_id = _frame(context, args)
         columns = args.get("columns")
         if columns:
@@ -492,7 +544,11 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
                 x=structured["numeric_columns"][0],
             )
             events.append(("chart", chart))
-        return {"result_id": result_id or None, "profile": structured, "markdown": markdown}, events
+        parent = context.database.get("query_results", result_id, workspace_id=context.workspace_id) if result_id else None
+        complete = not parent or parent.get("completeness", "unknown") == "complete"
+        return {"result_id": result_id or None, "profile": structured, "markdown": markdown,
+                "completeness": "complete" if complete else "partial", "accuracy": "exact" if complete else "sample_based",
+                "warnings": [] if complete else ["探查仅覆盖截断后的查询结果，不能推断全表质量。"]}, events
     if name == "run_analysis":
         if args.get("sql") and not args.get("result_id"):
             queried = execute_query(
@@ -657,14 +713,18 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         ).status(), events
     if name == "get_table_detail":
         source_id = str(args.get("source_id") or (context.source_ids[0] if context.source_ids else ""))
+        if source_id not in context.source_ids:
+            raise PermissionError("数据源不在当前分析范围")
         source = require_sources_access(
             context.database, [source_id], workspace_id=context.workspace_id,
             actor_id=context.actor_id or "local-default", action="read",
         )[0]
-        schema = schema_for_source(source, actor_id=context.actor_id or "local-default")
         table_name = args.get("table") or args.get("table_name")
         if not table_name:
             raise ValueError("get_table_detail 需要 table 或 table_name")
+        schema = schema_for_source(source, actor_id=context.actor_id or "local-default",
+            **({"table_names": [str(table_name)], "column_offset": int(args.get("column_offset", 0)),
+                "column_limit": int(args.get("column_limit", 50))} if source.get("kind") == "database" else {}))
         table = next(
             (item for item in schema["tables"] if item["name"] == table_name or item["source_name"] == table_name),
             None,
@@ -857,6 +917,14 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         item = context.database.get("tool_results", str(args.get("artifact_id") or ""))
         if not item or item.get("workspace_id") != context.workspace_id or item.get("session_id") != context.session_id:
             raise ValueError("工具结果 Artifact 不存在或不属于当前会话")
+        if item.get("actor_id") and item["actor_id"] != (context.actor_id or "local-default"):
+            raise PermissionError("工具结果不属于当前用户")
+        sources = require_sources_access(context.database, item.get("source_ids") or [], workspace_id=context.workspace_id,
+                                         actor_id=context.actor_id or "local-default")
+        actor = context.actor_id or "local-default"
+        if item.get("policy_fingerprint") != policy_fingerprint(sources, actor_id=actor,
+                role=actor_role(context.database, context.workspace_id, actor)):
+            raise PermissionError("工具结果的数据权限已变化，请按当前范围重新读取")
         content = str(item.get("content") or "")
         query = str(args.get("query") or "").strip().lower()
         limit = max(1, min(int(args.get("limit", 4000)), 4000))

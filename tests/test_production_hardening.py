@@ -715,6 +715,8 @@ def test_mysql_tls_options_reach_pymysql_without_sqlalchemy_rewriting(monkeypatc
         "ssl_ca": "/etc/mysql/ca.pem",
         "ssl_verify_cert": True,
         "ssl_verify_identity": True,
+        "read_timeout": 35,
+        "write_timeout": 10,
     }
 
 

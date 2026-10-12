@@ -596,3 +596,13 @@
 /* 图片按弹窗可用空间等比缩放，完整展示原图，不依赖浏览器的 iframe 图片查看器。 */
 .library-image-preview { display: grid; place-items: center; min-width: 0; }
 .library-image-preview img { display: block; max-width: 100%; max-height: min(70vh, 720px); width: auto; height: auto; object-fit: contain; }
+
+.database-table-list { display: grid; gap: 6px; max-height: 240px; overflow-y: auto; }
+.database-table-list button[aria-pressed="true"] { border-color: var(--brand-primary); background: var(--brand-soft); }
+.database-field-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.database-field-choice { display: flex; align-items: flex-start; gap: 8px; min-width: 0; cursor: pointer; }
+.database-field-choice input { margin-top: 4px; flex-shrink: 0; }
+.database-field-choice span { min-width: 0; }
+.database-field-choice b { display: block; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.database-field-choice small { display: block; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .database-field-list { grid-template-columns: minmax(0, 1fr); } }

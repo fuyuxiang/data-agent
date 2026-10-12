@@ -141,6 +141,18 @@ python -m pip install -r requirements-dl.txt
 
 模型调用由 Agent 运行时发起；MCP 调用经过受治理工具层；数据访问受来源授权及只读 SQL 约束。正式结果由[发布门禁](backend/services/results/manifests.py)检查数据完整性、验证状态与显式数字的证据引用，再写入资料库。核验通过仅表示既定规则已通过，不能证明业务因果解释必然正确。
 
+### 大型数据库接入与探查
+
+MySQL 协议接入可识别 Doris / StarRocks，并使用对应 SQL 方言。登记连接只读取元数据，表目录支持搜索和分页；字段按选定表加载，保留类型、注释和单位。刷新目录会重新读取结构并清除本地探查缓存。历史数据库连接在首次访问时自动升级目录格式。连接表单填写主机、端口、数据库和凭据；JDBC URL 中的 Java 驱动参数不能直接作为 SQLAlchemy URL 使用。
+
+数据探查提供元数据、样本和范围聚合三种模式。样本最多检查 5000 行、50 个字段，超出样本范围时明确标记为部分数据，统计只描述返回记录；范围聚合最多选择 10 个字段，在数据库中计算行数、缺失数和去重数。Doris / StarRocks 去重数使用近似算法，界面和 Agent 都保留准确性标记。数据库目录行数来自元数据估计，受行列权限保护时不显示全表统计。探查缓存按用户、权限、结构版本和范围隔离，有效期 120 秒。
+
+用户可选择时间字段、格式和范围；探查结束时间为不含边界，支持 ISO、`yyyyMMdd`、`yyyyMMddHH`、Unix 秒及毫秒。语义指标中的字符串金额需要显式配置数值转换和单位系数，例如分转元使用 `decimal` 和 `0.01`；字符串时间维度需要声明格式，避免金额单位或日期比较失真。
+
+原生数据库问数和探查将筛选、关联和聚合下推到数据源，返回结果使用流式游标，限制行数、总字节和单元格大小。每个数据库端点共享并发额度；查询先检查执行计划的扫描预算，再由超时和 Doris / StarRocks 会话内存设置约束执行。执行计划无法预估扫描量时返回明确提示，仍保留运行限制。异步查询、探查支持取消，完成前重新检查数据权限；Agent 可分页检索宽表结构并按需读取大型工具结果。
+
+这条路径适合远端大型表的有界查询，容量取决于数据库分区、索引、资源和实际执行计划。需要全量多表扫描或大型统计建模时，应接入已配置的 Trino / Livy 执行环境；普通数据库连接不会自动切换到分布式集群。Trino 默认只读，禁止 CTAS；显式启用物化时必须使用独立的临时目录。当前应用控制面仍是单节点 SQLite 和本地文件，横向扩容需另行迁移控制存储、任务协调与交付物存储。数据库账号的只读权限由数据库管理员配置，应用查询限制不会修改账号授权。
+
 ### 技术栈
 
 - **Web 客户端：** Vue 3 Global Build + 原生 ES Modules，ECharts、Marked 和 DOMPurify 随项目本地交付，无运行时 CDN 依赖。使用已构建的静态资源运行时不需要 Node 工具链。
@@ -218,6 +230,11 @@ python -m pip install -r requirements-dl.txt
 | `MERIDIAN_MAX_QUERY_MB` | `20` | 单次查询物化结果的编码/内存字节上限（MB） |
 | `MERIDIAN_MAX_QUERY_CELL_KB` | `1024` | 单个字符串或二进制结果单元格上限（KB） |
 | `MERIDIAN_QUERY_TIMEOUT_SECONDS` | `30` | 外部数据库查询超时 |
+| `MERIDIAN_DATABASE_QUERY_CONCURRENCY` | `4` | 单应用内每个数据库端点的原生查询并发上限 |
+| `MERIDIAN_DATABASE_QUERY_QUEUE_SECONDS` | `10` | 等待数据库查询额度的最大秒数 |
+| `MERIDIAN_DATABASE_MAX_SCAN_ROWS` | `50000000` | 执行计划预计扫描行数预算；简单有界预览按返回上限检查 |
+| `MERIDIAN_DATABASE_MAX_SCAN_MB` | `2048` | 无筛选查询的元数据估计扫描大小预算（MB） |
+| `MERIDIAN_DATABASE_QUERY_MEMORY_MB` | `512` | Doris / StarRocks 会话 `exec_mem_limit`（MB）；实际资源隔离仍需数据库工作负载配置 |
 | `MERIDIAN_DAILY_TOKEN_LIMIT` | `5000000` | 每工作空间每日模型 token 配额 |
 | `MERIDIAN_LOCAL_ANALYSIS_TIMEOUT_SECONDS` | `120` | 固定审核分析方法的子进程超时秒数；不执行生成的 Python 代码 |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | 参见模板 | 可选的环境级 OpenAI-Compatible 默认服务 |
@@ -345,7 +362,7 @@ python scripts/verify_advanced_agent.py --profile release
 
 系统将“分析可用”和“默认安全”同时作为设计约束：
 
-- **SQL 只读：** 使用 sqlglot 解析单条 `SELECT` / `WITH` / 集合查询，禁止 DDL/DML、外部文件/网络函数和多语句；同时在数据库会话层启用只读事务、超时和行数上限。
+- **SQL 只读：** 使用 sqlglot 解析单条 `SELECT` / `WITH` / 集合查询，禁止 DDL/DML、外部文件/网络函数、多语句、导出和锁定读取；拒绝覆盖资源限制的查询提示。支持的数据库会话启用只读事务与超时，查询还受扫描、并发、行数和字节预算约束；数据库账号应独立配置只读权限。
 - **数据不覆盖：** 清洗结果作为新派生数据集保存；常规删除进入可恢复的归档/回收站，永久删除需显式确认。
 - **秘密保护：** 模型、数据源、MCP 和通知凭据使用应用主密钥加密落库，API 只返回脱敏状态。
 - **出站防护：** 外部 HTTP 请求校验 scheme、域名白名单和解析后 IP，默认禁止本机、内网、链路本地与保留地址，并限制重定向和响应体大小。
