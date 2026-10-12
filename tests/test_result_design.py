@@ -17,6 +17,8 @@ def test_result_cards_show_only_query_values_and_charts_follow_data_shape():
     assert [(item["label"], item["value"]) for item in _kpis(single)] == [
         ("销售额", 210), ("订单数", 3),
     ]
+    assert _charts(single) == []
+    assert _charts(pd.DataFrame({"coefficient": [0.1, 0.2], "p_value": [0.04, 0.05]})) == []
 
 
 def test_report_recommendations_require_explicit_text():

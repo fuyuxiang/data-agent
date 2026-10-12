@@ -284,6 +284,17 @@ class ResultService:
             if evidence_result and evidence_result.get("sql"):
                 definition_text.append(str(evidence_result["sql"]))
         definition_numbers = _claim_numbers("\n".join(definition_text))
+        from .content import checked_report
+
+        report_content, report_error = None, None
+        try:
+            report_content = checked_report(self.db, run, refs)
+        except (ValueError, PermissionError, FileNotFoundError) as exc:
+            report_error = str(exc)
+        if report_content is not None or report_error:
+            rules.append(Rule("report_content", "1", "expression", "blocking", 3, lambda _ctx: outcome(
+                "FAIL" if report_error else "PASS", report_error or "报告内容与当前查询证据一致",
+            )))
         claims = _build_claims(
             self.db, run["workspace_id"], answer, refs,
             definition_numbers=definition_numbers,
@@ -296,7 +307,7 @@ class ResultService:
                 "complete": complete, "validated": validated, "claims": claims,
             },
         )
-        manifest = self.create_manifest(run, contract, answer, refs, validation, claims)
+        manifest = self.create_manifest(run, contract, answer, refs, validation, claims, report_content)
         if validation["status"] != "PASS":
             return {
                 "published": False, "quality_status": "failed" if validation["status"] == "FAIL" else "unknown",
@@ -316,6 +327,7 @@ class ResultService:
         evidence_refs: list[str],
         validation: dict[str, Any],
         claims: list[dict[str, Any]],
+        report_content: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.db.transaction() as connection:
             row = connection.execute(
@@ -326,6 +338,7 @@ class ResultService:
             payload = build_manifest_payload(
                 self.db, workspace_id=run["workspace_id"], contract=contract["payload"],
                 answer=answer, evidence_refs=evidence_refs, validation=validation,
+                run_id=run["id"], report_content=report_content,
                 dependency_fingerprint={
                     "contract": contract["payload"].get("fingerprint"),
                     "policy_version": run["policy_version"], "source_scope": run["source_scope"],

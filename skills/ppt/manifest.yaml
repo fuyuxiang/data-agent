@@ -17,6 +17,7 @@ example_questions:
   - 把这次分析做成汇报幻灯片
   - 给管理层出一份 PPT
 allowed_tools:
+  - reuse_analysis_result
   - read_tool_result
   - generate_chart
 inputs:

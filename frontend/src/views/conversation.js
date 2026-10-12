@@ -179,7 +179,7 @@ export const ConversationView = {
       }
     },
 
-    /** 明细表按结果 id 分页取，成果清单里只带列名不带行。 */
+    /** 每份已发布结果独立分页，避免只展示第一张表。 */
     async loadTables(payload, runId) {
       const output = [];
       const descriptors = payload?.tables || [];
@@ -188,14 +188,14 @@ export const ConversationView = {
         const item = {
           id: table.id, title: table.title, resultId: table.result_id,
           columns: table.columns || [], rows: [], total: table.total_rows ?? null,
-          offset: 0, limit: 50, loading: false, error: '', paginated: index === 0,
+          offset: 0, limit: 50, loading: false, error: '', paginated: index === 0 || table.server_paginated === true,
           sourceTotal: table.total_rows ?? null, completeness: table.completeness || 'unknown',
         };
         try {
-          const response = await actions.get(index === 0
-            ? `/api/analyses/${runId}/details?cursor=0&limit=50`
+          const response = await actions.get(item.paginated
+            ? `/api/analyses/${runId}/details?cursor=0&limit=50${index ? '&result_id=' + encodeURIComponent(table.result_id) : ''}`
             : `/api/query-results/${table.result_id}`);
-          item.rows = index === 0 ? (response.items || []) : (response.result?.preview || response.result?.data || []);
+          item.rows = item.paginated ? (response.items || []) : (response.result?.preview || response.result?.data || []);
           item.columns = response.columns || response.result?.columns || item.columns;
           item.total = response.returned_total ?? response.total ?? response.result?.rows ?? item.total ?? item.rows.length;
           item.sourceTotal = response.total ?? response.result?.total_rows ?? item.sourceTotal;
@@ -215,7 +215,7 @@ export const ConversationView = {
       table.error = '';
       try {
         const response = await actions.get(table.paginated
-          ? `/api/analyses/${runId}/details?cursor=${offset}&limit=${table.limit || 50}`
+          ? `/api/analyses/${runId}/details?cursor=${offset}&limit=${table.limit || 50}&result_id=${encodeURIComponent(table.resultId)}`
           : `/api/query-results/${table.resultId}`);
         if (epoch !== this.pollEpoch || this.disposed) return;
         table.rows = table.paginated ? (response.items || []) : (response.result?.preview || response.result?.data || []);
@@ -354,8 +354,6 @@ export const ConversationView = {
           contract.confirmed_assumptions = [
             ...(contract.confirmed_assumptions || []), `重点关注：${choices.focus}`,
           ];
-          if (choices.focus === '城市差异') contract.dimensions = ['城市'];
-          if (choices.focus === '品类表现') contract.dimensions = ['品类'];
         }
         const confirmed = await actions.post(`/api/analyses/${run.id}/contract/confirm`, {
           expected_version: revision.version, contract,
@@ -652,6 +650,7 @@ export const ConversationView = {
             <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_docx']" @click="generate(turn.run.id, 'report_docx', 'Word 报告')"><Icon name="fileText" :size="14" />{{ generating[turn.run.id + ':report_docx'] ? '生成中…' : '生成报告' }}</button>
             <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_pptx']" @click="generate(turn.run.id, 'report_pptx', 'PPT')"><Icon name="filePresentation" :size="14" />{{ generating[turn.run.id + ':report_pptx'] ? '生成中…' : '生成 PPT' }}</button>
             <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':data_xlsx']" @click="generate(turn.run.id, 'data_xlsx', 'Excel')"><Icon name="fileSpreadsheet" :size="14" />{{ generating[turn.run.id + ':data_xlsx'] ? '生成中…' : '导出 Excel' }}</button>
+            <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_html']" @click="generate(turn.run.id, 'report_html', '网页报告')"><Icon name="fileText" :size="14" />{{ generating[turn.run.id + ':report_html'] ? '生成中…' : '网页报告' }}</button>
             <button class="btn btn--sm" @click="navigate('library')"><Icon name="library" :size="14" />查看资料库</button>
             <span class="grow"></span>
             <button class="icon-btn tip" data-tip="结果有帮助" aria-label="结果有帮助" :aria-pressed="feedback[turn.run.id] === 'up'" :disabled="!!feedback[turn.run.id]" @click="sendFeedback(turn.run.id, 'up')"><Icon name="thumbUp" :size="16" /></button>

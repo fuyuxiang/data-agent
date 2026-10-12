@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from .models import SkillDefinition, SkillError, validate_id
+from .models import SkillDefinition, SkillError, validate_id, validate_references
 
 _CACHE: dict[str, tuple[float, dict[str, SkillDefinition]]] = {}
 _LOCK = threading.RLock()
@@ -93,6 +93,11 @@ def read_package(directory: Path) -> SkillDefinition:
         updated_at=str(payload.get("updated_at") or ""),
         published_at=str(payload.get("published_at") or ""),
         package_path=str(directory),
+        reference_documents=validate_references({
+            path.name: path.read_text(encoding="utf-8")
+            for path in (directory / "references").glob("*.md")
+            if not path.is_symlink() and path.stat().st_size <= 100_000
+        } if not (directory / "references").is_symlink() else {}),
     )
     if not definition.instruction:
         raise SkillError(f"技能包缺少使用说明（SKILL.md 或 manifest.instruction）：{directory.name}")
@@ -126,3 +131,43 @@ def load_builtin_skills(directory: Path | None = None, *, refresh: bool = False)
     with _LOCK:
         _CACHE[str(root)] = (stamp, loaded)
     return loaded
+
+
+def reference_index(definition: SkillDefinition) -> list[dict[str, Any]]:
+    """Expose a small index, never inject whole reference books into context."""
+    entries = []
+    for name, content in sorted(definition.reference_documents.items()):
+        headings = [line.lstrip("# ").strip() for line in content.splitlines()
+                    if line.startswith("## ")][:30]
+        entries.append({"name": name, "sections": headings})
+    return entries
+
+
+def read_reference(definition: SkillDefinition, name: str, *, section: str = "",
+                   offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    available = {item["name"] for item in reference_index(definition)}
+    if name not in available:
+        raise ValueError("技能参考文档不存在；请使用参考目录中的文件名")
+    # Content is captured with the published definition, including imported
+    # workspace skills. No model-controlled filesystem path is ever opened.
+    lines = definition.reference_documents[name].splitlines()
+    if section:
+        starts = [index for index, line in enumerate(lines)
+                  if line.startswith("## ") and line.lstrip("# ").strip() == section]
+        if not starts:
+            raise ValueError("参考文档章节不存在，请使用目录中的章节名")
+        start = starts[0]
+        end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
+        lines = lines[start:end]
+    offset, limit = max(0, int(offset)), max(1, min(int(limit), 200))
+    selected, size = [], 0
+    for line in lines[offset:offset + limit]:
+        if size + len(line) > 12_000:
+            if not selected:
+                raise ValueError("参考文档单行过长")
+            break
+        selected.append(line)
+        size += len(line) + 1
+    end = offset + len(selected)
+    return {"skill_id": definition.id, "reference": name, "section": section,
+            "content": "\n".join(selected), "next_offset": end if end < len(lines) else None}

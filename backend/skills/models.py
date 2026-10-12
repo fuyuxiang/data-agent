@@ -12,7 +12,7 @@ see exactly one contract.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 MAX_NAME = 60
@@ -43,7 +43,8 @@ FORMAL_AGENT_TOOLS = frozenset({
     "query_knowledge", "get_schema", "get_table_detail", "list_semantic_metrics",
     "query_metric", "query_data", "profile_data", "run_analysis", "select_chart",
     "generate_chart", "ask_user", "structured_output",
-    "load_analysis_skill", "read_tool_result", "validate_result", "update_plan",
+    "load_analysis_skill", "read_skill_reference", "submit_analysis_report", "reuse_analysis_result",
+    "read_tool_result", "validate_result", "update_plan",
     "search_mcp_tools", "warehouse_catalog", "warehouse_explain",
     "warehouse_query", "warehouse_spark_submit",
 })
@@ -83,6 +84,7 @@ class SkillDefinition:
     updated_at: str = ""
     published_at: str = ""
     package_path: str = ""
+    reference_documents: dict[str, str] = field(default_factory=dict)
 
     @property
     def editable(self) -> bool:
@@ -117,6 +119,7 @@ class SkillDefinition:
             "updated_at": self.updated_at,
             "published_at": self.published_at,
             "editable": self.editable,
+            "reference_documents": dict(self.reference_documents),
             "categories": list(CATEGORIES),
         }
 
@@ -185,6 +188,23 @@ def validate_id(value: Any) -> str:
     return text
 
 
+def validate_references(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(value) > 20:
+        raise SkillError("技能参考资料必须是最多 20 个文档的对象")
+    result = {}
+    for name, content in value.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}\.md", name):
+            raise SkillError("技能参考文件名只允许字母、数字、中划线与下划线，扩展名为 .md")
+        if not isinstance(content, str) or len(content.encode("utf-8")) > 100_000:
+            raise SkillError("每份技能参考资料必须是最多 100 KB 的文本")
+        result[name] = content
+    if sum(len(text.encode("utf-8")) for text in result.values()) > 300_000:
+        raise SkillError("技能参考资料总量超过 300 KB")
+    return result
+
+
 def skill_from_payload(payload: dict[str, Any], *, record: dict[str, Any] | None = None) -> SkillDefinition:
     """Validate and normalise an administrator-submitted skill payload."""
     if not isinstance(payload, dict):
@@ -248,6 +268,7 @@ def skill_from_payload(payload: dict[str, Any], *, record: dict[str, Any] | None
         updated_at=str((record or {}).get("updated_at") or ""),
         published_at=str((record or {}).get("published_at") or ""),
         package_path=str((record or {}).get("package_path") or ""),
+        reference_documents=validate_references(merged.get("reference_documents")),
     )
     return definition
 
@@ -285,6 +306,7 @@ def skill_from_record(record: dict[str, Any]) -> SkillDefinition:
         updated_at=str(record.get("updated_at") or ""),
         published_at=str(record.get("published_at") or ""),
         package_path=str(record.get("package_path") or ""),
+        reference_documents=validate_references(record.get("reference_documents")),
     )
     if definition.category not in CATEGORY_VALUES:
         return replace(definition, category="自定义")
@@ -321,4 +343,5 @@ def skill_to_record(definition: SkillDefinition, workspace_id: str) -> dict[str,
         "created_by": definition.created_by,
         "published_at": definition.published_at,
         "package_path": definition.package_path,
+        "reference_documents": dict(definition.reference_documents),
     }

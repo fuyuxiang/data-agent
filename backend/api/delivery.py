@@ -159,7 +159,12 @@ def analysis_details(run_id: str):
     if not publication:
         raise PermissionError("结果未通过发布门禁")
     manifest = ResultService(db()).manifest(publication["manifest_id"], workspace_id=run["workspace_id"])
-    table = next(iter((manifest or {}).get("payload", {}).get("tables") or []), {})
+    tables = (manifest or {}).get("payload", {}).get("tables") or []
+    result_id = str(request.args.get("result_id") or "")
+    table = (next((item for item in tables if item.get("result_id") == result_id), None)
+             if result_id else next(iter(tables), {}))
+    if table is None:
+        raise PermissionError("明细不属于当前已发布结果")
     result = db().get("query_results", str(table.get("result_id") or ""), workspace_id=run["workspace_id"])
     if not result:
         return ok(items=[], columns=table.get("columns") or [], total=None, completeness="unknown", next_cursor=None)

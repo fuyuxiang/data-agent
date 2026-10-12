@@ -451,6 +451,8 @@ def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
 
 
 def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
+    from .results.content import REPORT_SCHEMA
+
     analysis_context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     agent_snapshot = analysis_context.get("agent_snapshot") or {}
     metric_ids = list(agent_snapshot.get("metric_ids") or [])
@@ -533,6 +535,20 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
         cost_kind="result_bytes",
     ), lambda arguments: _local_analysis_tool_with_events(database, run, arguments))
     registry.register(ToolSpec(
+        id="reuse_analysis_result", description=(
+            "仅为整理报告复用本会话最近一次已发布分析的证据、口径和报告内容。"
+            "不刷新数据；新范围或新统计必须重新查询。不能引用别人的分析或其他会话。"
+        ), input_schema={"type": "object", "properties": {}}, mutability="read",
+    ), lambda _arguments: _reuse_analysis_result(database, run))
+    registry.register(ToolSpec(
+        id="submit_analysis_report", description=(
+            "整理当前分析的报告内容。指标只指定查询结果单元格，值由服务端读取；"
+            "发现与建议引用当前结果，事实和推测分开。复用已查询证据，不重新取数，不生成 HTML。"
+        ),
+        input_schema=REPORT_SCHEMA,
+        mutability="read",
+    ), lambda arguments: _submit_report(database, run, arguments))
+    registry.register(ToolSpec(
         id="validate_result", description="对当前查询结果执行独立完整性、范围与结构验证；正式发布前必须调用。",
         input_schema={
             "type": "object", "properties": {
@@ -595,6 +611,64 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
     return ToolExecutor(RunStore(database), registry)
 
 
+def _submit_report(database: Database, run: dict, arguments: dict) -> tuple[dict, list]:
+    from .results.content import submit_report
+
+    value = submit_report(database, run, arguments)
+    return value, [("report.prepared", {"report_id": run["id"], "evidence_refs": value["output_refs"]})]
+
+
+def _reuse_analysis_result(database: Database, run: dict) -> dict:
+    from .results.content import checked_report
+    from ..skills.registry import SkillRegistry
+
+    context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    skill_ids = context.get("skill_ids") or ([run["skill_id"]] if run.get("skill_id") else [])
+    registry = SkillRegistry(database, run["workspace_id"])
+    if not any((definition := registry.get(skill_id)) and definition.category == "报告"
+               and definition.status == "published" for skill_id in skill_ids):
+        raise PermissionError("仅报告整理技能可以复用已发布分析，请为新的分析问题执行当前查询")
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT p.id,p.run_id,p.manifest_id,p.created_at FROM publications p JOIN agent_runs a ON a.id=p.run_id "
+            "WHERE p.workspace_id=? AND a.session_id=? AND a.actor_id=? AND a.id<>? AND a.archived_at IS NULL "
+            "ORDER BY p.created_at DESC,p.rowid DESC LIMIT 1",
+            (run["workspace_id"], run["session_id"], run["actor_id"], run["id"]),
+        ).fetchone()
+    if not row:
+        raise ValueError("当前会话还没有可复用的已核验分析，请先完成分析")
+    parent = RunStore(database).get_run(row["run_id"], workspace_id=run["workspace_id"])
+    if not parent or not _source_authorized(database, parent) or not _source_authorized(database, run):
+        raise PermissionError("分析的数据权限已变更，不能复用旧结果")
+    if not set(parent["source_scope"]).issubset(set(run["source_scope"])):
+        raise PermissionError("已发布结果超出本次确认的数据范围")
+    service = ResultService(database)
+    manifest = service.manifest(row["manifest_id"], workspace_id=run["workspace_id"])
+    payload = (manifest or {}).get("payload") or {}
+    current_contract = (RunStore(database).latest_contract(run["id"]) or {}).get("payload") or {}
+    original_contract = payload.get("contract") or {}
+    if current_contract.get("time_range") and current_contract["time_range"] != original_contract.get("time_range"):
+        raise ValueError("本次时间范围与已发布分析不同，请重新查询，不能复用旧结果")
+    refs = list(payload.get("evidence_refs") or [])
+    if not refs:
+        raise ValueError("已发布分析缺少可复用的数据证据")
+    for ref in refs:
+        if not _validate_result(database, run, {"result_id": ref})["ok"]:
+            raise ValueError("已发布分析的证据已失效，请重新分析")
+    checked_report(database, parent, refs)
+    record = database.get("analysis_report_content", parent["id"], workspace_id=run["workspace_id"]) or {}
+    results = [database.get("query_results", ref, workspace_id=run["workspace_id"]) or {} for ref in refs]
+    return {
+        "source_analysis_id": parent["id"], "publication_id": row["id"],
+        "summary": payload.get("summary"), "original_contract": original_contract,
+        "report_input": record.get("input"),
+        "results": [{key: result.get(key) for key in ("id", "columns", "rows", "data", "semantic_query", "created_at")}
+                    for result in results],
+        "reuse_note": "本次复用会话中已核验的数据，未重新取数；原统计范围：" + str(original_contract.get("coverage") or "未注明"),
+        "output_refs": refs, "completeness": "complete", "validation_status": "PASS",
+    }
+
+
 def _local_analysis_tool_with_events(
     database: Database, run: dict[str, Any], arguments: dict[str, Any],
 ) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
@@ -627,7 +701,9 @@ def available_formal_tools(database: Database, workspace_id: str, session_id: st
         if (server := database.get("mcp_servers", identity[0], workspace_id=workspace_id))
         and identity[1] in set(server.get("formal_read_tools") or [])
     }
-    available = (discovered & FORMAL_AGENT_TOOLS) | {"validate_result", "update_plan"} | remote
+    available = (discovered & FORMAL_AGENT_TOOLS) | {
+        "validate_result", "update_plan", "submit_analysis_report", "reuse_analysis_result",
+    } | remote
     if not approved_mcp:
         available.discard("search_mcp_tools")
     return sorted(available | approved_mcp)

@@ -33,7 +33,13 @@ SYSTEM_PROMPT = """你是受治理的企业数据分析 Agent。分析方法和�
 对正式业务指标，必须先查询已审批语义指标并优先使用 query_metric；只有语义层无法覆盖的探索性问题才可使用原始 SQL，且必须明确说明口径假设。
 区分事实、假设、建议和局限。仅在有当前证据并通过验证时申请正式完成。不要输出隐藏思维链，
 只给用户简短决策摘要。优先用一次合并查询取得所需统计；图表类型明确时直接调用 generate_chart，
-不要先调用 select_chart。完成约定交付物后立即基于证据作答，不要为了补充可选内容重复查询。"""
+不要先调用 select_chart。仅在方法不明确时按目录调用 read_skill_reference 读取相关章节，不通读参考书。
+只整理当前会话已有分析时，报告技能先调用 reuse_analysis_result 复用已核验证据并说明未刷新数据。
+需要报告、归因或多个结果的综合分析时，在作答前调用 submit_analysis_report，复用当前结果组织指标、发现、
+建议与指标解释。指标指定 result_id、row、column，不自行填写数值；发现中的推导数字必须先计算到查询结果中。
+没有质量检查就写未评估，不默认 A 级或 100%；推测不能标高置信度。建议说明执行对象、范围与行动，避免泛泛而谈。
+简单单值问数可直接回答，不必凑齐固定数量的 KPI、图表或建议。完成约定交付物后立即基于证据作答，
+不要为了补充可选内容重复查询。相同范围连续两次无数据时停止日期穷举，说明缺口或请求必要口径。"""
 
 
 WRAP_UP_PROMPT = """模型预算已进入收尾阶段，且当前运行已有成功的数据查询证据。
@@ -44,6 +50,7 @@ query_data；否则请直接生成尚未完成的必要图表、验证证据并�
 WRAP_UP_DISABLED_TOOLS = frozenset({
     "get_schema", "list_semantic_metrics", "query_knowledge",
     "search_mcp_tools", "load_analysis_skill", "select_chart",
+    "read_skill_reference",
 })
 
 
@@ -290,7 +297,7 @@ class AgentLoop:
                     blocking = (result.get("validation") or {}).get("blocking_issues") or []
                 repairable = {
                     str(item.get("rule_id") or "") for item in blocking
-                }.issubset({"numeric_claim_replay", "independent_validation"})
+                }.issubset({"numeric_claim_replay", "independent_validation", "report_content"})
                 if blocking and repairable and finalization_repairs < 2:
                     reasons = "；".join(str(item.get("reason") or item.get("rule_id")) for item in blocking)
                     messages.extend([
@@ -369,7 +376,7 @@ def _remaining(budget: dict[str, Any], usage: dict[str, Any]) -> dict[str, Any]:
 
 def _has_current_data_evidence(seen_results: list[dict[str, Any]]) -> bool:
     return any(
-        item.get("tool") in {"query_data", "query_metric", "run_analysis"}
+        item.get("tool") in {"query_data", "query_metric", "run_analysis", "reuse_analysis_result"}
         and item.get("status") == "SUCCEEDED" and item.get("refs")
         for item in seen_results
     )

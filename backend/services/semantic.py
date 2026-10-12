@@ -678,6 +678,8 @@ def compile_metric_query(
             "version": metric["version"], "unit": metric.get("unit", ""),
             "metric_type": metric.get("metric_type", "atomic"),
             "expression": metric.get("expression", ""),
+            "definition": metric.get("description") or metric["label"],
+            "formula": metric_expression,
             "dependency_metric_ids": metric.get("dependency_metric_ids") or [],
             "definition_fingerprint": metric.get("definition_fingerprint"),
         },
@@ -710,6 +712,8 @@ def execute_metric_query(
         "model_version": plan["model"]["version"], "group_by": plan["group_by"],
         "metric_definition_fingerprint": plan["metric"]["definition_fingerprint"],
         "model_definition_fingerprint": plan["model"]["definition_fingerprint"],
+        "metric_definition": {key: plan["metric"].get(key) for key in
+                              ("name", "label", "definition", "formula", "unit", "version")},
         "filters": plan["filters"], "time_range": plan["time_range"],
     }
     result = database.patch(

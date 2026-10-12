@@ -464,6 +464,8 @@ def export_skill(skill_id: str):
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{definition.id}/manifest.yaml", manifest)
         archive.writestr(f"{definition.id}/SKILL.md", definition.instruction or definition.usage)
+        for name, content in definition.reference_documents.items():
+            archive.writestr(f"{definition.id}/references/{name}", content)
         archive.writestr(
             f"{definition.id}/evals/questions.json",
             json.dumps(list(definition.example_questions), ensure_ascii=False, indent=2),

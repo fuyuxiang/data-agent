@@ -20,7 +20,10 @@ from .permissions import skill_requirements
 
 # Tools that are always available to a skill: without them the model could not
 # ask for clarification, read back its own results, or validate them.
-_ALWAYS_ALLOWED = frozenset({"ask_user", "structured_output", "read_tool_result", "validate_result"})
+_ALWAYS_ALLOWED = frozenset({
+    "ask_user", "structured_output", "read_tool_result", "validate_result",
+    "read_skill_reference", "submit_analysis_report",
+})
 
 # When a skill reaches for raw data, the governed metric tools are a safer
 # subset and are added automatically.
@@ -96,6 +99,8 @@ class SkillExecutor:
         When several skills are selected their tool sets are unioned — a skill
         must never be able to *remove* another skill's capability.
         """
+        from .loader import reference_index
+
         executions: list[SkillExecution] = []
         allowed_by_run = (
             set(run_context.allowed_tool_ids) if run_context is not None else None
@@ -111,7 +116,8 @@ class SkillExecutor:
             executions.append(SkillExecution(
                 skill=definition,
                 allowed_tools=frozenset(tools),
-                model_blocks=({**definition.to_model_block(), "allowed_tools": sorted(tools)},),
+                model_blocks=({**definition.to_model_block(), "allowed_tools": sorted(tools),
+                               "references": reference_index(definition)},),
                 warnings=tuple(warnings),
                 missing_resources=gaps,
             ))

@@ -4,6 +4,12 @@
  */
 
 /* ---------- Button ---------- */
+.report-definition { margin-top: 8px; font-size: var(--text-sm); color: var(--text-secondary); }
+.report-definition summary { cursor: pointer; width: fit-content; }
+.report-definition p { margin: 6px 0; overflow-wrap: anywhere; }
+.report-confidence { font-weight: 400; color: var(--text-secondary); }
+.report-glossary { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.report-glossary p { margin: 4px 0; }
 .btn {
   display: inline-flex;
   align-items: center;

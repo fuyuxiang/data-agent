@@ -739,7 +739,7 @@ class RunStore:
     def actions(self, run_id: str) -> list[dict]:
         with self.db.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM agent_actions WHERE run_id=? ORDER BY created_at", (run_id,),
+                "SELECT * FROM agent_actions WHERE run_id=? ORDER BY created_at,rowid", (run_id,),
             ).fetchall()
         return [self._action(dict(row)) for row in rows]
 

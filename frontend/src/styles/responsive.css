@@ -100,4 +100,8 @@
   .toast { width: auto; }
   .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .result-actions .btn { flex: 1; }
+  .result-table__head > b { flex-basis: 100%; }
+  .result-table__head > .grow { flex: 1 1 100%; }
+  .file-card { flex-wrap: wrap; }
+  .file-card > .grow { flex: 1 1 calc(100% - 52px); }
 }

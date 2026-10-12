@@ -19,6 +19,7 @@ example_questions:
   - 导出一份各城市销售数据
   - 下载这份明细表
 allowed_tools:
+  - reuse_analysis_result
   - read_tool_result
   - query_data
   - query_metric

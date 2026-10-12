@@ -149,6 +149,11 @@ BUILTIN_TOOLS = [
 ]
 
 EXTRA_TOOLS = [
+    _function("read_skill_reference", "Read only the relevant section of a published skill reference. "
+              "Use the reference/section names from the skill index; no code is executed.", {
+        "name": {"type": "string"}, "reference": {"type": "string"},
+        "section": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"},
+    }, ["name", "reference"]),
     _function("workspace_status", "Show mounted and system workspace roots and safety limits."),
     _function("get_table_detail", "Return paged columns and comments for one exact table. Follow next_column_offset for wide tables.", {"source_id": {"type": "string"}, "table": {"type": "string"}, "table_name": {"type": "string"}, "column_offset": {"type": "integer"}, "column_limit": {"type": "integer"}}),
     _function("create_analysis_table", "Create a queryable derived table from read-only SQL.", {"sql": {"type": "string"}, "table_name": {"type": "string"}}, ["sql", "table_name"]),
@@ -179,7 +184,7 @@ EXTRA_TOOLS = [
 DEFAULT_EXTRA_TOOL_NAMES = frozenset({
     "workspace_status", "get_table_detail", "create_analysis_table", "clean_data",
     "ask_user", "browse_webpage", "workspace_glob", "workspace_grep", "workspace_read_file",
-    "structured_output", "load_analysis_skill", "task_get", "task_list",
+    "structured_output", "load_analysis_skill", "read_skill_reference", "task_get", "task_list",
     "read_tool_result", "plan_complete",
 })
 
@@ -862,7 +867,8 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
         if missing:
             raise ValueError(f"结构化输出缺少字段：{', '.join(missing)}")
         return {"output": output, "valid": True}, events
-    if name == "load_analysis_skill":
+    if name in {"load_analysis_skill", "read_skill_reference"}:
+        from ..skills.loader import read_reference, reference_index
         from ..skills.permissions import available_resources, filter_visible
         from ..skills.registry import SkillRegistry
 
@@ -878,11 +884,19 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
                 registry.published(), available,
             ))
             raise ValueError(f"技能不存在；当前可用技能为：{'、'.join(published)}")
+        if definition.status != "published":
+            raise PermissionError("只能读取已发布技能的执行说明与参考资料")
         if definition.id not in {item.id for item in filter_visible([definition], available)}:
             raise PermissionError(f"当前无权使用技能：{definition.id}")
+        if name == "read_skill_reference":
+            return read_reference(
+                definition, str(args.get("reference") or ""), section=str(args.get("section") or ""),
+                offset=int(args.get("offset") or 0), limit=int(args.get("limit") or 100),
+            ), events
         return {
-            **definition.to_public(),
+            **{key: value for key, value in definition.to_public().items() if key != "reference_documents"},
             "allowed_tools": list(definition.allowed_tools),
+            "references": reference_index(definition),
         }, events
     if name == "task_create":
         item = {

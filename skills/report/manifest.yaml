@@ -18,6 +18,12 @@ example_questions:
   - 把这次分析整理成一份汇报文档
   - 出一份管理层看的分析报告
 allowed_tools:
+  - reuse_analysis_result
+  - get_schema
+  - query_metric
+  - query_data
+  - profile_data
+  - run_analysis
   - query_knowledge
   - list_semantic_metrics
   - read_tool_result
@@ -25,6 +31,7 @@ allowed_tools:
   - validate_result
 inputs:
   - 当前对话已有的分析结论与数据
+  - 请求新分析时已确认的数据范围
   - 报告受众
 outputs:
   - Word 报告

@@ -64,10 +64,18 @@ const KpiCard = {
     <div class="kpi">
       <div class="kpi__label">{{ kpi.label }}</div>
       <div class="kpi__value" :title="String(kpi.value ?? '—')">{{ display }}</div>
+      <span v-if="kpi.unit" class="small muted">{{ kpi.unit }}</span>
       <div v-if="kpi.delta !== undefined" class="kpi__meta" :class="deltaClass">
         <Icon v-if="deltaIcon" :name="deltaIcon" :size="13" />
         {{ kpi.deltaLabel || '环比' }} {{ deltaDisplay }}
       </div>
+      <details v-if="kpi.definition || kpi.formula || kpi.notes" class="report-definition">
+        <summary>口径说明</summary>
+        <p v-if="kpi.definition">{{ kpi.definition }}</p>
+        <p v-if="kpi.formula">计算方式：{{ kpi.formula }}</p>
+        <p v-if="kpi.notes">{{ kpi.notes }}</p>
+        <p class="small muted">{{ kpi.definition_status === 'governed' ? '正式指标口径' : '探索口径，待核对' }}</p>
+      </details>
     </div>`,
 };
 
@@ -85,12 +93,24 @@ const InsightItem = {
     label() {
       return { fact: '事实', inference: '推测', risk: '风险', suggestion: '建议' }[this.item?.type] || '发现';
     },
+    confidenceLabel() {
+      return { high: '高', medium: '中', low: '低' }[this.item?.confidence] || '';
+    },
   },
   template: `
     <div class="insight" :class="'insight--' + tone">
       <div class="grow">
-        <div class="insight__label">{{ label }}</div>
+        <div class="insight__label">{{ label }}<span v-if="confidenceLabel" class="report-confidence"
+          :title="item.confidence_reason"> · 置信度{{ confidenceLabel }}</span></div>
         <p class="insight__text">{{ item.text }}</p>
+        <details v-if="item.why || item.impact || item.confidence_reason || item.owner || item.scope" class="report-definition">
+          <summary>{{ item.type === 'suggestion' ? '行动范围' : '查看解释与依据' }}</summary>
+          <p v-if="item.why">解释：{{ item.why }}</p>
+          <p v-if="item.impact">影响：{{ item.impact }}</p>
+          <p v-if="item.confidence_reason">置信度依据：{{ item.confidence_reason }}</p>
+          <p v-if="item.owner">执行对象：{{ item.owner }}</p>
+          <p v-if="item.scope">范围：{{ item.scope }}</p>
+        </details>
       </div>
     </div>`,
 };
@@ -156,22 +176,27 @@ export const ResultView = {
     const insights = computed(() => {
       const report = props.payload?.report || {};
       const items = [];
-      (report.attribution || []).forEach(value => items.push(
+      (report.findings || report.attribution || []).forEach(value => items.push(
         typeof value === 'string' ? { type: 'inference', text: value } : { type: 'fact', ...value },
       ));
+      (report.actions || []).forEach(value => items.push({ ...value, type: 'suggestion' }));
       ['short_term', 'medium_term', 'long_term'].forEach(bucket => {
         (report.recommendations?.[bucket] || []).forEach(value => {
-          items.push({ type: 'suggestion', text: value });
+          if (!items.some(item => item.text === value)) items.push({ type: 'suggestion', text: value });
         });
       });
       return items;
     });
-    const basis = computed(() => (props.payload?.evidence_refs || []).map(String));
+    const basis = computed(() => (props.payload?.evidence_refs || []).map((ref, index) => ({
+      id: String(ref), title: (props.payload?.tables || []).find(table => table.result_id === ref)?.title
+        || `数据来源 ${index + 1}`,
+    })));
+    const glossary = computed(() => props.payload?.glossary || []);
     const limitations = computed(() => [...new Set((props.payload?.limitations || props.payload?.report?.limitations || [])
       .filter(Boolean).map(String))]);
     const hasContent = computed(() => Boolean(summaryHtml.value || kpis.value.length || charts.value.length
       || props.tables.length || props.artifacts.length || insights.value.length));
-    return { summaryHtml, charts, kpis, insights, basis, limitations, hasContent };
+    return { summaryHtml, charts, kpis, insights, basis, glossary, limitations, hasContent };
   },
   methods: {
     formatValue,
@@ -197,7 +222,15 @@ export const ResultView = {
         <KpiCard v-for="kpi in kpis" :key="kpi.id" :kpi="kpi" />
       </div>
 
+      <div v-if="insights.length" class="stack" style="display:flex;flex-direction:column;gap:8px">
+        <InsightItem v-for="(item, index) in moreInsights ? insights : insights.slice(0, 6)" :key="index" :item="item" />
+        <button v-if="insights.length > 6" class="btn btn--sm" :aria-expanded="moreInsights" @click="moreInsights = !moreInsights">
+          {{ moreInsights ? '收起更多发现' : '查看其余 ' + (insights.length - 6) + ' 条发现与建议' }}
+        </button>
+      </div>
+
       <ChartCard v-for="chart in moreCharts ? charts : charts.slice(0, 2)" :key="chart.id" :spec="chart" />
+      <p v-if="charts.some(chart => chart.total_rows > chart.preview_rows)" class="small muted">图表展示部分记录；完整结果可查看下方明细或导出 Excel。</p>
       <button v-if="charts.length > 2" class="btn btn--sm" :aria-expanded="moreCharts" @click="moreCharts = !moreCharts">
         {{ moreCharts ? '收起更多图表' : '查看其余 ' + (charts.length - 2) + ' 张图表' }}
       </button>
@@ -229,13 +262,6 @@ export const ResultView = {
         <DataTable :rows="table.rows || []" :columns="table.columns || []" :max-height="'380px'" />
       </div>
 
-      <div v-if="insights.length" class="stack" style="display:flex;flex-direction:column;gap:8px">
-        <InsightItem v-for="(item, index) in moreInsights ? insights : insights.slice(0, 6)" :key="index" :item="item" />
-        <button v-if="insights.length > 6" class="btn btn--sm" :aria-expanded="moreInsights" @click="moreInsights = !moreInsights">
-          {{ moreInsights ? '收起更多发现' : '查看其余 ' + (insights.length - 6) + ' 条发现与建议' }}
-        </button>
-      </div>
-
       <div v-if="artifacts.length" class="stack" style="display:flex;flex-direction:column;gap:8px">
         <FileCard v-for="file in artifacts" :key="file.id" :file="file" :can-download="canExport" @preview="$emit('preview', $event)" />
       </div>
@@ -243,8 +269,8 @@ export const ResultView = {
       <div v-if="basis.length" class="basis">
         <Icon name="shield" :size="15" />
         <span>依据</span>
-        <button v-for="ref in basis.slice(0, 4)" :key="ref" class="basis__link" @click="$emit('source', ref)">
-          <span class="mono">{{ ref }}</span>
+        <button v-for="ref in basis.slice(0, 4)" :key="ref.id" class="basis__link" @click="$emit('source', ref.id)">
+          <span>{{ ref.title }}</span>
           <Icon name="chevronRight" :size="12" />
         </button>
         <span v-if="basis.length > 4" class="faint">+{{ basis.length - 4 }}</span>
@@ -252,6 +278,23 @@ export const ResultView = {
       <details v-if="limitations.length" class="result__limits">
         <summary>结果说明与限制 · {{ limitations.length }} 项</summary>
         <ul><li v-for="item in limitations" :key="item">{{ item }}</li></ul>
+      </details>
+      <details v-if="glossary.length || payload.data_quality" class="result__limits">
+        <summary>指标口径与数据质量</summary>
+        <p v-if="payload.data_quality" class="small muted">{{ payload.data_quality.summary }}</p>
+        <p v-for="(check, index) in payload.data_quality?.checks || []" :key="index" class="small muted">
+          {{ check.scope }}<span v-if="check.rows !== null && check.rows !== undefined"> · {{ check.rows }} 条记录</span>
+          <span v-if="check.missing_cells !== null && check.missing_cells !== undefined"> · 缺失 {{ check.missing_cells }} 个单元格</span>
+          <span v-if="check.duplicate_rows !== null && check.duplicate_rows !== undefined"> · 重复 {{ check.duplicate_rows }} 行</span>
+          <span v-if="check.note"> · {{ check.note }}</span>
+        </p>
+        <div v-for="entry in glossary" :key="entry.result_id + ':' + entry.column + ':' + entry.name" class="report-glossary">
+          <b>{{ entry.name }}<span v-if="entry.unit">（{{ entry.unit }}）</span></b>
+          <p>{{ entry.definition }}</p>
+          <p v-if="entry.formula">计算方式：{{ entry.formula }}</p>
+          <p v-if="entry.notes">{{ entry.notes }}</p>
+          <span class="small muted">{{ entry.definition_status === 'governed' ? '正式指标口径' : '探索口径，待核对' }}</span>
+        </div>
       </details>
     </section>`,
 };
@@ -283,7 +326,12 @@ export const ClarificationCard = {
       if (range.start || range.end) {
         return [range.start, range.end].filter(Boolean).join(' 至 ');
       }
-      return '本月';
+      return '未限定时间，请结合问题确认';
+    },
+    deliverables() {
+      const labels = { summary: '结论摘要', dashboard: '图表与数据', report: '分析报告',
+        report_docx: 'Word 报告', report_pptx: 'PPT', data_xlsx: 'Excel', report_html: '网页报告' };
+      return (this.contract?.payload?.deliverables || []).map(value => labels[value] || '按需求交付').join('、');
     },
     dateError() {
       if (this.choices.period !== '自定义') return '';
@@ -319,7 +367,7 @@ export const ClarificationCard = {
       <div class="clarify__group">
         <div class="clarify__label">重点关注</div>
         <div class="chip-group">
-          <button v-for="item in ['整体表现','趋势变化','城市差异','品类表现','下降原因']" :key="item"
+          <button v-for="item in ['整体表现','趋势变化','分组差异','异常变化','变化原因']" :key="item"
                   class="chip" :class="{ active: choices.focus === item }"
                   :disabled="busy" @click="choices.focus = item">{{ item }}</button>
         </div>
@@ -327,7 +375,14 @@ export const ClarificationCard = {
 
       <div v-if="expanded" class="clarify__group">
         <div class="clarify__label">统计范围</div>
-        <pre class="mono">{{ JSON.stringify(contract?.payload || {}, null, 2) }}</pre>
+        <dl class="definition">
+          <dt>数据范围</dt><dd>{{ contract?.payload?.coverage || '所选数据的授权范围' }}</dd>
+          <dt>分析维度</dt><dd>{{ (contract?.payload?.dimensions || ['整体']).join('、') }}</dd>
+          <dt>输出形式</dt><dd>{{ deliverables }}</dd>
+          <template v-if="contract?.payload?.confirmed_assumptions?.length">
+            <dt>已确认口径</dt><dd>{{ contract.payload.confirmed_assumptions.join('；') }}</dd>
+          </template>
+        </dl>
       </div>
 
       <div class="clarify__foot">

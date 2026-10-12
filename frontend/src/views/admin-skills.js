@@ -22,6 +22,7 @@ const SECTION_TABS = [
   { key: 'triggers', label: '触发与示例', icon: 'target' },
   { key: 'resources', label: '数据与知识', icon: 'database' },
   { key: 'io', label: '输入输出', icon: 'layers' },
+  { key: 'references', label: '方法参考', icon: 'fileText' },
   { key: 'advanced', label: '高级', icon: 'settings' },
 ];
 
@@ -61,6 +62,7 @@ export const SkillsView = {
       testing: false,
       testResult: null,
       testQuestion: '',
+      referenceName: '',
     };
   },
   computed: {
@@ -157,13 +159,31 @@ export const SkillsView = {
       return {
         id: '', name: '', description: '', category: '数据分析', usage: '',
         instruction: '', triggers: [], example_questions: [], allowed_tools: [],
-        inputs: [], outputs: [], notes: '', status: 'draft',
+        inputs: [], outputs: [], notes: '', status: 'draft', reference_documents: {},
       };
     },
     create() {
       this.closeEditor();
       this.editor = { ...this.blank(), isNew: true };
       this.section = 'basic';
+    },
+    addReference() {
+      const name = this.referenceName.trim();
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}\.md$/.test(name)) {
+        toast('请使用字母、数字、中划线或下划线命名，并以 .md 结尾', '文件名无效', 'error');
+        return;
+      }
+      if (Object.hasOwn(this.editor.reference_documents || {}, name)) {
+        toast('同名参考资料已存在', '无法添加', 'error');
+        return;
+      }
+      this.editor.reference_documents = { ...(this.editor.reference_documents || {}), [name]: '' };
+      this.referenceName = '';
+    },
+    removeReference(name) {
+      const next = { ...(this.editor.reference_documents || {}) };
+      delete next[name];
+      this.editor.reference_documents = next;
     },
     async open(skill) {
       const opening = ++this.opening;
@@ -501,6 +521,16 @@ export const SkillsView = {
             <p class="xs faint">留空表示不限定，技能会使用本次对话范围内的数据。填了 ID 则必须对这些数据有权限才能使用。</p>
             <label class="field"><span>可使用 MCP（服务 ID，每行一个）</span>
               <textarea v-model="mcpText" class="textarea" rows="3"></textarea></label>
+          </template>
+
+          <template v-else-if="section === 'references'">
+            <p class="small muted">专业方法与判断规则按章节读取，不会整份加入每一轮分析。使用二级标题组织章节；资料随技能版本、克隆和导入导出保存。</p>
+            <label v-for="(content, name) in editor.reference_documents || {}" :key="name" class="field">
+              <span>{{ name }} <button type="button" class="btn btn--sm" @click="removeReference(name)">移除</button></span>
+              <textarea v-model="editor.reference_documents[name]" class="textarea" rows="10" :aria-label="name + '参考内容'"></textarea>
+            </label>
+            <label class="field"><span>参考文件名</span><input v-model="referenceName" class="input" placeholder="methods.md" /></label>
+            <button type="button" class="btn btn--sm" @click="addReference">添加参考资料</button>
           </template>
 
           <template v-else-if="section === 'io'">

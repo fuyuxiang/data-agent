@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import html
 import math
 import re
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt as DocPt, RGBColor
+from docx.oxml.ns import qn
 from pptx import Presentation
 from pptx.util import Inches as PptInches, Pt
 from flask import current_app
@@ -65,11 +67,18 @@ def _record_artifact(
     if not run:
         raise FileNotFoundError("分析任务不存在")
     source_scope = run.get("source_scope") or []
+    labels = {"summary_docx": "结论摘要", "report_docx": "分析报告", "report_html": "网页报告",
+              "dashboard_png": "数据看板", "data_xlsx": "分析数据", "report_pptx": "汇报 PPT"}
+    subject = str(manifest.get("payload", {}).get("title") or "数据分析")
+    title = f"{subject} · {labels.get(kind, '成果文件')}"
+    safe_name = re.sub(r'[\x00-\x1f/\\<>:"|?*]', '_', subject).strip(' .')[:100] or "数据分析"
+    safe_name = safe_name.encode("utf-8")[:180].decode("utf-8", errors="ignore")
+    filename = f"{safe_name}_{labels.get(kind, '成果')}_v{manifest['version']}{path.suffix}"
     return database.put("artifacts", {
         "id": database.new_id("art"), "workspace_id": workspace_id,
         "run_id": run_id, "publication_id": publication["id"], "manifest_id": manifest["id"],
-        "manifest_version": manifest["version"], "title": path.stem, "kind": kind,
-        "filename": path.name, "path": str(path), "size": path.stat().st_size,
+        "manifest_version": manifest["version"], "title": title, "kind": kind,
+        "filename": filename, "path": str(path), "size": path.stat().st_size,
         "sha256": digest, "status": "ready", "immutable": True,
         "source_ids": list(source_scope),
     }, workspace_id=workspace_id)
@@ -78,6 +87,21 @@ def _record_artifact(
 def _doc_header(document: Document, manifest: dict, title: str) -> dict[str, Any]:
     payload = manifest["payload"]
     contract = payload["contract"]
+    title_style = document.styles["Title"]
+    title_style.font.color.rgb = RGBColor(0, 0, 0)
+    title_style.font.size = DocPt(24)
+    title_style.font.underline = False
+    if title_style.element.pPr is not None:
+        for border in list(title_style.element.pPr.findall(qn("w:pBdr"))):
+            title_style.element.pPr.remove(border)
+    document.styles["Normal"].font.size = DocPt(11)
+    document.styles["Normal"].paragraph_format.space_after = DocPt(6)
+    document.styles["Normal"].paragraph_format.line_spacing = 1.15
+    title_style.paragraph_format.space_after = DocPt(12)
+    for name, size, before, after in (("Heading 1", 17, 14, 6), ("Heading 2", 14, 10, 4)):
+        document.styles[name].font.size = DocPt(size)
+        document.styles[name].paragraph_format.space_before = DocPt(before)
+        document.styles[name].paragraph_format.space_after = DocPt(after)
     document.add_heading(title, 0)
     document.add_paragraph(f"成果版本：{manifest['version']}  生成时间：{manifest['created_at']}")
     document.add_heading("业务分析目标", level=1)
@@ -94,12 +118,116 @@ def _write_kpis(document: Document, kpis: list[dict[str, Any]]) -> None:
     if not kpis:
         return
     document.add_heading("关键指标", level=1)
-    table = document.add_table(rows=2, cols=min(4, len(kpis)))
+    table = document.add_table(rows=1, cols=3)
     table.style = "Table Grid"
-    for index, item in enumerate(kpis[:4]):
-        table.cell(0, index).text = str(item.get("label") or "不可用")
-        value = item.get("value")
-        table.cell(1, index).text = str(value) if value is not None else str(item.get("unavailable_reason") or "不可用")
+    for cell, label in zip(table.rows[0].cells, ("指标", "数值", "单位")):
+        cell.text = label
+    for item in kpis:
+        cells = table.add_row().cells
+        cells[0].text = str(item.get("label") or "不可用")
+        cells[1].text = str(_kpi_display(item))
+        cells[2].text = str(item.get("unit") or "未注明")
+
+
+def _kpi_display(item: dict) -> Any:
+    display = item.get("display")
+    if display is not None and display != "":
+        return display
+    return item["value"] if item.get("value") is not None else "缺失"
+
+
+def _report_sections(payload: dict) -> list[tuple[str, list[str]]]:
+    report = payload.get("report") or {}
+    sections = []
+    findings = report.get("findings") or report.get("attribution") or []
+    if findings:
+        lines = []
+        labels = {"fact": "事实", "inference": "推测", "risk": "风险"}
+        confidence = {"high": "高", "medium": "中", "low": "低"}
+        for item in findings:
+            if isinstance(item, str):
+                lines.append(item)
+                continue
+            line = f"[{labels.get(item.get('type'), '发现')}] {item.get('text', '')}"
+            if item.get("confidence") in confidence:
+                line += f"（置信度：{confidence[item['confidence']]}；{item.get('confidence_reason') or '依据待核对'}）"
+            lines.append(line)
+            for key, label in (("why", "解释"), ("impact", "影响")):
+                if item.get(key):
+                    lines.append(f"{label}：{item[key]}")
+        sections.append(("发现与解释", lines))
+    actions = []
+    for item in report.get("actions") or []:
+        context = "；".join(f"{label}：{item[key]}" for key, label in (("owner", "执行对象"), ("scope", "范围"))
+                            if item.get(key))
+        actions.append(str(item.get("text") or "") + (f"（{context}）" if context else ""))
+    for key, label in (("short_term", "短期"), ("medium_term", "中期"), ("long_term", "长期")):
+        actions.extend(f"{label}：{text}" for text in (report.get("recommendations") or {}).get(key) or [])
+    if actions:
+        sections.append(("行动建议", list(dict.fromkeys(actions))))
+    if payload.get("data_quality"):
+        quality = payload["data_quality"]
+        lines = [quality["summary"]]
+        for check in quality.get("checks") or []:
+            details = [f"{label}：{check[key]}" for key, label in
+                       (("rows", "记录数"), ("missing_cells", "缺失单元格"), ("duplicate_rows", "重复行"))
+                       if check.get(key) is not None]
+            lines.append(str(check.get("scope") or "探查范围") + "；" + "；".join(details)
+                         + (f"；{check['note']}" if check.get("note") else ""))
+        sections.append(("数据质量说明", lines))
+    for key, label in (("methods", "分析方法"), ("assumptions", "口径与假设")):
+        if report.get(key):
+            sections.append((label, [str(value) for value in report[key]]))
+    glossary = []
+    for item in payload.get("glossary") or []:
+        line = str(item.get("name") or "") + "：" + str(item.get("definition") or "定义待核对")
+        if item.get("unit"):
+            line += f"；单位：{item['unit']}"
+        if item.get("formula"):
+            line += f"；计算方式：{item['formula']}"
+        if item.get("notes"):
+            line += f"；说明：{item['notes']}"
+        if item.get("definition_status") != "governed":
+            line += "；探索口径，待核对"
+        glossary.append(line)
+    if glossary:
+        sections.append(("指标与字段说明", glossary))
+    return sections
+
+
+def _ppt_text(slides: Presentation, title: str, lines: list[str]) -> None:
+    """Paginate instead of silently clipping long conclusions or definitions."""
+    chunks = []
+    for line in lines:
+        for paragraph in str(line).splitlines():
+            chunks.extend(paragraph[start:start + 65] for start in range(0, len(paragraph), 65))
+    page_count = max(1, math.ceil(len(chunks) / 5))
+    page_size = max(1, math.ceil(len(chunks) / page_count))
+    for offset in range(0, len(chunks), page_size):
+        slide = slides.slides.add_slide(slides.slide_layouts[1])
+        slide.shapes.title.text = title + (f" · {offset // page_size + 1}" if page_count > 1 else "")
+        slide.placeholders[1].text = "\n".join(chunks[offset:offset + page_size])
+
+
+def _write_data_preview(document: Document, tables: list[dict]) -> None:
+    for item in tables:
+        columns = item.get("columns") or []
+        rows = item.get("rows") or []
+        if not columns or not rows:
+            continue
+        document.add_heading(str(item.get("title") or "数据明细"), level=2)
+        # Wide detail remains available in the complete Excel export.
+        shown_columns = columns[:8]
+        table = document.add_table(rows=1, cols=len(shown_columns))
+        table.style = "Table Grid"
+        for cell, column in zip(table.rows[0].cells, shown_columns):
+            cell.text = str(column)
+        for row in rows[:20]:
+            for cell, column in zip(table.add_row().cells, shown_columns):
+                value = row.get(column) if isinstance(row, dict) else row[columns.index(column)]
+                cell.text = "缺失" if value is None else str(value)
+        if len(columns) > 8 or int(item.get("total_rows") or 0) > 20:
+            document.add_paragraph("此处为部分行列预览，完整数据请使用同一成果的 Excel 导出。")
 
 
 def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
@@ -130,44 +258,91 @@ def _render_png(path: Path, charts: list[dict[str, Any]]) -> None:
     rows = math.ceil(count / columns)
     figure, axes = plt.subplots(rows, columns, figsize=(7 * columns, 4.5 * rows), constrained_layout=True, squeeze=False)
     if not shown:
-        axes[0][0].text(0.5, 0.5, "No applicable verified chart data", ha="center", va="center")
+        axes[0][0].text(0.5, 0.5, "当前没有适合绘图的数据", ha="center", va="center")
         axes[0][0].set_axis_off()
     for index, (axis, chart) in enumerate(zip(axes.flat, shown)):
         option = chart.get("option") or {}
         title = str(chart.get("title") or "Verified data")
-        axis.set_title(title)
+        axis.set_title(title, wrap=True, fontsize=12)
         series = option.get("series") or []
-        labels = (option.get("xAxis") or {}).get("data") or []
-        if chart.get("type") == "pie":
+        x_axis = option.get("xAxis") or {}
+        y_axis = option.get("yAxis") or {}
+        x_axis = x_axis[0] if isinstance(x_axis, list) and x_axis else x_axis
+        y_axis = y_axis[0] if isinstance(y_axis, list) and y_axis else y_axis
+        horizontal = isinstance(y_axis, dict) and y_axis.get("type") == "category"
+        labels = (y_axis if horizontal else x_axis).get("data") or []
+        if chart.get("type") in {"pie", "donut", "rose"}:
             data = series[0].get("data") or [] if series else []
             values = [float(item["value"]) for item in data if item.get("value") is not None]
             names = [str(item["name"])[:20] for item in data if item.get("value") is not None]
             if values and sum(abs(value) for value in values) > 0 and all(value >= 0 for value in values):
                 axis.pie(values, labels=names, autopct="%1.1f%%")
             else:
-                axis.text(0.5, 0.5, "Pie requires non-negative values", ha="center", va="center")
+                axis.text(0.5, 0.5, "构成图需要非负数值", ha="center", va="center")
+            continue
+        if chart.get("type") in {"scatter", "bubble", "connected_scatter"}:
+            for current in series:
+                points = [value.get("value") if isinstance(value, dict) else value
+                          for value in current.get("data") or []]
+                points = [value for value in points if isinstance(value, (tuple, list)) and len(value) >= 2
+                          and all(isinstance(number, (int, float)) and math.isfinite(number) for number in value[:2])]
+                if points:
+                    axis.scatter([value[0] for value in points], [value[1] for value in points], label=current.get("name"))
+            axis.grid(alpha=0.2)
+            continue
+        supported = {"line", "area", "sparkline", "bar", "grouped_bar", "stacked_bar", "diverging_bar", "bar_line"}
+        if chart.get("type") not in supported or not labels or not series:
+            axis.text(0.5, 0.5, "此图形请在分析页面交互查看\n相关数据保留在明细中", ha="center", va="center")
+            axis.set_axis_off()
+            continue
+        values_by_series = []
+        for current in series:
+            values = [value.get("value") if isinstance(value, dict) else value for value in current.get("data") or []]
+            if len(values) != len(labels) or any(value is not None and not isinstance(value, (int, float)) for value in values):
+                continue
+            values_by_series.append((current, [float(value) if value is not None else math.nan for value in values]))
+        if not values_by_series:
+            axis.text(0.5, 0.5, "此图形请在分析页面查看", ha="center", va="center")
+            axis.set_axis_off()
             continue
         positions = list(range(len(labels)))
-        if chart.get("type") == "line" and series:
-            axis.plot(positions, series[0].get("data") or [], color="#2563eb", marker="o")
-        elif chart.get("type") == "bar_line" and series:
-            axis.bar(positions, series[0].get("data") or [], color="#2563eb")
+        if chart.get("type") in {"line", "area", "sparkline"}:
+            for current, values in values_by_series:
+                axis.plot(positions, values, marker="o", label=current.get("name"))
+        elif chart.get("type") == "bar_line" and len(values_by_series) >= 2:
+            axis.bar(positions, values_by_series[0][1], color="#4f6bff")
             twin = axis.twinx()
-            twin.plot(positions, series[1].get("data") or [], color="#f97316", marker="o")
-        elif chart.get("type") == "stacked_bar" and series:
+            twin.plot(positions, values_by_series[1][1], color="#f97316", marker="o")
+        elif chart.get("type") == "stacked_bar":
             bottom = [0.0] * len(positions)
-            for color, current in zip(("#2563eb", "#14b8a6"), series):
-                values = [float(value or 0) for value in current.get("data") or []]
-                axis.bar(positions, values, bottom=bottom, color=color, label=current.get("name"))
+            for current, values in values_by_series:
+                if horizontal:
+                    axis.barh(positions, values, left=bottom, label=current.get("name"))
+                else:
+                    axis.bar(positions, values, bottom=bottom, label=current.get("name"))
                 bottom = [left + right for left, right in zip(bottom, values)]
+        else:
+            width = 0.8 / len(values_by_series)
+            for index, (current, values) in enumerate(values_by_series):
+                shifted = [value - 0.4 + width / 2 + index * width for value in positions]
+                if horizontal:
+                    axis.barh(shifted, values, height=width, label=current.get("name"))
+                else:
+                    axis.bar(shifted, values, width=width, label=current.get("name"))
+        if len(values_by_series) > 1:
             axis.legend()
-        elif series:
-            axis.bar(positions, series[0].get("data") or [], color="#2563eb")
-        axis.set_xticks(positions, [str(value)[:16] for value in labels], rotation=30, ha="right")
+        if horizontal:
+            axis.set_yticks(positions, [str(value)[:24] for value in labels])
+        else:
+            step = max(1, math.ceil(len(positions) / 10))
+            shown_ticks = list(range(0, len(positions), step))
+            if positions and positions[-1] not in shown_ticks:
+                shown_ticks.append(positions[-1])
+            axis.set_xticks(shown_ticks, [str(labels[index])[:24] for index in shown_ticks], rotation=30, ha="right")
         axis.grid(axis="y", alpha=0.2)
     for axis in list(axes.flat)[len(shown):]:
         axis.set_axis_off()
-    figure.suptitle("Verified analysis dashboard", fontsize=16)
+    figure.suptitle("分析数据看板", fontsize=16)
     figure.savefig(path, dpi=160, facecolor="white")
     plt.close(figure)
 
@@ -188,7 +363,13 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
     payload = manifest["payload"]
     if kind == "report_html":
         path = export_dir / f"{base}_report.html"
-        path.write_text(_render_html(payload, manifest), encoding="utf-8")
+        images = []
+        available = [chart for chart in payload.get("charts") or [] if chart.get("available")]
+        for offset in range(0, len(available), 4):
+            image_path = export_dir / f"{base}_html_charts_{offset // 4}.png"
+            _render_png(image_path, available[offset:offset + 4])
+            images.append(base64.b64encode(image_path.read_bytes()).decode("ascii"))
+        path.write_text(_render_html(payload, manifest, chart_images=images), encoding="utf-8")
     elif kind == "dashboard_png":
         path = export_dir / f"{base}_dashboard.png"
         _render_png(path, payload.get("charts") or [])
@@ -196,93 +377,110 @@ def generate_artifact(database: Database, run_id: str, workspace_id: str, kind: 
         import pandas as pd
 
         path = export_dir / f"{base}_data.xlsx"
-        table = next((item for item in payload.get("tables") or [] if item.get("result_id")), None)
-        if not table or table.get("completeness") != "complete":
+        tables = [item for item in payload.get("tables") or [] if item.get("result_id")]
+        if not tables or any(item.get("completeness") != "complete" for item in tables):
             raise ValueError("已发布成果缺少完整的可导出明细")
-        result = database.get("query_results", str(table["result_id"]), workspace_id=workspace_id)
-        if not result or result.get("completeness") != "complete":
-            raise ValueError("成果明细不可用")
-        result_path = Path(str(result.get("path") or "")).resolve()
-        if export_dir.resolve() not in result_path.parents or not result_path.is_file() or result_path.is_symlink():
-            raise PermissionError("成果明细路径无效")
-        if int(result.get("rows") or 0) > 1_048_575:
-            raise ValueError("明细行数超过 Excel 上限")
-        frame = read_result_frame(result)
-        # Uploaded/source text is untrusted. Prevent spreadsheet clients from
-        # interpreting source headers or data cells as formulas.
-        frame.columns = [_safe_excel_text(str(column)) for column in frame.columns]
-        for column in frame.select_dtypes(include=["object", "string"]).columns:
-            frame[column] = frame[column].map(_safe_excel_text)
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             pd.DataFrame([
                 {"项目": "成果版本", "内容": str(manifest["version"])},
-                {"项目": "结论", "内容": str(payload.get("summary") or "")},
+                {"项目": "结论", "内容": _safe_excel_text(str(payload.get("summary") or ""))},
                 {"项目": "证据引用", "内容": ", ".join(payload.get("evidence_refs") or [])},
             ]).to_excel(writer, sheet_name="成果说明", index=False)
-            frame.to_excel(writer, sheet_name="验证数据", index=False)
+            for index, table in enumerate(tables):
+                result = database.get("query_results", str(table["result_id"]), workspace_id=workspace_id)
+                if not result or result.get("completeness") != "complete":
+                    raise ValueError("成果明细不可用")
+                if int(result.get("rows") or 0) > 1_048_575:
+                    raise ValueError("明细行数超过 Excel 上限")
+                frame = read_result_frame(result)
+                frame.columns = [_safe_excel_text(str(column)) for column in frame.columns]
+                for column in frame.select_dtypes(include=["object", "string"]).columns:
+                    frame[column] = frame[column].map(_safe_excel_text)
+                frame.to_excel(writer, sheet_name="验证数据" if index == 0 else f"验证数据 {index + 1}", index=False)
+            for title, lines in _report_sections(payload):
+                pd.DataFrame({"说明": [_safe_excel_text(line) for line in lines]}).to_excel(
+                    writer, sheet_name=title, index=False,
+                )
+            for sheet in writer.book.worksheets:
+                sheet.freeze_panes = "A2"
+                sheet.auto_filter.ref = sheet.dimensions
     elif kind == "report_pptx":
         path = export_dir / f"{base}_report.pptx"
         slides = Presentation()
         cover = slides.slides.add_slide(slides.slide_layouts[0])
-        cover.shapes.title.text = "数据分析报告"
+        cover.shapes.title.text = str(payload.get("title") or "数据分析报告")
         cover.placeholders[1].text = f"成果版本 {manifest['version']} · {manifest['created_at']}"
-        summary = slides.slides.add_slide(slides.slide_layouts[1])
-        summary.shapes.title.text = "经验证结论"
-        summary.placeholders[1].text = str(payload.get("summary") or "")[:3000]
-        png_path = export_dir / f"{base}_dashboard_embed.png"
-        _render_png(png_path, payload.get("charts") or [])
-        chart_slide = slides.slides.add_slide(slides.slide_layouts[5])
-        chart_slide.shapes.title.text = "数据看板"
-        chart_slide.shapes.add_picture(str(png_path), PptInches(0.7), PptInches(1.2), width=PptInches(8.5))
-        evidence = slides.slides.add_slide(slides.slide_layouts[1])
-        evidence.shapes.title.text = "证据与限制"
+        summary_lines = [str(payload.get("summary") or "")]
+        if payload.get("kpis"):
+            summary_lines.extend([
+                f"{item.get('label')}：{_kpi_display(item)} {item.get('unit') or ''}"
+                for item in payload["kpis"]
+            ])
+        _ppt_text(slides, "核心结论与指标", summary_lines)
+        available = [chart for chart in payload.get("charts") or [] if chart.get("available")]
+        for offset, chart in enumerate(available):
+            png_path = export_dir / f"{base}_ppt_charts_{offset}.png"
+            _render_png(png_path, [chart])
+            chart_slide = slides.slides.add_slide(slides.slide_layouts[5])
+            chart_slide.shapes.title.text = "数据看板"
+            picture = chart_slide.shapes.add_picture(str(png_path), PptInches(0.5), PptInches(1.4), width=PptInches(9))
+            if picture.height > PptInches(5.5):
+                scale = PptInches(5.5) / picture.height
+                picture.width = int(picture.width * scale)
+                picture.height = PptInches(5.5)
+            picture.left = int((slides.slide_width - picture.width) / 2)
+        grouped = {"发现与行动": [], "范围与分析说明": [], "指标口径": []}
+        for title, lines in _report_sections(payload):
+            group = ("发现与行动" if title in {"发现与解释", "行动建议"}
+                     else "指标口径" if title == "指标与字段说明" else "范围与分析说明")
+            grouped[group].extend(f"{title}：{line}" if group != "指标口径" else line for line in lines)
+        for title, lines in grouped.items():
+            _ppt_text(slides, title, lines)
         lines = [
-            "数据引用：" + ", ".join(payload.get("evidence_refs") or []),
+            "相关数据：" + "、".join(str(table.get("title") or "分析明细") for table in payload.get("tables") or []),
+            "完整查询证据可在分析页面查看。",
             *(str(item) for item in payload.get("limitations") or []),
         ]
-        evidence.placeholders[1].text = "\n".join(lines)[:3000]
+        _ppt_text(slides, "证据与限制", lines)
         for slide in slides.slides:
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     for paragraph in shape.text_frame.paragraphs:
                         for run in paragraph.runs:
-                            run.font.size = Pt(20) if shape == slide.shapes.title else Pt(14)
+                            run.font.size = Pt(26) if shape == slide.shapes.title else Pt(18)
+                            run.font.name = "Microsoft YaHei"
         slides.save(path)
     else:
         path = export_dir / f"{base}_{'summary' if kind == 'summary_docx' else 'report'}.docx"
         document = Document()
         current = _doc_header(
             document, manifest,
-            "极简分析结论" if kind == "summary_docx" else "完整数据分析报告",
+            "分析结论摘要" if kind == "summary_docx" else str(payload.get("title") or "数据分析报告"),
         )
         document.add_heading("经验证结论", level=1)
         document.add_paragraph(str(current.get("summary") or ""))
         _write_kpis(document, current.get("kpis") or [])
         claim_details = current.get("claim_details") or []
-        if claim_details:
+        if claim_details and not (current.get("report") or {}).get("findings"):
             document.add_heading("结论依据", level=1)
             for claim in claim_details:
                 document.add_paragraph(str(claim.get("text") or ""), style="List Bullet")
         if kind == "report_docx":
-            png_path = export_dir / f"{base}_dashboard_embed.png"
-            _render_png(png_path, current.get("charts") or [])
             document.add_heading("数据看板", level=1)
-            if any(chart.get("available") for chart in current.get("charts") or []):
-                document.add_picture(str(png_path), width=Inches(6.4))
+            available = [chart for chart in current.get("charts") or [] if chart.get("available")]
+            if available:
+                for offset, chart in enumerate(available):
+                    png_path = export_dir / f"{base}_word_charts_{offset}.png"
+                    _render_png(png_path, [chart])
+                    document.add_picture(str(png_path), width=Inches(6))
             else:
                 document.add_paragraph("当前已验证数据没有适合绘图的维度和数值列。")
-            report = current.get("report") or {}
-            document.add_heading("数据结果与归因边界", level=1)
-            attribution = report.get("attribution") or []
-            for item in attribution:
-                document.add_paragraph(f"[{item.get('type', 'fact')}] {item.get('text', '')}")
-            if not attribution:
-                document.add_paragraph("尚无可核验的归因结论。")
-            document.add_heading("建议", level=1)
-            recommendations = report.get("recommendations") or {}
-            for key, label in (("short_term", "短期"), ("medium_term", "中期"), ("long_term", "长期")):
-                values = recommendations.get(key) or []
-                document.add_paragraph(f"{label}：" + ("；".join(str(value) for value in values) if values else "尚无经证据支持的建议"))
+            for title, lines in _report_sections(current):
+                document.add_heading(title, level=1)
+                for line in lines:
+                    document.add_paragraph(line, style="List Bullet")
+            document.add_heading("数据明细", level=1)
+            _write_data_preview(document, current.get("tables") or [])
         document.add_heading("限制与待核对事项", level=1)
         for value in current.get("limitations") or ["无"]:
             document.add_paragraph(str(value), style="List Bullet")
@@ -299,7 +497,7 @@ def _escape(value: object) -> str:
     return html.escape(str(value if value is not None else ""), quote=True)
 
 
-def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
+def _render_html(payload: dict[str, Any], manifest: dict[str, Any], *, chart_images: list[str] | None = None) -> str:
     current = payload.get("current") or payload
     parts: list[str] = [
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
@@ -311,6 +509,9 @@ def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
         "main{max-width:860px;margin:0 auto;background:#fff;border:1px solid #E5E9F0;border-radius:12px;padding:40px}",
         "h1{font-size:26px;margin:0 0 8px}h2{font-size:18px;margin:32px 0 12px}",
         "h3{font-size:15px;margin:20px 0 8px}",
+        "p,li,td,th{overflow-wrap:anywhere}img{max-width:100%;height:auto}",
+        ".table-wrap{overflow-x:auto}summary{cursor:pointer}",
+        "@media(max-width:600px){body{padding:12px}main{padding:20px}}",
         ".meta{color:#5F697B;font-size:13px;margin-bottom:24px}",
         ".kpis{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}",
         ".kpi{flex:1 1 180px;border:1px solid #E5E9F0;border-radius:10px;padding:14px 16px}",
@@ -336,7 +537,8 @@ def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
     if kpis:
         cells = "".join(
             f"<div class=\"kpi\"><span>{_escape(item.get('label') or item.get('name') or '指标')}</span>"
-            f"<b>{_escape(item.get('display') or item.get('value'))}</b></div>"
+            f"<b>{_escape(_kpi_display(item))}</b>"
+            f"<span>{_escape(item.get('unit') or '')}</span></div>"
             for item in kpis
         )
         parts.append(f"<h2>核心指标</h2><div class=\"kpis\">{cells}</div>")
@@ -344,6 +546,11 @@ def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
     summary = current.get("summary") or payload.get("summary")
     if summary:
         parts.append(f"<h2>结论</h2><p>{_escape(summary)}</p>")
+    for image_data in chart_images or []:
+        parts.append(f'<figure><img alt="分析数据看板" src="data:image/png;base64,{image_data}"></figure>')
+    for title, lines in _report_sections(payload):
+        parts.append(f"<h2>{_escape(title)}</h2><ul>"
+                     + "".join(f"<li>{_escape(line)}</li>" for line in lines) + "</ul>")
 
     for table in payload.get("tables") or []:
         if not table.get("columns") or not table.get("rows"):
@@ -351,7 +558,7 @@ def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
         header = "".join(f"<th>{_escape(column)}</th>" for column in table["columns"])
         body = "".join(
             "<tr>" + "".join(
-                f"<td>{_escape(cell)}</td>" for cell in (
+                f"<td>{_escape('缺失' if cell is None else cell)}</td>" for cell in (
                     row.get(column) if isinstance(row, dict) else row[index]
                     for index, column in enumerate(table["columns"])
                 )
@@ -360,8 +567,10 @@ def _render_html(payload: dict[str, Any], manifest: dict[str, Any]) -> str:
         )
         parts.append(
             f"<h3>{_escape(table.get('title') or '数据明细')}</h3>"
-            f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+            f'<div class="table-wrap"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
         )
+        if int(table.get("total_rows") or 0) > len(table["rows"]):
+            parts.append('<p class="note">此处为部分记录预览，完整数据请使用同一成果的 Excel 导出。</p>')
 
     limitations = current.get("limitations") or payload.get("limitations") or []
     if limitations:
