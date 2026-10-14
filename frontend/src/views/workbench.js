@@ -41,7 +41,7 @@ export const WorkbenchView = {
   computed: {
     greeting() {
       const hour = new Date().getHours();
-      if (hour < 6) return '夜深了';
+      if (hour < 6) return '欢迎使用';
       if (hour < 12) return '早上好';
       if (hour < 14) return '中午好';
       if (hour < 18) return '下午好';
@@ -127,7 +127,7 @@ export const WorkbenchView = {
       this.seeding = true;
       try {
         await loadDemo();
-        toast('演示数据已载入，可以直接提问', '完成');
+        toast('演示数据已载入，可选择示例问题；自主分析需有可用模型。', '完成');
         this.demoOpen = false;
       } catch (error) {
         toast(error.message, '载入失败', 'error');
@@ -141,8 +141,8 @@ export const WorkbenchView = {
       <div class="workbench__inner">
         <div class="workbench__hello">
           <div class="workbench__mark"><img src="/src/assets/logo-shuqing.png" alt="" /></div>
-          <h1 class="workbench__title">{{ greeting }}，今天想分析什么？</h1>
-          <p class="muted" style="margin-top:6px">直接用业务语言提问，系统会自动选择合适的能力并给出可核验的结论。</p>
+          <h1 class="workbench__title">{{ greeting }}，开始业务数据分析</h1>
+          <p class="muted" style="margin-top:6px">用业务语言查询数据、开展分析，并查看结果依据。</p>
         </div>
 
         <Composer ref="composer" :disabled="seeding || submitting || !canAnalyze" @submit="submit" />
@@ -159,14 +159,14 @@ export const WorkbenchView = {
           <Icon name="database" :size="22" class="muted" />
           <div class="grow">
             <b>还没有可分析的数据</b>
-            <p class="small muted">接入自己的数据源，或者先载入一套演示数据体验完整链路。</p>
+            <p class="small muted">请联系管理员接入业务数据，或载入演示数据了解查询与分析流程。</p>
           </div>
           <button class="btn btn--sm" @click="navigate('admin/data')">接入数据</button>
           <button class="btn btn--primary btn--sm" @click="demoOpen = true">使用演示数据</button>
         </div>
 
         <div v-else-if="questions.length" class="workbench__suggest">
-          <div class="suggest-title"><Icon name="sparkle" :size="15" />试试这些问题</div>
+          <div class="suggest-title"><Icon name="sparkle" :size="15" />推荐问题</div>
           <div class="suggest-list">
             <button v-for="item in questions" :key="item.text" class="suggest" @click="suggest(item.text)">
               <Icon :name="item.icon" :size="15" />
@@ -190,7 +190,7 @@ export const WorkbenchView = {
       <template #footer>
         <button class="btn" @click="demoOpen = false">取消</button>
         <button class="btn btn--primary" :disabled="seeding" @click="seed">
-          {{ seeding ? '正在载入…' : '载入并开始' }}
+          {{ seeding ? '正在载入…' : '载入演示数据' }}
         </button>
       </template>
     </Modal>`,

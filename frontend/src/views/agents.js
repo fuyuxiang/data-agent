@@ -64,7 +64,7 @@ export const AgentsView = {
         <header class="page-head">
           <div class="grow">
             <h1 class="page-head__title">智能体</h1>
-            <p class="page-head__desc">选择一个智能体开始提问。它会按自己的角色说明、数据范围和技能组合来回答。</p>
+            <p class="page-head__desc">选择适合业务场景的智能体，在授权数据范围内开展查询与分析。</p>
           </div>
         </header>
 
@@ -78,7 +78,7 @@ export const AgentsView = {
         </div>
 
         <EmptyState v-if="!agents.length" icon="robot" :title="query ? '没有匹配的智能体' : '该分组暂无智能体'"
-                    :text="query ? '尝试其他关键词，或切换分组查看。' : '管理员可以在「管理后台 → 智能体」里创建并发布智能体。'" />
+                    :text="query ? '尝试其他关键词，或切换分组查看。' : '请联系管理员在「管理后台 → 智能体」创建并发布。'" />
 
         <div v-else class="grid grid--2">
           <article v-for="agent in agents" :key="agent.id" class="card card--interactive agent-card">

@@ -12,10 +12,10 @@ import { actions, state, toast } from '../store.js';
 import { navigate } from '../router.js';
 
 const TOOL_RISK = {
-  read: { label: '只读', tone: 'badge--success', hint: '可以自动执行' },
-  write: { label: '写入', tone: 'badge--warning', hint: '执行前检查权限' },
-  external: { label: '外部操作', tone: 'badge--warning', hint: '默认要求确认' },
-  dangerous: { label: '危险操作', tone: 'badge--danger', hint: '必须明确确认' },
+  read: { label: '只读', tone: 'badge--success', hint: '仅限已授权工具' },
+  write: { label: '写入', tone: 'badge--warning', hint: '确认数据变更范围' },
+  external: { label: '外部操作', tone: 'badge--warning', hint: '确认接收对象与内容' },
+  dangerous: { label: '危险操作', tone: 'badge--danger', hint: '操作前须明确确认' },
 };
 
 function riskOf(tool) {
@@ -79,7 +79,7 @@ export const ModelsView = {
     async save() {
       if (!this.editor?.name || !this.editor?.model || this.saving) {
         if (this.editor && (!this.editor.name || !this.editor.model)) {
-          toast('请填写名称和模型标识', '信息未填完整', 'error');
+          toast('请填写名称和模型标识', '信息不完整', 'error');
         }
         return;
       }
@@ -158,7 +158,7 @@ export const ModelsView = {
         <div class="grow">
           <h1 class="page-head__title">模型</h1>
           <p class="page-head__desc">
-            Agent 的推理能力来自这里。凭据加密存储，智能体可以指定主模型，缺省时使用工作空间默认模型。
+            配置智能体使用的模型服务并测试连接。凭据加密存储，未指定模型时使用工作空间默认配置。
           </p>
         </div>
         <div class="page-head__actions">
@@ -174,7 +174,7 @@ export const ModelsView = {
 
       <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>模型服务加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
-      <EmptyState v-else-if="!providers.length" compact icon="cpu" title="还没有模型服务" text="添加模型服务后，智能体才能进行分析。" />
+      <EmptyState v-else-if="!providers.length" compact icon="cpu" title="还没有模型服务" text="请联系工作空间所有者添加模型并测试连接，以启用自主分析。" />
       <div v-else class="grid grid--2">
         <article v-for="item in providers" :key="item.id" class="card">
           <div class="card__head">
@@ -310,7 +310,7 @@ export const McpView = {
     async save() {
       if (this.saving || !this.editor) return;
       if (!this.editor.name || (this.editor.transport === 'stdio' ? !this.editor.command?.trim() : !/^https?:\/\//.test(this.editor.url))) {
-        toast(this.editor.transport === 'stdio' ? '请填写名称和执行命令' : '请填写名称和有效的 HTTP / HTTPS 服务地址', '信息未填完整', 'error');
+        toast(this.editor.transport === 'stdio' ? '请填写名称和执行命令' : '请填写名称和有效的 HTTP / HTTPS 服务地址', '信息不完整', 'error');
         return;
       }
       this.saving = true;
@@ -387,8 +387,7 @@ export const McpView = {
         <div class="grow">
           <h1 class="page-head__title">MCP</h1>
           <p class="page-head__desc">
-            MCP 是外部系统与工具的连接能力，比如查询 CRM、读取飞书文档、调用业务 API。
-            它和「技能」是两件事：技能是完成一项任务的方法，MCP 是这条方法能触达的外部世界。
+            连接企业系统提供的外部工具，查看服务与工具信息；调用仍受授权范围限制。
           </p>
         </div>
         <div class="page-head__actions">
@@ -398,9 +397,9 @@ export const McpView = {
       </header>
 
       <div class="card" style="margin-bottom:16px">
-        <h2 class="card__title" style="margin-bottom:8px">风险等级</h2>
+        <h2 class="card__title" style="margin-bottom:8px">工具风险提示</h2>
         <p class="small muted" style="margin-bottom:10px">
-          Agent 可以自动执行只读工具；写入类要检查权限；外部操作默认要求确认；危险操作必须明确确认。
+          风险标签根据工具名称与描述推断，调用受授权范围限制。正式分析仅开放已授权的只读工具；写入、对外发送或删除前须确认操作影响。
         </p>
         <div class="tag-row">
           <span v-for="(info, key) in riskLevels" :key="key" class="badge" :class="info.tone">
@@ -416,7 +415,7 @@ export const McpView = {
       <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>MCP 服务加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <EmptyState v-else-if="!servers.length" icon="plug" title="还没有连接 MCP 服务"
-                  text="连接后，智能体可以通过 MCP 读取外部系统的数据——但仍然受权限与确认策略约束。" />
+                  text="添加服务并测试连接；用于正式分析的只读工具还需由工作空间所有者授权。" />
 
       <div v-else class="grid grid--2">
         <article v-for="item in servers" :key="item.id" class="card">
@@ -476,7 +475,7 @@ export const McpView = {
 
     <Modal :open="!!active" :title="(active?.name || '') + ' · 工具'" size="large" @close="closeTools">
       <p class="small muted" style="margin-bottom:12px">
-        MCP 工具是外部系统提供的能力，不是技能。技能可以调用它们，但两者不是同一层概念。
+        查看服务提供的工具和用途，核对调用范围与操作风险。
       </p>
       <div class="stack" style="display:flex;flex-direction:column;gap:8px">
         <p v-if="toolsLoading" class="small muted" role="status">正在读取工具清单…</p>
@@ -509,7 +508,7 @@ const CHANNELS = [
   { key: 'dingtalk', type: 'dingtalk', name: '钉钉', icon: 'cable', note: '通过群机器人 Webhook 推送' },
   { key: 'wecom', type: 'webhook', name: '企业微信', icon: 'cable', note: '通过适配网关接收通用 JSON，再转发到群机器人' },
   { key: 'teams', type: 'webhook', name: 'Teams', icon: 'cable', note: '通过适配网关接收通用 JSON，再转发到 Teams' },
-  { key: 'api', name: '开放 API', icon: 'cable', note: '供外部系统以集成令牌调用分析结果' },
+  { key: 'api', name: '开放 API', icon: 'cable', note: '使用工作空间集成令牌接收入站事件' },
   { key: 'email', type: 'email', name: '邮件', icon: 'cable', note: '通过 SMTP 把报告与成果发送给收件人' },
 ];
 
@@ -574,7 +573,7 @@ export const IntegrationsView = {
       if (!this.editor || this.editor.id || this.saving) return;
       const email = this.editor.type === 'email';
       if (!this.editor.name || (email ? !this.editor.host || !this.editor.recipient : !/^https?:\/\//.test(this.editor.url))) {
-        toast(email ? '请填写名称、SMTP 主机和收件人' : '请填写名称和有效的 HTTP / HTTPS Webhook 地址', '信息未填完整', 'error');
+        toast(email ? '请填写名称、SMTP 主机和收件人' : '请填写名称和有效的 HTTP / HTTPS Webhook 地址', '信息不完整', 'error');
         return;
       }
       this.saving = true;
@@ -625,7 +624,7 @@ export const IntegrationsView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">集成</h1>
-          <p class="page-head__desc">把数擎的分析结果送到用户已经在用的地方。没有配置的一律显示"未配置"，不做假开关。</p>
+          <p class="page-head__desc">管理结果通知渠道与开放 API 接入，查看连接配置和测试状态。</p>
         </div>
         <div class="page-head__actions"><button class="btn btn--sm" @click="navigate('admin/trash', { collection: 'connectors' })"><Icon name="trash" :size="14" />回收站</button></div>
       </header>
@@ -666,7 +665,7 @@ export const IntegrationsView = {
     </div>
 
     <Modal :open="apiOpen" title="开放 API 接入" size="small" @close="apiOpen = false">
-      <p class="small">开放 API 使用工作空间集成令牌鉴权，不需要创建通知连接器。令牌由工作空间所有者通过管理 API 生成；当前用户管理界面不提供生成入口。</p>
+      <p class="small">开放 API 可接收入站事件，使用工作空间集成令牌鉴权。令牌由工作空间所有者通过管理 API 生成，当前页面提供接入说明。</p>
       <p class="xs muted" style="margin-top:12px">请联系工作空间所有者获取接口地址与令牌。集成令牌应妥善保管。</p>
       <template #footer><button class="btn" @click="apiOpen = false">关闭</button></template>
     </Modal>
@@ -679,7 +678,7 @@ export const IntegrationsView = {
     <Modal :open="!!editor" :title="(editor?.name || '') + ' 集成'" @close="!saving && (editor = null)">
       <div v-if="editor?.id" class="stack">
         <dl class="definition"><dt>名称</dt><dd>{{ editor.name }}</dd><dt>连接类型</dt><dd>{{ editor.type }}</dd><dt>状态</dt><dd><Status :status="editor.status || 'configured'" /></dd><dt>凭据</dt><dd>{{ editor.configured ? '已加密保存' : '未配置' }}</dd></dl>
-        <p class="small muted">服务端不支持更新已保存的连接凭据。如需更换地址或凭据，请先移除该连接，再重新接入。</p>
+        <p class="small muted">更换地址或凭据时，请先移除当前连接，再重新接入。</p>
       </div>
       <div v-else-if="editor" class="stack">
         <label class="field"><span>名称<em> *</em></span>

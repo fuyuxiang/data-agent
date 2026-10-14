@@ -14,7 +14,7 @@ import { state, toast } from '../store.js';
 const ACCEPTED_FILES = new Set(['docx', 'xlsx', 'pdf', 'md', 'txt']);
 
 const CAPABILITIES = [
-  { label: '问数据', icon: 'search' },
+  { label: '智能问数', icon: 'search' },
   { label: '数据分析', icon: 'chart2' },
   { label: '深度研究', icon: 'searchDeep' },
   { label: '预测分析', icon: 'trendUp' },
@@ -26,7 +26,7 @@ export const Composer = {
   name: 'Composer',
   components: { Drawer, Icon },
   props: {
-    placeholder: { default: '问数据、做分析、生成报告…' },
+    placeholder: { default: '描述业务问题，例如：本月销售额及变化趋势' },
     disabled: Boolean,
     submitLabel: { default: '发送' },
   },
@@ -229,7 +229,7 @@ export const Composer = {
       const accepted = files.filter(file => ACCEPTED_FILES.has(file.name.split('.').pop().toLowerCase())
         && file.size <= 50 * 1024 * 1024);
       if (accepted.length !== files.length) {
-        toast('仅支持不超过 50 MB 的 PDF、Word、Excel 和文本文件', '附件未添加', 'error');
+        toast('仅支持 PDF、DOCX、XLSX、MD、TXT 文件，单个文件不超过 50 MB。', '附件未添加', 'error');
       }
       if (this.pendingFiles.length + accepted.length > 20) {
         toast('每次最多添加 20 个文件', '附件未添加', 'error');
@@ -329,7 +329,7 @@ export const Composer = {
           <Icon name="database" :size="15" />
           <span class="truncate" style="max-width:160px">{{ scopeLabel }}</span>
         </button>
-        <label class="composer__scope" title="附加文件（PDF、Word、Excel、文本）">
+        <label class="composer__scope" title="添加附件（PDF、DOCX、XLSX、MD、TXT）">
           <Icon name="upload" :size="15" />
           <input type="file" multiple hidden :disabled="disabled" accept=".docx,.xlsx,.pdf,.md,.txt" @change="pickFiles" />
         </label>
@@ -342,7 +342,7 @@ export const Composer = {
         <span v-if="resolving" class="composer__scope xs faint">识别中…</span>
         <span v-else-if="resolution && resolution.selected && resolution.selected.length" class="composer__scope composer__resolution xs">
           <Icon name="layers" :size="13" />
-          将使用 {{ resolution.selected.map(item => item.name).join('、') }}
+          匹配技能：{{ resolution.selected.map(item => item.name).join('、') }}
         </span>
         <button class="composer__send" :disabled="!canSend" :aria-label="submitLabel" @click="send">
           <Icon name="send" :size="16" />
@@ -350,7 +350,7 @@ export const Composer = {
       </div>
 
       <div v-if="resolution && resolution.selected && resolution.selected.length" class="composer__hint">
-        默认自动选择技能；需要固定能力时用 <span class="mono">@技能名</span> 显式指定。
+        可输入 <span class="mono">@技能名</span> 指定分析能力。
       </div>
 
       <Drawer :open="scopeOpen" title="选择数据范围" subtitle="本次分析只能使用你有权访问的数据"
@@ -365,11 +365,11 @@ export const Composer = {
           </span>
         </label>
         <p v-if="!availableSources.length" class="muted small">
-          {{ agentId ? '当前智能体没有可用的数据源。请先在管理后台配置并发布数据源。' : '还没有可用数据源。可以先到「管理后台 → 数据」接入，或在工作台载入演示数据。' }}
+          {{ agentId ? '当前智能体没有可用数据。请联系管理员检查数据源和智能体配置，并重新发布智能体。' : '暂无可用数据源。请联系管理员接入业务数据，或在工作台载入演示数据。' }}
         </p>
       </Drawer>
 
-      <Drawer :open="agentOpen" title="选择智能体" subtitle="固定智能体后，本次提问会使用它已配置的能力和数据范围"
+      <Drawer :open="agentOpen" title="选择智能体" subtitle="选择业务场景对应的智能体，分析范围仍受你的数据权限限制"
               @close="agentOpen = false">
         <button type="button" class="command__item" :class="{ 'is-selected': !agentId }"
                 @click="selectAgent('')">
@@ -384,7 +384,7 @@ export const Composer = {
           <span class="grow"><b>{{ item.name }}</b><small>{{ item.source_scope_mode === 'authorized' ? '使用你当前有权分析的数据' : item.description || '已发布智能体' }}</small></span>
           <Icon v-if="item.id === agentId" name="check" :size="15" />
         </button>
-        <p v-if="!availableAgents.length" class="muted small">当前没有已发布的智能体。</p>
+        <p v-if="!availableAgents.length" class="muted small">暂无已发布智能体，请联系管理员创建并发布。</p>
       </Drawer>
     </div>
 

@@ -14,7 +14,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('工作台以提问为第一入口', async ({ page }) => {
-  await expect(page.locator('.workbench__title')).toContainText('今天想分析什么');
+  await expect(page.locator('.workbench__title')).toContainText('开始业务数据分析');
   await expect(page.locator('.composer__input')).toBeVisible();
   await expect(page.locator('.workbench__capabilities .capability')).toHaveCount(6);
   // 推荐问题来自后端，不允许在前端写死
@@ -29,9 +29,9 @@ test('首页不出现治理仪表盘类信息', async ({ page }) => {
   }
 });
 
-test('输入问题会预判将使用的技能', async ({ page }) => {
+test('输入问题会显示匹配的技能', async ({ page }) => {
   await page.locator('.composer__input').fill('为什么华东销售下降？');
-  await expect(page.locator('.composer__bar')).toContainText('将使用');
+  await expect(page.locator('.composer__bar')).toContainText('匹配技能：');
   await expect(page.locator('.composer__bar')).toContainText('归因分析');
 });
 
@@ -48,9 +48,9 @@ test('提问后进入对话并给出卡片式意图澄清', async ({ page }) => 
   await expect(page).toHaveURL(/#\/conversation/);
   await expect(page.locator('.turn__bubble').first()).toContainText('华东销售');
   await expect(page.locator('.execution')).toBeVisible();
-  await expect(page.locator('.execution__head')).toContainText('等待你的确认');
+  await expect(page.locator('.execution__head')).toContainText('等待补充或确认信息');
   await expect(page.locator('.clarify')).toBeVisible();
-  await expect(page.locator('.clarify__title')).toContainText('我理解你想分析');
+  await expect(page.locator('.clarify__title')).toContainText('确认分析目标：');
   // 澄清卡只出现业务语言，不出现内部对象名
   await expect(page.locator('.clarify')).toContainText('分析时间');
   await expect(page.locator('.clarify')).toContainText('重点关注');
@@ -64,8 +64,8 @@ test('执行状态显示任务步骤而不暴露思维链', async ({ page }) => 
   const latest = page.locator('.execution').last();
   await expect(latest.locator('.execution__steps')).toBeVisible();
   const steps = await latest.locator('.step').allInnerTexts();
-  expect(steps.join(' ')).toContain('已理解问题');
-  expect(steps.join(' ')).toContain('已生成结论');
+  expect(steps.join(' ')).toContain('接收分析问题');
+  expect(steps.join(' ')).toContain('汇总分析输出');
   const text = await page.locator('.view').innerText();
   for (const forbidden of ['思维链', 'reasoning', '思考过程', '让我想想']) {
     expect(text).not.toContain(forbidden);

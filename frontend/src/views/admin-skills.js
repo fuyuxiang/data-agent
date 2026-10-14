@@ -225,7 +225,7 @@ export const SkillsView = {
       if (!this.editor || this.saving) return null;
       if (!this.editor.name?.trim() || !this.editor.description?.trim()) {
         this.section = 'basic';
-        toast('请填写技能名称和描述', '信息未填完整', 'error');
+        toast('请填写技能名称和描述', '信息不完整', 'error');
         return null;
       }
       this.invalidateTest();
@@ -369,8 +369,7 @@ export const SkillsView = {
         <div class="grow">
           <h1 class="page-head__title">技能</h1>
           <p class="page-head__desc">
-            技能是 Agent 可以自动发现并执行的专业能力。它决定智能体会做什么，
-            而不是把每个细碎动作都拆成独立技能。
+            管理可复用的查询、分析、预测和报告技能，配置使用范围，并测试后发布。
           </p>
         </div>
         <div v-if="canManage" class="page-head__actions">
@@ -432,7 +431,7 @@ export const SkillsView = {
 
       <div v-if="unavailable.length" class="card" style="margin-top:18px">
         <h3 class="card__title" style="margin-bottom:8px">暂不可用的技能</h3>
-        <p class="small muted" style="margin-bottom:10px">这些技能声明了当前工作空间没有的资源，所以不会出现在用户的选择列表里。</p>
+        <p class="small muted" style="margin-bottom:10px">以下技能缺少可用的数据或工具资源；请检查资源配置与访问权限。</p>
         <div class="tag-row">
           <span v-for="item in unavailable" :key="item.id" class="badge" :data-tip="item.unavailable_reason">
             {{ item.name }} · {{ item.unavailable_reason }}
@@ -441,9 +440,9 @@ export const SkillsView = {
       </div>
     </div>
 
-    <Modal :open="aiOpen" title="用一句话创建技能" @close="!generating && (aiOpen = false)">
+    <Modal :open="aiOpen" title="根据描述生成技能草稿" @close="!generating && (aiOpen = false)">
       <p class="small muted" style="margin-bottom:12px">
-        描述这个技能要完成什么任务，系统会生成名称、说明、触发场景、示例问题和所需能力，保存前你可以自由修改。
+        描述业务任务，生成包含名称、说明、触发场景和示例问题的配置草稿。请核对工具与数据范围后保存。
       </p>
       <textarea v-model="aiPrompt" class="textarea" rows="4"
                 placeholder="创建一个门店经营分析技能，需要分析销售额、订单量、客单价、库存以及同比环比，并输出主要问题和经营建议。"></textarea>
@@ -493,7 +492,7 @@ export const SkillsView = {
               <input v-model.trim="editor.name" class="input" placeholder="门店经营分析" /></label>
             <label class="field"><span>描述<em> *</em></span>
               <textarea v-model.trim="editor.description" class="textarea" rows="2"
-                        placeholder="一句话说明这个技能解决什么问题，Agent 靠它决定何时使用。"></textarea></label>
+                        placeholder="说明技能适用的业务任务和使用条件"></textarea></label>
             <label class="field"><span>分类</span>
               <select v-model="editor.category" class="select">
                 <option v-for="item in categories" :key="item" :value="item">{{ item }}</option>
@@ -501,7 +500,7 @@ export const SkillsView = {
             <label class="field"><span>使用说明</span>
               <textarea v-model.trim="editor.instruction" class="textarea" rows="10"
                         placeholder="写给执行这个技能的模型：先确认口径，再取数，再下结论；区分事实与推测。"></textarea></label>
-            <p class="xs faint">这段说明会进入模型上下文，请写清执行顺序和硬性要求，而不是口号。</p>
+            <p class="xs faint">使用说明会作为执行指令，请明确步骤、约束和输出要求。</p>
           </template>
 
           <template v-else-if="section === 'triggers'">
@@ -511,7 +510,7 @@ export const SkillsView = {
             <label class="field"><span>示例问题（每行一个）</span>
               <textarea v-model="exampleText" class="textarea" rows="5"
                         placeholder="哪家门店经营最差？&#10;本月库存周转怎么样？"></textarea></label>
-            <p class="xs faint">触发场景和示例问题决定系统能不能自动选中这个技能，写得越具体越好。</p>
+            <p class="xs faint">使用具体的业务场景和问题示例，帮助匹配技能；可在右侧检查匹配结果。</p>
           </template>
 
           <template v-else-if="section === 'resources'">
@@ -557,7 +556,7 @@ export const SkillsView = {
 
         <aside class="builder__test">
           <h3 class="card__title" style="margin-bottom:6px">配置与命中测试</h3>
-          <p class="xs faint" style="margin-bottom:10px">校验已保存的配置，并用问题检查技能命中。编辑后请先保存。</p>
+          <p class="xs faint" style="margin-bottom:10px">检查已保存的配置和问题匹配情况；此测试不执行实际数据分析。编辑后请先保存。</p>
           <div class="stack" style="display:flex;flex-direction:column;gap:10px">
             <textarea v-model="testQuestion" class="textarea" rows="3" placeholder="输入一个测试问题"></textarea>
             <button class="btn btn--primary btn--sm" :disabled="testing || saving || publishing || editor.isNew || editorDirty" @click="test">
@@ -577,7 +576,7 @@ export const SkillsView = {
                 <span v-if="check.detail" class="xs faint">{{ check.detail }}</span>
               </div>
               <div v-if="testResult.resolution">
-                <div class="small muted" style="margin:6px 0 4px">这次会选中</div>
+                <div class="small muted" style="margin:6px 0 4px">问题匹配结果</div>
                 <span v-for="item in testResult.resolution.selected" :key="item.id" class="badge badge--brand">
                   {{ item.name }}
                 </span>

@@ -490,7 +490,7 @@ export const ConversationView = {
           rating: rating === 'up' ? 'correct' : 'incorrect',
           category: rating === 'up' ? '结果符合预期' : '需要改进',
         });
-        toast('已记录反馈', '谢谢');
+        toast('已记录反馈', '反馈已提交');
       } catch (error) {
         this.feedback[runId] = '';
         toast(error.message, '反馈未提交', 'error');
@@ -510,10 +510,10 @@ export const ConversationView = {
         if (epoch !== this.sourceEpoch || this.disposed) return;
         for (const item of detail.item?.actions || []) {
           if (item.tool_id === 'query_metric') {
-            blocks.push({ title: '使用的指标', body: String(item.arguments?.metric || '由指标编译器执行') });
+            blocks.push({ title: '使用的指标', body: String(item.arguments?.metric || '已按指标定义查询，未记录指标名称') });
           }
           if (item.tool_id === 'query_data') {
-            blocks.push({ title: '执行的 SQL', body: item.arguments?.sql || '未记录 SQL' });
+            blocks.push({ title: '数据查询语句（SQL）', body: item.arguments?.sql || '未记录 SQL' });
           }
           if (item.tool_id === 'list_semantic_metrics') {
             blocks.push({ title: '读取的指标清单', body: JSON.stringify(item.arguments, null, 2) });
@@ -522,7 +522,7 @@ export const ConversationView = {
         const validations = await actions.get(`/api/analyses/${runId}/validations`);
         if ((validations.items || []).length) {
           blocks.push({
-            title: '核验结果',
+            title: '结果校验记录',
             body: validations.items.map(item => `${item.rule_id} · ${item.status} · ${item.severity || ''}`).join('\n'),
           });
         }
@@ -547,12 +547,12 @@ export const ConversationView = {
             blocks: [
               { title: '使用的技能', body: (item.skills || []).join('、') || '自动分析' },
               {
-                title: '模型决策',
+                title: '分析调用记录',
                 body: (item.decisions || []).map(d => `#${d.sequence} ${d.model} · ${d.tool_call_count} 次工具调用`).join('\n')
                   || '无记录',
               },
               {
-                title: '工具调用',
+                title: '查询与分析操作',
                 body: (item.actions || []).map(a => `${a.tool_id} · ${a.status}${a.error_code ? ' · ' + a.error_code : ''}`).join('\n')
                   || '无记录',
               },
@@ -598,7 +598,7 @@ export const ConversationView = {
     },
     runTitle(run) {
       const active = this.activeRunId === run.id;
-      return active ? '正在分析你的问题' : '分析中';
+      return active ? '正在处理分析问题' : '分析中';
     },
   },
   template: `
@@ -663,7 +663,7 @@ export const ConversationView = {
                            @submit="confirmClarification" @cancel="cancelClarification" />
 
         <div v-if="canAnalyze && pendingAnswer" class="card" style="margin:16px 0">
-          <h3 class="card__title">还需要你补充一点信息</h3>
+          <h3 class="card__title">请补充分析信息</h3>
           <p class="small muted">说明分析对象、时间或口径后，系统会继续当前任务。</p>
           <textarea v-model.trim="clarificationAnswer" :disabled="clarificationBusy" class="textarea" placeholder="输入补充说明" aria-label="补充说明"></textarea>
           <button class="btn btn--primary btn--sm" :disabled="clarificationBusy || !clarificationAnswer.trim()"
@@ -671,13 +671,13 @@ export const ConversationView = {
         </div>
 
         <EmptyState v-if="!loadError && !messages.length && !runs.length" icon="chat" title="还没有提问"
-                    text="在下方输入你的业务问题，系统会自动选择合适的能力并给出可核验的结论。" />
+                    text="在下方描述业务问题，明确分析对象和时间范围，查询数据或开展分析。" />
       </div>
     </div>
 
     <div v-if="!loading" class="view__inner view__inner--reading" style="padding:0 28px 24px">
       <Composer ref="composer" :disabled="running || submitting || !canAnalyze" placeholder="继续追问，或换一个问题…" @submit="ask" />
-      <p v-if="!canAnalyze" class="small muted">当前为只读权限，无法继续分析。</p>
+      <p v-if="!canAnalyze" class="small muted">当前为只读权限，可查看已有内容；继续分析需要分析权限。</p>
       <button class="btn btn--sm" style="margin-top:10px" @click="navigate('trash', { collection: 'agent_runs' })"><Icon name="trash" :size="14" />恢复已删除分析</button>
     </div>
 
@@ -690,7 +690,7 @@ export const ConversationView = {
       </template>
     </Modal>
 
-    <Drawer :open="sourceDrawer.open" :title="sourceDrawer.title" subtitle="默认隐藏，需要时再深入"
+    <Drawer :open="sourceDrawer.open" :title="sourceDrawer.title" subtitle="查看本次分析的查询来源、校验记录与执行详情。"
             @close="closeSourceDrawer">
       <div v-for="block in sourceDrawer.blocks" :key="block.title" class="source-block">
         <div class="source-block__head">

@@ -385,7 +385,7 @@ const AuthScreen = {
         <p class="auth-card__desc">
           {{ state.authMode === 'bootstrap' ? '输入部署时设置的一次性初始化令牌，创建至少 12 位密码。'
              : state.authMode === 'register' ? '使用邀请邮箱或开放注册的邮箱创建账号。'
-             : '登录后即可用自然语言提问企业数据。' }}
+             : '登录后查看授权的数据、分析记录与成果。' }}
         </p>
         <form @submit.prevent="submitAuth">
           <label v-if="state.authMode !== 'login'" class="field">

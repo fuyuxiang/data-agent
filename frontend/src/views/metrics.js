@@ -470,8 +470,7 @@ export const MetricsView = {
           <div class="grow">
             <h1 class="page-head__title">指标中心</h1>
             <p class="page-head__desc">
-              正式指标是 AI 理解业务的口径来源。有指标时分析优先走指标定义，
-              没有对应指标时，AI 会结合数据进行探索分析。
+              查看指标定义与计算口径，试算业务数据。正式指标优先用于分析，探索口径需另行核对。
             </p>
           </div>
           <div v-if="admin" class="page-head__actions">
@@ -506,7 +505,7 @@ export const MetricsView = {
               <div v-for="index in 4" :key="index" class="skeleton" style="height:64px"></div>
             </div>
             <EmptyState v-else-if="!filtered.length" icon="metric" :title="query || statusFilter ? '没有匹配的指标' : '还没有指标'"
-                        :text="query || statusFilter ? '调整关键词或状态筛选后重试。' : '指标定义了业务口径，让不同人问同一个问题时得到同一个答案。'" />
+                        :text="query || statusFilter ? '调整关键词或状态筛选后重试。' : '请联系管理员建立指标定义，统一计算方式与统计口径。'" />
 
             <div v-else class="metric-list">
               <article v-for="item in filtered" :key="item.id" class="card card--interactive metric-item"
@@ -539,7 +538,7 @@ export const MetricsView = {
           <aside>
             <div v-if="!selected" class="card">
               <EmptyState icon="search" title="选择一个指标"
-                          text="查看它的业务定义、计算方式、支持维度，并直接试算。" />
+                          text="查看业务定义、计算方式和支持维度；有分析权限的成员可试算。" />
             </div>
 
             <div v-else class="stack">
@@ -582,7 +581,7 @@ export const MetricsView = {
 
                 <button class="advanced-toggle" @click="advanced = !advanced">
                   <Icon :name="advanced ? 'chevronDown' : 'chevronRight'" :size="14" />
-                  高级设置（版本、负责人、权限、验证）
+                  查看版本与负责人
                 </button>
                 <dl v-if="advanced" class="definition" style="margin-top:12px">
                   <dt>版本</dt><dd>v{{ selected.version }}</dd>
@@ -740,7 +739,7 @@ export const MetricsView = {
         </div>
 
         <div v-else class="card" style="margin-top:18px">
-          <EmptyState icon="book" title="业务术语" text="业务术语、同义词与业务规则在「管理后台 → 知识」中维护，会被 Agent 在检索时使用。" />
+          <EmptyState icon="book" title="业务术语" text="业务术语、同义词与业务规则由管理员在「知识」中维护，供分析时检索参考。" />
         </div>
         </template>
       </div>
@@ -882,7 +881,7 @@ export const MetricsView = {
           <input v-model.trim="editor.aliases" class="input" placeholder="GMV, 成交额" /></label>
         <label class="field"><span>业务定义</span>
           <textarea v-model.trim="editor.description" class="textarea"
-                    placeholder="写清业务口径，Agent 会据此理解用户的问题"></textarea></label>
+                    placeholder="说明统计对象、计算口径和适用范围"></textarea></label>
         <label class="field"><span>时间口径</span>
           <input v-model.trim="editor.time_semantics" class="input" placeholder="按支付完成月份归集" /></label>
       </div>

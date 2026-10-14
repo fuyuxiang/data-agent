@@ -67,7 +67,7 @@ const KpiCard = {
       <span v-if="kpi.unit" class="small muted">{{ kpi.unit }}</span>
       <div v-if="kpi.delta !== undefined" class="kpi__meta" :class="deltaClass">
         <Icon v-if="deltaIcon" :name="deltaIcon" :size="13" />
-        {{ kpi.deltaLabel || '环比' }} {{ deltaDisplay }}
+        {{ kpi.deltaLabel || '变化率' }} {{ deltaDisplay }}
       </div>
       <details v-if="kpi.definition || kpi.formula || kpi.notes" class="report-definition">
         <summary>口径说明</summary>
@@ -211,7 +211,7 @@ export const ResultView = {
     </section>
 
     <section v-else-if="!payload" class="stack">
-      <EmptyState icon="chart2" title="还没有可展示的结果" text="分析完成后，结论、指标、图表和依据会出现在这里。" />
+      <EmptyState icon="chart2" title="还没有可展示的结果" text="可用的分析结果将在这里展示；请结合数据来源、统计口径和结果限制查看。" />
     </section>
 
     <section v-else class="result">
@@ -230,7 +230,7 @@ export const ResultView = {
       </div>
 
       <ChartCard v-for="chart in moreCharts ? charts : charts.slice(0, 2)" :key="chart.id" :spec="chart" />
-      <p v-if="charts.some(chart => chart.total_rows > chart.preview_rows)" class="small muted">图表展示部分记录；完整结果可查看下方明细或导出 Excel。</p>
+      <p v-if="charts.some(chart => chart.total_rows > chart.preview_rows)" class="small muted">图表仅展示部分记录；本次返回数据可在下方明细查看，或导出 Excel。</p>
       <button v-if="charts.length > 2" class="btn btn--sm" :aria-expanded="moreCharts" @click="moreCharts = !moreCharts">
         {{ moreCharts ? '收起更多图表' : '查看其余 ' + (charts.length - 2) + ' 张图表' }}
       </button>
@@ -254,7 +254,7 @@ export const ResultView = {
         <p v-if="table.sourceTotal > table.total || ['partial', 'truncated', 'sampled'].includes(table.completeness)" class="result-table__status small muted">
           本次返回 {{ table.total }} 条{{ table.sourceTotal > table.total ? '，原始结果共 ' + table.sourceTotal + ' 条' : '' }}；当前明细为部分数据。
         </p>
-        <p v-if="!table.paginated && table.total > (table.rows || []).length" class="result-table__status small muted">当前为前 {{ (table.rows || []).length }} 条预览；完整明细请使用导出 Excel。</p>
+        <p v-if="!table.paginated && table.total > (table.rows || []).length" class="result-table__status small muted">当前为前 {{ (table.rows || []).length }} 条预览；可通过导出 Excel 查看本次返回的明细。</p>
         <p v-if="table.error" class="result-table__status small" role="alert">{{ table.error }}
           <button class="btn btn--sm" @click="$emit('table-page', { table, offset: table.failedOffset ?? table.offset ?? 0 })">重试加载</button>
         </p>
@@ -268,7 +268,7 @@ export const ResultView = {
 
       <div v-if="basis.length" class="basis">
         <Icon name="shield" :size="15" />
-        <span>依据</span>
+        <span>数据依据</span>
         <button v-for="ref in basis.slice(0, 4)" :key="ref.id" class="basis__link" @click="$emit('source', ref.id)">
           <span>{{ ref.title }}</span>
           <Icon name="chevronRight" :size="12" />
@@ -344,8 +344,8 @@ export const ClarificationCard = {
       <div class="row" style="align-items:flex-start">
         <Icon name="compass" :size="18" class="muted" />
         <div class="grow">
-          <h3 class="clarify__title">我理解你想分析{{ objective }}</h3>
-          <p class="clarify__desc">确认下面几点，我就能按这个口径开始分析。改错了也不影响，随时可以追问。</p>
+          <h3 class="clarify__title">确认分析目标：{{ objective }}</h3>
+          <p class="clarify__desc">确认后将按所选口径开始分析；如需调整问题，请选择「重新描述」。</p>
         </div>
       </div>
 

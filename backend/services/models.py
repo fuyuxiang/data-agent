@@ -152,9 +152,9 @@ def resolve_provider(
 def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
     provider, client = resolve_provider(provider_id, workspace_id)
     if not provider:
-        raise ValueError("模型配置不存在")
+        raise ValueError("模型配置不存在，请刷新模型列表后重新选择。")
     if not client:
-        raise ValueError("模型配置没有可用的 API Key")
+        raise ValueError("模型配置没有可用的 API Key，请编辑模型服务，填写凭据后重新测试。")
     from .usage import ensure_quota, record_usage, response_usage
 
     effective_workspace = workspace_id or "default"

@@ -310,8 +310,7 @@ export const KnowledgeView = {
         <div class="grow">
           <h1 class="page-head__title">知识</h1>
           <p class="page-head__desc">
-            沉淀业务口径、规则和背景，让 Agent 不只读懂字段，也读懂业务。
-            正式指标口径请到「指标中心」维护。
+            管理指标解释、业务规则和背景资料，供分析检索参考。正式指标定义在「指标中心」维护。
           </p>
         </div>
         <div v-if="canAdmin" class="page-head__actions">
@@ -365,14 +364,14 @@ export const KnowledgeView = {
                 </div>
             </article>
             <EmptyState v-if="!group.items.length" icon="book" title="暂无条目"
-                        :text="'添加一条' + group.title + '，Agent 在相关问题中会用到它。'" />
+                        :text="'添加一条' + group.title + '，供相关业务问题检索参考。'" />
           </div>
         </section>
       </div>
 
       <div v-else-if="tab === 'documents'" class="stack" style="margin-top:18px">
         <EmptyState v-if="!documents.length" icon="book" title="还没有知识文档"
-                    text="导入 txt / md / pdf / docx / xlsx，系统会切分并建立索引。" />
+                    text="导入业务资料，供分析时检索参考。支持文本、PDF、Word 和 Excel 等格式。" />
         <article v-for="item in documents" v-else :key="item.id" class="card row row--between">
           <div class="row">
             <span class="agent-card__mark" style="width:34px;height:34px"><Icon name="fileText" :size="17" /></span>
@@ -398,7 +397,7 @@ export const KnowledgeView = {
 
       <div v-else class="card" style="margin-top:18px">
         <h2 class="card__title" style="margin-bottom:4px">检索测试</h2>
-        <p class="card__hint" style="margin-bottom:12px">检查 Agent 能不能召回正确的业务口径。</p>
+        <p class="card__hint" style="margin-bottom:12px">测试知识检索结果，核对业务问题与资料的匹配情况。</p>
         <div class="row" style="margin-bottom:14px">
           <input v-model="searchQuery" class="input" style="flex:1"
                  placeholder="例如：GMV 的计算口径是什么？" @keydown.enter="!$event.isComposing && $event.keyCode !== 229 && search()" />
@@ -409,7 +408,7 @@ export const KnowledgeView = {
         <p v-if="searching" class="small muted" role="status">正在检索当前问题…</p>
         <p v-else-if="searchError" class="small" role="alert" style="color:var(--danger)">{{ searchError }}，可重新检索。</p>
         <EmptyState v-else-if="!results.length" icon="search" :title="searched ? '没有匹配的知识片段' : '还没有检索结果'"
-                    :text="searched ? '尝试更具体的业务词语，或确认相关知识已启用。' : '输入一个问题，看看会召回哪些知识片段。'" />
+                    :text="searched ? '尝试更具体的业务词语，或确认相关知识已启用。' : '输入业务问题，查看匹配的知识片段。'" />
         <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
           <article v-for="(item, index) in results" :key="index" class="card" style="padding:12px 14px">
             <div class="row row--between">

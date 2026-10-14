@@ -530,7 +530,7 @@ export const DataView = {
       ];
       const missing = required.filter(([, value]) => !value).map(([label]) => label);
       if (missing.length) {
-        toast(`请填写${missing.join('、')}`, '信息未填完整', 'error');
+        toast(`请填写${missing.join('、')}`, '信息不完整', 'error');
         return;
       }
       if (this.dbForm.driver === 'mysql'
@@ -573,10 +573,10 @@ export const DataView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">数据</h1>
-          <p class="page-head__desc">文件、数据库、API 与数据集统一接入。Agent 只会使用当前用户有权限的数据。</p>
+          <p class="page-head__desc">接入业务数据，查看结构、预览和数据质量。分析仅使用当前用户有权访问的数据。</p>
         </div>
         <div class="page-head__actions">
-          <button class="btn btn--sm" @click="httpOpen = true"><Icon name="link" :size="14" />API 数据源</button>
+          <button class="btn btn--sm" @click="httpOpen = true"><Icon name="link" :size="14" />接入 API 数据源</button>
           <button class="btn btn--sm" @click="dbOpen = true"><Icon name="database" :size="14" />连接数据库</button>
           <label class="btn btn--primary btn--sm">
             <Icon name="upload" :size="14" />{{ busy ? '接入中…' : '上传文件' }}
@@ -684,7 +684,7 @@ export const DataView = {
             <button class="btn btn--sm" @click="loadSchema">重试</button>
           </div>
           <EmptyState v-else-if="schema && !(schema.tables || []).length"
-                      icon="table" title="没有可显示的数据表" text="请检查文件是否包含有效的表头和数据。" />
+                      icon="table" title="没有可显示的数据表" text="请确认数据源可访问，并包含可读取的数据表或有效的表头。" />
           <div v-else-if="schema">
             <div v-for="table in schema.tables || []" :key="table.name" class="card" style="margin-bottom:12px">
               <h3 class="card__title" style="margin-bottom:8px">{{ table.name }}</h3>

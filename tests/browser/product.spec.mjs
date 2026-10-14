@@ -74,8 +74,8 @@ test('资料库按用户能理解的分类组织', async ({ page }) => {
     expect(chips.join(' ')).toContain(label);
   }
   // 还没有产出时给出的是可操作的空状态，不是空白
-  await expect(page.locator('.empty h3')).toContainText('资料库还是空的');
-  await expect(page.locator('.empty p')).toContainText('生成报告');
+  await expect(page.locator('.empty h3')).toContainText('暂无资料');
+  await expect(page.locator('.empty p')).toContainText('已发布的分析结果');
 });
 
 test('资料库文件可作为后续分析的证据', async ({ page }) => {

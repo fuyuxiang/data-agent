@@ -207,7 +207,7 @@ export const AgentBuilderView = {
       if (!this.editing || this.saving) return null;
       if (!this.editing.name?.trim()) {
         this.section = 'basic';
-        toast('请填写智能体名称', '信息未填完整', 'error');
+        toast('请填写智能体名称', '信息不完整', 'error');
         return null;
       }
       this.saving = true;
@@ -218,7 +218,7 @@ export const AgentBuilderView = {
           ? await actions.post('/api/agents', payload)
           : await actions.patch(`/api/agents/${this.editing.id}`, payload);
         this.editing = { ...copyConfiguration(response.item), isNew: false };
-        if (!silent) toast(response.item.published_version ? '草稿已保存，线上版本继续可用；发布后生效' : '智能体草稿已保存', '完成');
+        if (!silent) toast(response.item.published_version ? '草稿已保存，发布后更新用户使用的版本' : '智能体草稿已保存', '完成');
         await this.load();
         return response.item;
       } catch (error) {
@@ -297,7 +297,7 @@ export const AgentBuilderView = {
             const result = await actions.get(`/api/analyses/${entry.runId}/results`);
             if (version !== this.testVersion) return;
             entry.text = result.manifest?.payload?.summary
-              || (run.execution_status === 'finished' ? '分析已完成，请在对话中查看完整结果。'
+              || (run.execution_status === 'finished' ? '分析已结束，请打开完整分析查看结果与校验状态。'
                 : `分析未完成：${run.stop_reason || run.execution_status}`);
             return;
           }
@@ -320,8 +320,7 @@ export const AgentBuilderView = {
         <div class="grow">
           <h1 class="page-head__title">智能体</h1>
           <p class="page-head__desc">
-            智能体不是一段提示词，而是模型、技能、数据、指标、知识与 MCP 的组合。
-            组合不同，能力就不同。
+            配置模型、技能、数据、指标与知识，创建适合业务场景的智能体，并测试后发布。
           </p>
         </div>
         <div class="page-head__actions">
@@ -336,7 +335,7 @@ export const AgentBuilderView = {
       <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>智能体加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <EmptyState v-else-if="!agents.length" icon="robot" title="还没有智能体"
-                  text="创建第一个智能体，绑定它需要的技能、数据和知识。" />
+                  text="创建智能体，配置可用模型、业务数据与所需能力，测试后发布。" />
 
       <div v-else class="grid grid--2">
         <article v-for="agent in agents" :key="agent.id" class="card card--interactive file-tile">
@@ -393,7 +392,7 @@ export const AgentBuilderView = {
               <input v-model.trim="draft.name" class="input" placeholder="销售分析助手" /></label>
             <label class="field"><span>描述</span>
               <textarea v-model.trim="draft.description" class="textarea" rows="2"
-                        placeholder="销售查询、趋势、归因、预测"></textarea></label>
+                        placeholder="说明适用场景和可完成的业务任务，例如销售趋势与变化原因分析"></textarea></label>
             <label class="field"><span>角色说明</span>
               <textarea v-model.trim="draft.instruction" class="textarea" rows="8"
                         placeholder="你是负责销售经营分析的助手。先确认口径再取数，结论先行，每个数字都要能追溯。"></textarea></label>
@@ -425,7 +424,7 @@ export const AgentBuilderView = {
           </template>
 
           <template v-else-if="section === 'skills'">
-            <p class="small muted">技能决定这个智能体会做什么。只绑定它真正需要的。</p>
+            <p class="small muted">选择业务任务所需的技能；技能使用仍受数据权限和资源范围限制。</p>
             <div class="stack" style="display:flex;flex-direction:column;gap:8px">
               <label v-for="skill in skillBindings" :key="skill.id" class="card card--interactive"
                      style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
@@ -495,13 +494,13 @@ export const AgentBuilderView = {
                 <Status :status="item.status || 'configured'" />
               </label>
             </div>
-            <p v-if="!mcpBindings.length" class="small muted">还没有连接的 MCP 服务。MCP 是外部系统连接能力，与技能是两类东西。</p>
+            <p v-if="!mcpBindings.length" class="small muted">还没有连接的 MCP 服务。可在「MCP」中添加服务并测试连接。</p>
           </template>
 
           <template v-else-if="section === 'experience'">
             <label class="field"><span>欢迎语</span>
               <textarea v-model.trim="draft.welcome" class="textarea" rows="3"
-                        placeholder="问我任何销售数据问题，我会自动选择合适的能力并给出可核验的结论。"></textarea></label>
+                        placeholder="描述销售分析任务，例如查询销售额、比较趋势或分析变化原因。"></textarea></label>
             <label class="field"><span>推荐问题（每行一个，最多 8 条）</span>
               <textarea v-model="questionText" class="textarea" rows="5"
                         placeholder="本月销售额是多少？&#10;为什么华东销售下降？"></textarea></label>
@@ -514,8 +513,7 @@ export const AgentBuilderView = {
                 <option value="private">仅自己</option>
               </select></label>
             <p class="small muted">
-              智能体只能使用当前用户有权访问的数据、指标和知识。权限过滤发生在执行前，
-              不是执行后。
+              智能体仅在当前用户的授权范围内使用数据、指标和知识；发布不会扩大数据访问权限。
             </p>
             <dl class="definition">
               <dt>状态</dt><dd>{{ draft.status }}</dd>
@@ -526,10 +524,10 @@ export const AgentBuilderView = {
         </div>
 
         <aside class="builder__test">
-          <h3 class="card__title" style="margin-bottom:6px">实时测试</h3>
-          <p class="xs faint" style="margin-bottom:10px">用真实数据跑一次，确认这个智能体能用。</p>
+          <h3 class="card__title" style="margin-bottom:6px">对话测试</h3>
+          <p class="xs faint" style="margin-bottom:10px">使用当前配置发起分析，检查回答与结果；测试会调用已接入的数据和模型。</p>
           <div class="stack" style="display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto">
-            <EmptyState v-if="!testLog.length" icon="chat" title="还没有测试记录" text="在下面提一个问题。" />
+            <EmptyState v-if="!testLog.length" icon="chat" title="还没有测试记录" text="输入业务问题，测试当前配置的分析效果。" />
             <div v-for="(item, index) in testLog" :key="index" class="turn__bubble"
                  :style="item.role === 'user' ? 'align-self:flex-end;max-width:100%' : 'align-self:flex-start;background:var(--surface-sunken);color:var(--text-primary);max-width:100%'">
               {{ item.text }}

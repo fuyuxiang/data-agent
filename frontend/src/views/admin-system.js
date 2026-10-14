@@ -11,10 +11,10 @@ import { actions, state, toast } from '../store.js';
 import { navigate } from '../router.js';
 
 const ROLES = [
-  { key: 'owner', label: '所有者', hint: '全部权限，含成员与系统设置' },
-  { key: 'editor', label: '构建者', hint: '可配置数据、指标、知识、模型与智能体' },
-  { key: 'analyst', label: '分析师', hint: '可提问分析并查看数据，不可改配置' },
-  { key: 'viewer', label: '只读', hint: '只能查看与下载成果' },
+  { key: 'owner', label: '所有者', hint: '管理工作空间配置、成员和发布权限' },
+  { key: 'editor', label: '构建者', hint: '可配置数据、指标草稿、知识、技能与智能体' },
+  { key: 'analyst', label: '分析师', hint: '可在授权范围内查询、分析与导出，不可修改配置' },
+  { key: 'viewer', label: '只读', hint: '可查看授权数据与已有成果，不可发起分析或导出' },
 ];
 
 const ROLE_LABEL = Object.fromEntries(ROLES.map(role => [role.key, role.label]));
@@ -76,7 +76,7 @@ export const UsersView = {
             `/api/workspaces/${state.workspaceId}/invitations`, this.invite,
           );
           this.invitationUrl = new URL(response.registration_url, window.location.origin).href;
-          toast('注册链接已生成，请复制并发给对方', '完成');
+          toast('注册链接已生成，请复制并发送给受邀成员', '完成');
         } else {
           await actions.post(`/api/workspaces/${state.workspaceId}/members`, this.invite);
           this.inviteOpen = false;
@@ -132,7 +132,7 @@ export const UsersView = {
         <div class="grow">
           <h1 class="page-head__title">用户管理</h1>
           <p class="page-head__desc">
-            权限先于执行。所有自动能力——技能、指标、MCP、导出——都会在执行前按角色过滤。
+            管理工作空间成员与角色，按职责分配数据分析和配置权限。
           </p>
         </div>
         <div class="page-head__actions">
@@ -187,7 +187,7 @@ export const UsersView = {
 
     <Modal :open="inviteOpen" size="small" :title="invitationUrl ? '注册链接' : '添加用户'" @close="closeInvite">
       <div v-if="invitationUrl" class="stack">
-        <p class="small">链接在 24 小时内有效。请复制并发给对方；对方打开后使用受邀邮箱设置账号和密码。</p>
+        <p class="small">链接在 24 小时内有效。请发送给受邀成员，使用受邀邮箱创建账号和密码。</p>
         <input class="input" :value="invitationUrl" readonly aria-label="注册链接"
                @focus="$event.target.select()" />
         <p class="xs faint">系统不会自动发送邀请邮件。关闭窗口后，链接将不再显示。</p>
@@ -205,7 +205,7 @@ export const UsersView = {
             <option v-for="role in roles" :key="role.key" :value="role.key">{{ role.label }}</option>
           </select></label>
         <p class="xs faint">{{ inviteMode === 'new'
-          ? '创建后复制注册链接并发给对方，链接 24 小时有效。'
+          ? '生成后复制注册链接并发送给受邀成员，链接 24 小时有效。'
           : '该邮箱须已注册数擎账号；添加后即可访问当前工作空间。' }}</p>
       </div>
       <template #footer>
@@ -315,7 +315,7 @@ export const SystemSettingsView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">系统设置</h1>
-          <p class="page-head__desc">数据保留与审计。误删内容可在回收站恢复，永久清除需要显式确认。</p>
+          <p class="page-head__desc">设置成果与会话保留期限，查看审计记录；误删内容可在回收站恢复。</p>
         </div>
         <button class="btn btn--sm" @click="navigate('admin/trash')"><Icon name="trash" :size="14" />打开回收站</button>
       </header>
@@ -335,7 +335,7 @@ export const SystemSettingsView = {
         <h2 class="card__title" style="margin-bottom:4px">成果与会话保留</h2>
         <p class="card__hint" style="margin-bottom:14px">
           按最后活动或保存时间计算，服务每分钟检查。执行中或待继续的分析不会回收；
-          到期内容进入回收站，仍可恢复，只有显式确认才会永久清除。
+          到期内容进入回收站，仍可恢复，永久删除前需要再次确认。
         </p>
         <div class="chip-group">
           <button v-for="option in retentionOptions" :key="option.key" class="chip"
@@ -353,7 +353,7 @@ export const SystemSettingsView = {
 
       <div v-else-if="tab === 'audit'" class="card" style="margin-top:18px">
         <h2 class="card__title" style="margin-bottom:4px">审计日志</h2>
-        <p class="card__hint" style="margin-bottom:14px">数据访问、分析执行与配置变更的完整留痕。</p>
+        <p class="card__hint" style="margin-bottom:14px">查看数据访问、分析执行与配置变更记录。</p>
         <EmptyState v-if="!audit.length" icon="shield" title="暂无审计记录" />
         <div v-else class="timeline">
           <div v-for="item in audit" :key="item.id" class="timeline__item">

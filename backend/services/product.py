@@ -51,17 +51,17 @@ def onboarding_status(database: Database, workspace_id: str) -> dict[str, Any]:
     steps = [
         {
             "id": "connect_model", "name": "连接模型",
-            "description": "配置一个可用的模型服务，Agent 才能自主分析。",
+            "description": "配置模型并测试连接，以启用自主分析。",
             "done": model_ready, "route": "admin/models",
         },
         {
             "id": "add_data", "name": "添加数据",
-            "description": "接入数据源，或先载入一套演示数据直接体验。",
+            "description": "接入业务数据，或载入合成演示数据了解分析流程。",
             "done": source_count > 0, "count": source_count, "route": "admin/data",
         },
         {
             "id": "ask_question", "name": "开始提问",
-            "description": "在工作台用业务语言提问，系统会自动选择技能并给出可信结果。",
+            "description": "在工作台描述业务问题，查看分析结果及其数据依据。",
             "done": bool(database.list("agent_runs", workspace_id=workspace_id, limit=1)),
             "route": "workbench",
         },
@@ -286,7 +286,7 @@ def ensure_super_agent(database: Database, workspace_id: str, actor_id: str) -> 
         "id": SUPER_AGENT_ID,
         "workspace_id": workspace_id,
         "name": SUPER_AGENT_NAME,
-        "description": "默认入口智能体，自动选择合适技能完成问数、分析、归因、预测与报告生成。",
+        "description": "在授权数据范围内查询业务数据，分析趋势与变化原因，并整理预测和报告成果。",
         "instruction": SUPER_AGENT_INSTRUCTION,
         "icon": "sparkle",
         "tags": ["官方", "数据分析", "问数"],
@@ -298,7 +298,7 @@ def ensure_super_agent(database: Database, workspace_id: str, actor_id: str) -> 
         "provider_id": None,
         "skill_id": None,
         "skill_ids": [],
-        "welcome": "问我任何企业数据问题，我会自动选择合适的技能并给出可核验的结论。",
+        "welcome": "请描述业务问题、分析对象和时间范围，查询数据、开展分析并查看结果依据。",
         "suggested_questions": demo_sales.sample_questions()[:4],
         "visibility": "workspace",
         "status": "published",

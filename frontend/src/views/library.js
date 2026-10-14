@@ -298,7 +298,7 @@ export const LibraryView = {
         <header class="page-head">
           <div class="grow">
             <h1 class="page-head__title">资料库</h1>
-            <p class="page-head__desc">分析产出的报告、演示文稿、表格和图片都在这里，可以预览、下载，并围绕它继续提问。</p>
+            <p class="page-head__desc">集中管理分析成果和上传文件，按文件类型预览、下载或继续提问。</p>
           </div>
           <div v-if="canAnalyze" class="page-head__actions">
             <label class="btn btn--sm">
@@ -328,8 +328,8 @@ export const LibraryView = {
 
         <div v-else-if="loadError" class="card stack"><p class="small" role="alert" style="color:var(--danger)">{{ loadError }}</p><button class="btn btn--sm" @click="load">重新加载资料</button></div>
         <EmptyState v-else-if="!filtered.length" icon="library"
-                    :title="query || category !== '全部' ? '没有匹配的资料' : '资料库还是空的'"
-                    :text="query || category !== '全部' ? '调整关键词或资料分类后重试。' : '完成一次分析后点击「生成报告 / PPT / Excel」，产出会自动出现在这里。'" />
+                    :title="query || category !== '全部' ? '没有匹配的资料' : '暂无资料'"
+                    :text="query || category !== '全部' ? '调整关键词或资料分类后重试。' : '上传文件，或在已发布的分析结果中生成报告、PPT、导出 Excel。'" />
 
         <div v-else class="file-grid">
           <article v-for="file in filtered" :key="file.id" class="card card--interactive file-tile">

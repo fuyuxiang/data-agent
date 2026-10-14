@@ -97,7 +97,7 @@ export const RunsView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">运行记录</h1>
-          <p class="page-head__desc">每一次分析的执行轨迹：用了哪些技能、哪些工具、结果是否通过核验。</p>
+          <p class="page-head__desc">查看分析状态、使用的技能与操作记录，追溯结果校验和文件生成情况。</p>
         </div>
       </header>
 
@@ -105,7 +105,7 @@ export const RunsView = {
         <SearchInput v-model="query" placeholder="搜索问题、智能体或技能" style="width:280px" />
         <div class="segmented">
           <button :class="{ active: !statusFilter }" @click="statusFilter = ''">全部</button>
-          <button :class="{ active: statusFilter === 'finished' }" @click="statusFilter = 'finished'">已完成</button>
+          <button :class="{ active: statusFilter === 'finished' }" @click="statusFilter = 'finished'">已结束</button>
           <button :class="{ active: statusFilter === 'failed' }" @click="statusFilter = 'failed'">失败</button>
           <button :class="{ active: statusFilter === 'cancelled' }" @click="statusFilter = 'cancelled'">已取消</button>
         </div>
@@ -120,7 +120,7 @@ export const RunsView = {
       <div v-else-if="loadError" class="insight insight--risk" role="alert"><div class="grow"><b>运行记录加载失败</b><p class="small">{{ loadError }}</p></div><button class="btn btn--sm" @click="load">重试</button></div>
 
       <EmptyState v-else-if="!filtered.length" icon="history" :title="runs.length ? '没有匹配的运行记录' : '还没有运行记录'"
-                  :text="runs.length ? '调整搜索词或状态筛选后重试。' : '用户在工作台提问后，这里会记录完整的执行轨迹。'" />
+                  :text="runs.length ? '调整搜索词或状态筛选后重试。' : '发起分析后，可在这里查看状态、技能与操作记录。'" />
 
       <div v-else class="table-wrap">
         <table class="table">
@@ -228,7 +228,7 @@ export const RunsView = {
 
         <div v-else class="stack" style="margin-top:16px">
           <EmptyState v-if="!detail.artifacts.length" icon="file" title="没有产出文件"
-                      text="在结果页点击「生成报告 / PPT / Excel」后会出现在这里。" />
+                      text="在已发布结果中生成报告或 PPT、导出 Excel 后，可在这里查看文件。" />
           <article v-for="item in detail.artifacts" v-else :key="item.id" class="file-card">
             <span class="file-card__icon"><Icon name="fileText" :size="18" /></span>
             <div class="grow">
@@ -284,7 +284,7 @@ export const EvaluationsView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">评测</h1>
-          <p class="page-head__desc">用户反馈、错误统计与质量趋势。反馈不只是一个赞踩按钮，它要能说明哪里不对。</p>
+          <p class="page-head__desc">汇总用户反馈、运行异常与模型用量，辅助定位分析问题。</p>
         </div>
         <div class="page-head__actions">
           <button class="btn btn--sm" :disabled="loading" @click="load"><Icon name="refresh" :size="14" />{{ loading ? '刷新中…' : '刷新' }}</button>
@@ -300,15 +300,15 @@ export const EvaluationsView = {
       <template v-else-if="data">
         <div class="metric-strip">
           <div class="metric-strip__item">
-            <div class="metric-strip__label">总运行</div>
+            <div class="metric-strip__label">分析次数</div>
             <div class="metric-strip__value">{{ data.totals.runs }}</div>
           </div>
           <div class="metric-strip__item">
-            <div class="metric-strip__label">已完成</div>
+            <div class="metric-strip__label">已结束</div>
             <div class="metric-strip__value">{{ data.totals.finished }}</div>
           </div>
           <div class="metric-strip__item">
-            <div class="metric-strip__label">通过核验</div>
+            <div class="metric-strip__label">通过发布校验</div>
             <div class="metric-strip__value">{{ data.totals.published }}</div>
           </div>
           <div class="metric-strip__item">
@@ -316,7 +316,7 @@ export const EvaluationsView = {
             <div class="metric-strip__value">{{ data.totals.failed }}</div>
           </div>
           <div class="metric-strip__item">
-            <div class="metric-strip__label">满意度</div>
+            <div class="metric-strip__label">正向反馈占比</div>
             <div class="metric-strip__value">
               {{ data.totals.satisfaction === null ? '—' : Math.round(data.totals.satisfaction * 100) + '%' }}
             </div>
@@ -326,7 +326,7 @@ export const EvaluationsView = {
         <div class="grid grid--2" style="margin-top:16px">
           <div class="card">
             <h2 class="card__title" style="margin-bottom:4px">负反馈原因</h2>
-            <p class="card__hint" style="margin-bottom:14px">用户认为哪里不对</p>
+            <p class="card__hint" style="margin-bottom:14px">用户反馈的主要问题类型</p>
             <div class="stack" style="display:flex;flex-direction:column;gap:10px">
               <div v-for="reason in data.reasons" :key="reason.key">
                 <div class="row row--between small" style="margin-bottom:4px">
@@ -340,9 +340,9 @@ export const EvaluationsView = {
           </div>
 
           <div class="card">
-            <h2 class="card__title" style="margin-bottom:4px">失败原因</h2>
-            <p class="card__hint" style="margin-bottom:14px">最常见的运行中止原因</p>
-            <EmptyState v-if="!data.failures.length" icon="success" title="没有失败记录" />
+            <h2 class="card__title" style="margin-bottom:4px">未完成原因</h2>
+            <p class="card__hint" style="margin-bottom:14px">分析失败或取消的主要原因</p>
+            <EmptyState v-if="!data.failures.length" icon="success" title="暂无失败或取消记录" />
             <div v-else class="stack" style="display:flex;flex-direction:column;gap:10px">
               <div v-for="item in data.failures" :key="item.reason">
                 <div class="row row--between small" style="margin-bottom:4px">
@@ -374,9 +374,9 @@ export const EvaluationsView = {
 
           <div class="card">
             <h2 class="card__title" style="margin-bottom:4px">最近反馈</h2>
-            <p class="card__hint" style="margin-bottom:14px">每条反馈都要能定位到具体运行</p>
+            <p class="card__hint" style="margin-bottom:14px">查看近期分析反馈，结合运行记录定位问题</p>
             <EmptyState v-if="!data.feedback.length" icon="chat" title="还没有反馈"
-                        text="用户在分析结果页点赞或点踩后会出现在这里。" />
+                        text="用户在分析结果页提交反馈后，可在这里查看。" />
             <div v-else class="stack" style="display:flex;flex-direction:column;gap:8px">
               <article v-for="item in data.feedback" :key="item.id" class="card" style="padding:10px 12px">
                 <div class="row row--between">

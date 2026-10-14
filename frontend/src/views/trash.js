@@ -103,7 +103,7 @@ export const TrashView = {
       <header class="page-head">
         <div class="grow">
           <h1 class="page-head__title">回收站</h1>
-          <p class="page-head__desc">恢复误删的内容。删除分析不影响资料库成果，执行记录会保留。</p>
+          <p class="page-head__desc">恢复有权访问的已删除内容，或永久删除不再需要的内容。分析删除后，资料库成果和执行记录仍保留。</p>
         </div>
         <button class="btn btn--sm" :disabled="loading || !!busy" @click="load"><Icon name="refresh" :size="14" />刷新</button>
       </header>
@@ -134,7 +134,7 @@ export const TrashView = {
         </article>
       </div>
       <Modal :open="!!deleteTarget" title="永久删除" size="small" @close="closeDelete">
-        <p v-if="deleteTarget" class="small">永久删除「{{ deleteTarget.title }}」及其文件？此操作无法恢复。</p>
+        <p v-if="deleteTarget" class="small">永久删除「{{ deleteTarget.title }}」及相关文件？此操作无法恢复。</p>
         <p v-if="deleteError" class="small" style="color:var(--danger)">{{ deleteError }}</p>
         <template #footer>
           <button class="btn" :disabled="!!busy" @click="closeDelete">取消</button>

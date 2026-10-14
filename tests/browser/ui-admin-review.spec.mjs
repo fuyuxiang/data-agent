@@ -324,7 +324,7 @@ test('集成提交真实类型和 SMTP 字段，现有连接不调用不存在�
   expect(payloads[0].type).toBe('lark');
   await feishu.getByRole('button', { name: '查看配置' }).click();
   modal = page.getByRole('dialog');
-  await expect(modal).toContainText('不支持更新已保存的连接凭据');
+  await expect(modal).toContainText('请先移除当前连接，再重新接入');
   await expect(modal.getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
   await modal.getByRole('button', { name: '关闭', exact: true }).last().click();
   await page.locator('.file-tile').filter({ hasText: '邮件' }).getByRole('button', { name: '接入', exact: true }).click();
@@ -567,7 +567,7 @@ test('技能改问题或配置会失效旧报告，保存期间迟到测试不�
   await firstResponse;
   await expect(modal).toContainText('第2次命中结果');
   await expect(modal).not.toContainText('第1次命中结果');
-  await modal.getByPlaceholder('一句话说明这个技能解决什么问题，Agent 靠它决定何时使用。').fill('更新后的技能说明');
+  await modal.getByPlaceholder('说明技能适用的业务任务和使用条件').fill('更新后的技能说明');
   await expect(modal).not.toContainText('第2次命中结果');
   await expect(testButton).toBeDisabled();
   await modal.getByRole('button', { name: '保存', exact: true }).click();

@@ -117,7 +117,7 @@ test('技能预判只匹配最新问题，清空后旧响应不恢复提示', as
   first.release();
   await expect(page.locator('.composer__bar')).not.toContainText('旧技能');
   await page.locator('.composer__input').fill('');
-  await expect(page.locator('.composer__bar')).not.toContainText('将使用');
+  await expect(page.locator('.composer__bar')).not.toContainText('匹配技能：');
 });
 
 test('提交即时禁用并防重复，失败保留输入和附件', async ({ page }) => {
@@ -278,8 +278,8 @@ test('来源 SQL 局部滚动且可复制原文', async ({ page, context }) => {
   await expect(drawer).toBeVisible();
   await expect(drawer.locator('pre')).toHaveText(sql);
   expect(await drawer.locator('pre').evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
-  await drawer.getByRole('button', { name: '复制执行的 SQL', exact: true }).click();
-  await expect(page.locator('.toast')).toContainText('执行的 SQL已复制');
+  await drawer.getByRole('button', { name: '复制数据查询语句（SQL）', exact: true }).click();
+  await expect(page.locator('.toast')).toContainText('数据查询语句（SQL）已复制');
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(sql);
 });
 
