@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import sqlglot
+from sqlglot import exp
 
 from .analytics import profile
 from .authorization import actor_role, require_sources_access
@@ -43,11 +43,10 @@ def profile_database(source: dict, *, table_name: str | None = None, actor_id: s
         raise ValueError("样本探查最多选择 50 个字段，汇总探查最多选择 10 个字段")
     dialect = source.get("engine_family") if source.get("engine_family") in {"doris", "starrocks"} else {
         "postgresql": "postgres", "mssql": "tsql"}.get(source.get("driver"), source.get("driver", "mysql"))
-    def quote(value):
-        return sqlglot.exp.Identifier(this=str(value), quoted=True).sql(dialect=dialect)
-    qualified = quote(table["source_name"])
-    if table.get("schema_name"):
-        qualified = quote(table["schema_name"]) + "." + qualified
+    relation = exp.Table(
+        this=exp.to_identifier(table["source_name"], quoted=True),
+        db=exp.to_identifier(table["schema_name"], quoted=True) if table.get("schema_name") else None,
+    )
     predicates = []
     if time_format not in {"iso", "yyyyMMdd", "yyyyMMddHH", "unix_seconds", "unix_milliseconds"}:
         raise ValueError("时间字段格式不受支持，请选择字段实际使用的存储格式")
@@ -67,7 +66,7 @@ def profile_database(source: dict, *, table_name: str | None = None, actor_id: s
                 raise ValueError("开始和结束时间须使用相同的时区格式") from exc
             if not ordered:
                 raise ValueError("结束时间必须晚于开始时间")
-        for value, operator in ((time_start, ">="), (time_end, "<")):
+        for value, operator in ((time_start, exp.GTE), (time_end, exp.LT)):
             if value:
                 if time_format != "iso":
                     parsed = datetime.fromisoformat(value)
@@ -77,8 +76,9 @@ def profile_database(source: dict, *, table_name: str | None = None, actor_id: s
                         if parsed.tzinfo is None:
                             parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
                         value = str(int(parsed.timestamp() * (1000 if time_format == "unix_milliseconds" else 1)))
-                predicates.append(f"{quote(time_column)} {operator} {sqlglot.exp.Literal.string(value).sql(dialect=dialect)}")
-    where = " WHERE " + " AND ".join(predicates) if predicates else ""
+                predicates.append(operator(
+                    this=exp.column(time_column, quoted=True), expression=exp.Literal.string(value),
+                ))
     scope = {"table": name, "columns": chosen, "time_column": time_column,
              "time_start": time_start, "time_end": time_end, "row_policy_applied": bool(row_filters)}
     scope["time_format"] = time_format
@@ -95,7 +95,10 @@ def profile_database(source: dict, *, table_name: str | None = None, actor_id: s
         return {**cached["profile"], "cached": True}
     if mode == "sample":
         size = max(1, min(int(sample_rows), 5000, settings().max_query_rows))
-        sql = f"SELECT {', '.join(quote(column) for column in chosen)} FROM {qualified}{where}"
+        statement = exp.select(*(exp.column(column, quoted=True) for column in chosen)).from_(relation)
+        if predicates:
+            statement = statement.where(*predicates)
+        sql = statement.sql(dialect=dialect)
         result = execute_query([source["id"]], sql, source.get("workspace_id", "default"), size,
                                actor_id=actor_id, should_cancel=should_cancel)
         value = profile(load_result_frame(result["id"]))
@@ -106,14 +109,21 @@ def profile_database(source: dict, *, table_name: str | None = None, actor_id: s
                      sampling_note="有界预览样本，未进行随机或分层抽样；缺失和重复统计仅描述所选字段及返回记录，不能推断全表分布。",
                      total_rows_estimate=None if row_filters else table.get("rows"))
     else:
-        fields = ["COUNT(*) AS profile_count"]
+        fields = [exp.Count(this=exp.Star()).as_("profile_count")]
         approximate = source.get("engine_family") in {"doris", "starrocks"}
         for index, column in enumerate(chosen):
-            identifier = quote(column)
-            fields.append(f"SUM(CASE WHEN {identifier} IS NULL THEN 1 ELSE 0 END) AS missing_{index}")
-            fields.append(f"{'APPROX_COUNT_DISTINCT' if approximate else 'COUNT'}"
-                          f"({'DISTINCT ' if not approximate else ''}{identifier}) AS unique_{index}")
-        result = execute_query([source["id"]], f"SELECT {', '.join(fields)} FROM {qualified}{where}",
+            identifier = exp.column(column, quoted=True)
+            missing = exp.Case().when(
+                exp.Is(this=identifier.copy(), expression=exp.Null()), exp.Literal.number(1),
+            ).else_(exp.Literal.number(0))
+            fields.append(exp.Sum(this=missing).as_(f"missing_{index}"))
+            distinct = (exp.ApproxDistinct(this=identifier) if approximate
+                        else exp.Count(this=exp.Distinct(expressions=[identifier])))
+            fields.append(distinct.as_(f"unique_{index}"))
+        statement = exp.select(*fields).from_(relation)
+        if predicates:
+            statement = statement.where(*predicates)
+        result = execute_query([source["id"]], statement.sql(dialect=dialect),
                                source.get("workspace_id", "default"), 1, actor_id=actor_id, should_cancel=should_cancel)
         row = result["data"][0]
         count = int(row["profile_count"])

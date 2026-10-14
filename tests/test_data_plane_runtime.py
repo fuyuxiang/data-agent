@@ -199,6 +199,37 @@ def test_trino_catalog_schema_and_table_pages_reach_later_objects(app, monkeypat
         assert collected == names
 
 
+@pytest.mark.parametrize("scope", [
+    {},
+    {"catalog": 'lake"; DROP TABLE orders; --'},
+    {"catalog": 'lake"; DROP TABLE orders; --', "schema": "analytics'; DROP TABLE orders; --"},
+])
+def test_trino_discovery_keeps_untrusted_names_and_cursor_in_their_sql_nodes(app, monkeypatch, scope):
+    import sqlglot
+    from sqlglot import exp
+
+    adapter = TrinoAdapter(app.extensions["meridian_db"], "default", TrinoConfig(
+        engine_id="safe-catalog", endpoint="https://trino.example.test", user="actor", catalog="", schema="",
+    ))
+    cursor = "object'; DROP TABLE orders; --"
+
+    def small(sql, *, limit, **_kwargs):
+        statements = sqlglot.parse(sql, read="trino")
+        assert len(statements) == 1
+        statement = statements[0]
+        assert isinstance(statement, exp.Select)
+        assert statement.find(exp.GT).expression.this == cursor
+        assert int(statement.args["limit"].expression.this) == limit == 4
+        if "catalog" in scope:
+            assert statement.find(exp.Table).catalog == scope["catalog"]
+        if "schema" in scope:
+            assert statement.find(exp.EQ).expression.this == scope["schema"]
+        return [["object_z"]]
+
+    monkeypatch.setattr(adapter, "_execute_small", small)
+    assert adapter.discover(**scope, cursor=cursor, limit=3) == {"items": ["object_z"], "next_cursor": None}
+
+
 def test_trino_readonly_and_same_business_schema_never_issue_ctas(app, monkeypatch):
     for read_only, scratch in ((True,'scratch'), (False,'analytics')):
         adapter = TrinoAdapter(app.extensions['meridian_db'], 'default', TrinoConfig(

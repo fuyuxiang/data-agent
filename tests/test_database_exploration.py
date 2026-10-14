@@ -111,6 +111,65 @@ def test_sample_and_scope_aggregate_have_distinct_accuracy_and_cache(app, client
         assert partial['completeness'] == 'partial'
 
 
+@pytest.mark.parametrize("mode", ["sample", "aggregate"])
+def test_database_profile_quotes_special_names_and_applies_time_window(app, client, mode):
+    from backend.services.database_profile import profile_database
+
+    path = app.config["SETTINGS"].storage_dir / "special-names.sqlite3"
+    table_name = 'orders"; DROP TABLE guard; --'
+    column_name = 'amount"; DROP TABLE guard; --'
+    time_column = 'occurred"at'
+    def quote(name):
+        return '"' + name.replace('"', '""') + '"'
+
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE guard (value INTEGER)")
+        connection.execute("INSERT INTO guard VALUES (1)")
+        connection.execute(f"CREATE TABLE {quote(table_name)} ({quote(time_column)} TEXT, {quote(column_name)} TEXT)")
+        connection.executemany(f"INSERT INTO {quote(table_name)} VALUES (?, ?)", [
+            ("2026-10-01", "north"), ("2026-10-02", None), ("2026-10-03", "south"),
+        ])
+    registered = client.post("/api/sources/database", json={"name": "Special names", "url": f"sqlite:///{path}"})
+    assert registered.status_code == 201, registered.get_json()
+    source = registered.get_json()["item"]
+    table = next(entry for entry in source["tables"] if entry["source_name"] == table_name)
+
+    with app.app_context():
+        result = profile_database(
+            source, table_name=table["name"], mode=mode, columns=[column_name],
+            time_column=time_column, time_start="2026-10-01", time_end="2026-10-03",
+        )
+
+    assert result["rows"] == 2
+    assert result["missing_cells"] == 1
+    assert result["accuracy"] == "exact"
+    if mode == "aggregate":
+        assert result["columns"][0]["unique"] == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT value FROM guard").fetchall() == [(1,)]
+        assert connection.execute(f"SELECT COUNT(*) FROM {quote(table_name)}").fetchone() == (3,)
+
+
+@pytest.mark.parametrize("family", ["doris", "starrocks"])
+def test_database_aggregate_profile_uses_native_approximate_distinct(app, client, monkeypatch, family):
+    from backend.services import database_profile
+
+    source, _ = register_fixture(app, client, rows=2)
+    app.extensions["meridian_db"].patch("sources", source["id"], {"engine_family": family}, workspace_id="default")
+
+    def query(_sources, sql, *_args, **_kwargs):
+        assert "APPROX_COUNT_DISTINCT(`field_000`)" in sql
+        assert "COUNT(*) AS profile_count" in sql
+        return {"id": "aggregate-result", "data": [{"profile_count": 2, "missing_0": 0, "unique_0": 2}]}
+
+    monkeypatch.setattr(database_profile, "execute_query", query)
+    with app.app_context():
+        result = database_profile.profile_database(source, mode="aggregate", columns=["field_000"])
+
+    assert result["accuracy"] == "approximate"
+    assert result["columns"][0]["unique_estimated"] is True
+
+
 def test_stream_budget_rejects_before_persisting_large_result(app, client):
     source, path = register_fixture(app, client, rows=0)
     with sqlite3.connect(path) as connection:

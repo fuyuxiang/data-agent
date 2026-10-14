@@ -5,8 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-import sqlglot
 from requests.auth import HTTPBasicAuth
+from sqlglot import exp
 
 from ...core.database import Database, utcnow
 from ..security import safe_http_request, validate_outbound_url
@@ -68,29 +68,26 @@ class TrinoAdapter:
 
     def discover(self, *, catalog: str | None = None, schema: str | None = None, limit: int = 100, cursor: str = "") -> dict:
         size = max(1, min(int(limit), 500))
-        cursor_literal = sqlglot.exp.Literal.string(cursor).sql(dialect="trino")
         chosen_catalog = _identifier(catalog or self.config.catalog)
+        predicates = []
         if not chosen_catalog:
-            rows = self._execute_small(
-                f"SELECT catalog_name FROM system.metadata.catalogs WHERE catalog_name>{cursor_literal} "
-                f"ORDER BY catalog_name LIMIT {size + 1}", limit=size + 1)
-            names = [str(row[0]) for row in rows]
-            return _page_names(names, limit)
-        chosen_schema = _identifier(schema or "")
-        if not chosen_schema:
-            rows = self._execute_small(
-                f"SELECT schema_name FROM {_quote(chosen_catalog)}.information_schema.schemata "
-                f"WHERE schema_name>{cursor_literal} ORDER BY schema_name LIMIT {size + 1}", limit=size + 1)
-            names = [str(row[0]) for row in rows]
-            return _page_names(names, limit)
+            column = exp.column("catalog_name")
+            relation = exp.to_table("system.metadata.catalogs")
+        else:
+            chosen_schema = _identifier(schema or "")
+            column = exp.column("table_name" if chosen_schema else "schema_name")
+            relation = exp.Table(
+                this=exp.to_identifier("tables" if chosen_schema else "schemata"),
+                db=exp.to_identifier("information_schema"),
+                catalog=exp.to_identifier(chosen_catalog, quoted=True),
+            )
+            if chosen_schema:
+                predicates.append(exp.EQ(this=exp.column("table_schema"), expression=exp.Literal.string(chosen_schema)))
         # Push the cursor before the row bound. Re-reading the first N SHOW
         # rows and filtering afterwards permanently hides later catalog pages.
-        schema_literal = sqlglot.exp.Literal.string(chosen_schema).sql(dialect="trino")
-        rows = self._execute_small(
-            f"SELECT table_name FROM {_quote(chosen_catalog)}.information_schema.tables "
-            f"WHERE table_schema={schema_literal} AND table_name>{cursor_literal} "
-            f"ORDER BY table_name LIMIT {size + 1}", limit=size + 1,
-        )
+        predicates.append(exp.GT(this=column.copy(), expression=exp.Literal.string(cursor)))
+        statement = exp.select(column).from_(relation).where(*predicates).order_by(column.copy()).limit(size + 1)
+        rows = self._execute_small(statement.sql(dialect="trino"), limit=size + 1)
         names = [str(row[0]) for row in rows]
         return _page_names(names, limit)
 
