@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 for (const width of [1280, 390]) {
-  test(`报告内容、指标解释与多表分页在 ${width}px 可用`, async ({ page }) => {
+  test(`报告内容、指标解释与多表分页在 ${width}px 可用`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const created = await page.request.post('/api/analyses', { data: {
       objective: '比较已选数据并生成报告', source_ids: [],
@@ -75,7 +75,7 @@ for (const width of [1280, 390]) {
     await expect(page.locator('.file-card')).toContainText('分组分析网页报告');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({ path: `/private/tmp/dataagent-report-ui-${width}.png`, fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`dataagent-report-ui-${width}.png`), fullPage: true });
   });
 }
 
