@@ -82,6 +82,8 @@ export const LibraryView = {
       uploading: false,
       renaming: false,
       busyFiles: [],
+      asking: '',
+      disposed: false,
     };
   },
   computed: {
@@ -104,6 +106,7 @@ export const LibraryView = {
     await this.load();
   },
   beforeUnmount() {
+    this.disposed = true;
     document.removeEventListener('pointerdown', this.dismissMenu);
     document.removeEventListener('keydown', this.dismissMenu);
     this.previewRequest += 1;
@@ -245,16 +248,28 @@ export const LibraryView = {
       return Boolean(file.run_id) || ['.docx', '.xlsx', '.pdf', '.md', '.txt'].includes(file.extension);
     },
     async askAbout(file) {
-      if (!this.canAsk(file)) return;
+      if (!this.canAnalyze || !this.canAsk(file) || this.asking) return;
       if (file.run_id) {
+        this.asking = file.id;
         try {
-          const detail = await actions.get(`/api/analyses/${file.run_id}`);
+          const detail = await actions.get(`/api/library/${encodeURIComponent(file.id)}`);
+          if (this.disposed) return;
+          const analysis = detail.item?.analysis;
+          if (!analysis?.session_id || analysis.id !== file.run_id) throw new Error('原分析已不可用，请重新选择资料');
+          if (analysis.archived || analysis.session_archived) {
+            toast('原分析或会话已移入回收站，恢复后可继续追问；当前成果仍可预览和下载', '请先恢复分析');
+            navigate('trash', { collection: analysis.session_archived ? 'sessions' : 'agent_runs' });
+            return;
+          }
           navigate('conversation', {
-            id: detail.item.session_id,
+            id: analysis.session_id,
+            run: analysis.id,
             ask: `围绕「${file.title}」继续追问：`,
           });
         } catch (error) {
-          toast(error.message, '无法打开原分析', 'error');
+          if (!this.disposed) toast(error.message, '无法打开原分析', 'error');
+        } finally {
+          this.asking = '';
         }
         return;
       }
@@ -363,7 +378,7 @@ export const LibraryView = {
                 <Icon name="eye" :size="14" />预览
               </button>
               <button v-if="canAnalyze" class="btn btn--sm" @click="download(file)"><Icon name="download" :size="14" />下载</button>
-              <button v-if="canAnalyze && canAsk(file)" class="btn btn--sm" @click="askAbout(file)"><Icon name="chat" :size="14" />追问</button>
+              <button v-if="canAnalyze && canAsk(file)" class="btn btn--sm" :disabled="!!asking" @click="askAbout(file)"><Icon name="chat" :size="14" />{{ asking === file.id ? '正在打开…' : '追问' }}</button>
             </div>
           </article>
         </div>

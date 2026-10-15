@@ -17,6 +17,19 @@ import { navigate } from '../router.js';
 
 const POLL_MS = 1200;
 
+// Refresh the newest server page while retaining only older loaded pages.
+// Missing records inside the refreshed range may have been archived in another tab.
+function olderHistory(previous, latest, cursorKey, hasMore) {
+  if (!hasMore || !latest.length) return [];
+  const first = latest[0];
+  const index = previous.findIndex(item => item.id === first.id);
+  if (index >= 0) return previous.slice(0, index);
+  return previous.filter(item => {
+    const time = String(item.created_at || '').localeCompare(String(first.created_at || ''));
+    return time < 0 || (time === 0 && Number(item[cursorKey]) > 0 && Number(item[cursorKey]) < Number(first[cursorKey]));
+  });
+}
+
 export const ConversationView = {
   name: 'ConversationView',
   components: {
@@ -38,7 +51,22 @@ export const ConversationView = {
       sourceDrawer: { open: false, title: '', blocks: [] },
       filePreview: null,
       feedback: {},
+      feedbackBusy: {},
+      feedbackTarget: '',
+      feedbackRating: 'incorrect',
+      feedbackComment: '',
+      feedbackError: '',
+      followupRunId: '',
+      nextMessageBefore: null,
+      hasMoreMessages: false,
+      runOffset: 0,
+      nextRunBefore: null,
+      hasMoreRuns: false,
+      loadingEarlier: false,
+      historyError: '',
       submitting: false,
+      requestKey: '',
+      requestFingerprint: '',
       clarificationAnswer: '',
       loading: true,
       runOperations: {},
@@ -62,6 +90,12 @@ export const ConversationView = {
     activeRun() {
       const run = this.runs.find(item => item.id === this.activeRunId);
       return run || this.runs.at(-1) || null;
+    },
+    requestedRunId() {
+      return state.routeParams.run || '';
+    },
+    followupRun() {
+      return this.runs.find(item => item.id === this.followupRunId) || null;
     },
     pendingClarification() {
       return this.runs.find(item => item.execution_status === 'waiting_input'
@@ -99,9 +133,6 @@ export const ConversationView = {
   },
   async mounted() {
     await this.load();
-    if (state.routeParams.ask && this.$refs.composer) {
-      this.$refs.composer.setText(state.routeParams.ask, { focus: true });
-    }
   },
   beforeUnmount() {
     this.disposed = true;
@@ -112,6 +143,9 @@ export const ConversationView = {
     sessionId() {
       this.load();
     },
+    requestedRunId(value) {
+      if (value !== this.followupRunId) this.load();
+    },
   },
   methods: {
     navigate,
@@ -121,6 +155,15 @@ export const ConversationView = {
       this.sourceDrawer = { open: false, title: '', blocks: [] };
       this.filePreview = null;
       this.clarificationAnswer = '';
+      this.feedbackTarget = '';
+      this.followupRunId = '';
+      this.requestKey = '';
+      this.runOffset = 0;
+      this.nextRunBefore = null;
+      this.hasMoreRuns = false;
+      this.hasMoreMessages = false;
+      this.nextMessageBefore = null;
+      this.historyError = '';
       this.pollError = '';
       this.loadError = '';
       const epoch = this.pollEpoch;
@@ -132,6 +175,14 @@ export const ConversationView = {
           actions.get(`/api/analyses?session_id=${sessionId}&limit=50`),
         ]);
         if (epoch !== this.pollEpoch || this.disposed) return;
+        // A refreshed history URL can point outside bootstrap's recent window.
+        // Keep the shell and the next workbench question on this conversation.
+        if (detail.item) {
+          const saved = state.sessions.find(item => item.id === sessionId);
+          if (saved) Object.assign(saved, detail.item);
+          else state.sessions.push(detail.item);
+        }
+        state.activeSessionId = sessionId;
         this.results = {};
         this.resultErrors = {};
         this.tables = {};
@@ -139,11 +190,28 @@ export const ConversationView = {
         this.feedback = {};
         this.runErrors = {};
         this.messages = detail.messages || [];
+        this.nextMessageBefore = detail.message_page?.next_before ?? null;
+        this.hasMoreMessages = detail.message_page?.has_more === true;
         this.runs = (runs.items || []).slice().reverse();
-        this.activeRunId = this.runs.at(-1)?.id || '';
+        this.hasMoreRuns = runs.has_more ?? (runs.items || []).length >= 50;
+        this.runOffset = runs.next_offset ?? (runs.items || []).length;
+        this.nextRunBefore = runs.next_before ?? null;
+        const requestedId = this.requestedRunId;
+        if (requestedId && !this.runs.some(item => item.id === requestedId)) {
+          const original = await actions.get(`/api/analyses/${encodeURIComponent(requestedId)}`);
+          if (epoch !== this.pollEpoch || this.disposed) return;
+          if (original.item?.session_id !== sessionId) throw new Error('该成果不属于当前会话，请从资料库重新打开');
+          this.runs.unshift(original.item);
+        }
+        this.followupRunId = requestedId || this.runs.at(-1)?.id || '';
+        this.activeRunId = this.followupRunId;
         await this.hydrate(epoch);
         if (epoch === this.pollEpoch) {
           this.loading = false;
+          await nextTick();
+          if (epoch !== this.pollEpoch || this.disposed) return;
+          this.prepareComposer(this.followupRun, detail.item?.source_ids || []);
+          if (state.routeParams.ask) this.$refs.composer?.setText(state.routeParams.ask, { focus: true });
           if (this.running) this.startPolling();
         }
       } catch (error) {
@@ -173,6 +241,7 @@ export const ConversationView = {
           delete this.resultErrors[run.id];
           this.artifacts[run.id] = response.artifacts || [];
           this.tables[run.id] = tables;
+          await this.loadFeedback(run.id, epoch);
         } catch (error) {
           if (epoch === this.pollEpoch && !this.disposed) this.resultErrors[run.id] = error.message || '结果暂时无法读取';
         }
@@ -247,15 +316,30 @@ export const ConversationView = {
           const runs = await actions.get(`/api/analyses?session_id=${this.sessionId}&limit=50`);
           if (epoch !== this.pollEpoch || this.disposed) return;
           this.pollError = '';
-          const next = (runs.items || []).slice().reverse();
+          const recent = (runs.items || []).slice().reverse();
+          const older = olderHistory(this.runs, recent, 'history_cursor', runs.has_more ?? recent.length >= 50);
+          const gap = older.length && recent.length && !recent.some(item => this.runs.some(previous => previous.id === item.id));
+          const next = [...older, ...recent];
           const changed = next.length !== this.runs.length || next.some(item =>
             this.runs.find(previous => previous.id === item.id)?.execution_status !== item.execution_status);
+          this.runOffset = Math.max(0, this.runOffset + next.length - this.runs.length);
           this.runs = next;
+          if (this.followupRunId && !this.followupRun) {
+            this.followupRunId = this.runs.at(-1)?.id || '';
+            this.prepareComposer(this.followupRun);
+          }
+          if (runs.has_more !== undefined) {
+            this.hasMoreRuns = runs.has_more && (this.hasMoreRuns || !older.length || !!gap);
+            if (gap) {
+              this.nextRunBefore = runs.next_before ?? null;
+              this.runOffset = runs.next_offset ?? recent.length;
+            }
+          }
           if (changed || !this.running) await this.refreshMessages(epoch);
           await this.hydrate(epoch);
           if (epoch !== this.pollEpoch || this.disposed) return;
           if (!this.running) {
-            this.stopPolling();
+            this.stopPolling(false);
           }
         } catch (error) {
           if (epoch === this.pollEpoch && !this.disposed) this.pollError = error.message || '暂时无法连接，正在重试';
@@ -264,8 +348,8 @@ export const ConversationView = {
         }
       }, POLL_MS);
     },
-    stopPolling() {
-      this.pollEpoch += 1;
+    stopPolling(invalidate = true) {
+      if (invalidate) this.pollEpoch += 1;
       if (this.polling) clearInterval(this.polling);
       this.polling = null;
     },
@@ -274,10 +358,61 @@ export const ConversationView = {
       try {
         const detail = await actions.get(`/api/sessions/${this.sessionId}`);
         if (epoch !== this.pollEpoch || this.disposed) return;
-        this.messages = detail.messages || [];
+        const latest = detail.messages || [];
+        const older = olderHistory(this.messages, latest, 'cursor', detail.message_page?.has_more === true);
+        const gap = older.length && latest.length && !latest.some(item => this.messages.some(previous => previous.id === item.id));
+        if (gap || !detail.message_page?.has_more) {
+          this.hasMoreMessages = detail.message_page?.has_more === true;
+          this.nextMessageBefore = detail.message_page?.next_before ?? null;
+        }
+        this.messages = [...older, ...latest];
       } catch {
         // 保留旧消息，不因为一次轮询失败清空界面。
       }
+    },
+
+    async loadEarlier() {
+      if (this.loadingEarlier || (!this.hasMoreMessages && !this.hasMoreRuns)) return;
+      const epoch = this.pollEpoch;
+      this.loadingEarlier = true;
+      this.historyError = '';
+      try {
+        const [detail, analyses] = await Promise.all([
+          this.hasMoreMessages ? actions.get(`/api/sessions/${this.sessionId}?before=${this.nextMessageBefore}&message_limit=200`) : null,
+          this.hasMoreRuns ? actions.get(`/api/analyses?session_id=${this.sessionId}&limit=50&${this.nextRunBefore
+            ? 'before=' + this.nextRunBefore : 'offset=' + this.runOffset}`) : null,
+        ]);
+        if (epoch !== this.pollEpoch || this.disposed) return;
+        if (detail) {
+          const byId = new Map([...(detail.messages || []), ...this.messages].map(item => [item.id, item]));
+          this.messages = [...byId.values()];
+          this.nextMessageBefore = detail.message_page?.next_before ?? null;
+          this.hasMoreMessages = detail.message_page?.has_more === true;
+        }
+        if (analyses) {
+          const byId = new Map([...this.runs, ...(analyses.items || [])].map(item => [item.id, item]));
+          this.runs = [...byId.values()].sort((left, right) =>
+            String(left.created_at || '').localeCompare(String(right.created_at || ''))
+            || Number(left.history_cursor || 0) - Number(right.history_cursor || 0));
+          this.runOffset = analyses.next_offset ?? this.runOffset + (analyses.items || []).length;
+          this.nextRunBefore = analyses.next_before ?? null;
+          this.hasMoreRuns = analyses.has_more ?? (analyses.items || []).length >= 50;
+          await this.hydrate(epoch);
+        }
+      } catch (error) {
+        if (epoch === this.pollEpoch && !this.disposed) this.historyError = error.message;
+      } finally {
+        this.loadingEarlier = false;
+      }
+    },
+
+    prepareComposer(run, sourceIds = []) {
+      const composer = this.$refs.composer;
+      if (!composer) return;
+      composer.agentId = run?.agent_id || '';
+      composer.scopeExplicit = true;
+      composer.sourceIds = [...(run?.source_scope || sourceIds)];
+      composer.fileScopeAuto = false;
     },
 
     async ask(payload) {
@@ -286,26 +421,57 @@ export const ConversationView = {
       this.submitting = true;
       this.stopPolling();
       try {
+        const fingerprint = JSON.stringify({
+          sessionId, text: payload.text, sources: payload.sourceIds, agent: payload.agentId,
+          skill: payload.skillHint, parent: this.followupRunId,
+          files: payload.files.map(file => [file.name, file.size, file.lastModified]),
+        });
+        if (!this.requestKey || this.requestFingerprint !== fingerprint) {
+          this.requestKey = crypto.randomUUID();
+          this.requestFingerprint = fingerprint;
+        }
         const body = {
           session_id: sessionId,
           objective: payload.text,
           source_ids: payload.sourceIds,
-          agent_id: payload.agentId || undefined,
+          agent_id: payload.agentId || '',
           skill_id: payload.skillHint || undefined,
+          parent_run_id: this.followupRunId || undefined,
+          run_kind: this.followupRunId ? 'followup' : 'analysis',
+          attachment_count: payload.files.length,
+          idempotency_key: this.requestKey,
         };
         const created = await actions.post('/api/analyses', body);
         if (payload.files.length) {
           try {
             await actions.uploadAttachments(created.item.id, payload.files);
           } catch (error) {
+            this.requestKey = '';
             await actions.post(`/api/analyses/${created.item.id}/control`, { action: 'cancel' }).catch(() => {});
             throw error;
           }
         }
         if (this.disposed || sessionId !== this.sessionId) return;
+        let item = created.item;
+        try {
+          const started = await actions.post(`/api/analyses/${item.id}/start`, {
+            expected_version: item.contract?.version,
+          });
+          item = started.item || item;
+        } catch (error) {
+          const latest = await actions.get(`/api/analyses/${item.id}`).catch(() => null);
+          item = latest?.item || item;
+          if (!this.disposed && sessionId === this.sessionId) {
+            toast(`问题已保存，可在分析口径处重新开始。${error.message}`, '暂未开始分析', 'error');
+          }
+        }
+        if (this.disposed || sessionId !== this.sessionId) return;
+        this.requestKey = '';
         this.$refs.composer?.reset();
-        this.runs.push(created.item);
-        this.activeRunId = created.item.id;
+        this.runs.push(item);
+        this.activeRunId = item.id;
+        this.followupRunId = item.id;
+        navigate('conversation', { id: sessionId, run: item.id });
         await this.refreshMessages();
         this.startPolling();
       } catch (error) {
@@ -326,6 +492,10 @@ export const ConversationView = {
         const revision = detail.item?.contract;
         if (!revision) throw new Error('分析口径不存在，请刷新后重试');
         const contract = { ...revision.payload };
+        if (choices.coverage !== undefined) contract.coverage = choices.coverage.trim();
+        for (const key of ['dimensions', 'metrics']) {
+          if (choices[key] !== undefined) contract[key] = choices[key].split(/[、,，\n]/).map(value => value.trim()).filter(Boolean);
+        }
         if (choices.period) {
           const today = new Date();
           const date = (year, month, day) => `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -360,7 +530,7 @@ export const ConversationView = {
         });
         if (this.disposed || sessionId !== this.sessionId) return;
         this.runs = this.runs.map(item => (item.id === run.id
-          ? { ...item, execution_status: confirmed.item?.execution_status || 'queued' } : item));
+          ? (confirmed.item || { ...item, execution_status: 'queued' }) : item));
         this.startPolling();
       } catch (error) {
         toast(error.message, '无法开始', 'error');
@@ -448,6 +618,12 @@ export const ConversationView = {
         delete this.artifacts[run.id];
         delete this.feedback[run.id];
         this.runs = this.runs.filter(item => item.id !== run.id);
+        this.messages = this.messages.filter(item => item.metadata?.run_id !== run.id);
+        if (this.followupRunId === run.id) {
+          this.followupRunId = this.runs.at(-1)?.id || '';
+          this.prepareComposer(this.followupRun);
+          navigate('conversation', { id: this.sessionId, ...(this.followupRunId ? { run: this.followupRunId } : {}) });
+        }
         this.activeRunId = this.runs.at(-1)?.id || '';
         this.deleteTarget = null;
         await this.refreshMessages();
@@ -481,19 +657,49 @@ export const ConversationView = {
       }
     },
 
-    async sendFeedback(runId, rating) {
-      if (this.feedback[runId]) return;
-      this.feedback[runId] = rating;
+    async loadFeedback(runId, epoch = this.pollEpoch) {
       try {
-        await actions.post('/api/feedback', {
-          run_id: runId,
-          rating: rating === 'up' ? 'correct' : 'incorrect',
-          category: rating === 'up' ? '结果符合预期' : '需要改进',
-        });
+        const response = await actions.get(`/api/analyses/${runId}/feedback`);
+        if (epoch === this.pollEpoch && !this.disposed) this.feedback[runId] = response.item || null;
+      } catch {
+        // Feedback is optional; its temporary unavailability must not hide a result.
+      }
+    },
+    sendFeedback(runId, rating) {
+      if (this.feedbackBusy[runId]) return;
+      if (rating === 'up') {
+        this.saveFeedback(runId, 'correct');
+        return;
+      }
+      this.feedbackTarget = runId;
+      this.feedbackRating = this.feedback[runId]?.rating === 'partially_correct' ? 'partially_correct' : 'incorrect';
+      this.feedbackComment = this.feedback[runId]?.comment || '';
+      this.feedbackError = '';
+    },
+    closeFeedback() {
+      if (!this.feedbackBusy[this.feedbackTarget]) this.feedbackTarget = '';
+    },
+    submitFeedback() {
+      if (!this.feedbackTarget || !this.feedbackComment.trim()) return;
+      this.saveFeedback(this.feedbackTarget, this.feedbackRating, this.feedbackComment.trim());
+    },
+    async saveFeedback(runId, rating, comment = '') {
+      if (this.feedbackBusy[runId]) return;
+      const sessionId = this.sessionId;
+      this.feedbackBusy[runId] = true;
+      this.feedbackError = '';
+      try {
+        const response = await actions.post('/api/feedback', { run_id: runId, rating, comment });
+        if (this.disposed || sessionId !== this.sessionId) return;
+        this.feedback[runId] = response.item || { rating, comment };
+        this.feedbackTarget = '';
         toast('已记录反馈', '反馈已提交');
       } catch (error) {
-        this.feedback[runId] = '';
+        if (this.disposed || sessionId !== this.sessionId) return;
+        this.feedbackError = error.message;
         toast(error.message, '反馈未提交', 'error');
+      } finally {
+        delete this.feedbackBusy[runId];
       }
     },
 
@@ -617,6 +823,10 @@ export const ConversationView = {
       </div>
 
       <div v-else class="conversation" style="padding-top:8px">
+        <div v-if="hasMoreMessages || hasMoreRuns || historyError" class="stack" style="margin-bottom:16px">
+          <button class="btn btn--sm" :disabled="loadingEarlier" @click="loadEarlier">{{ loadingEarlier ? '正在读取…' : '加载更早的对话与分析' }}</button>
+          <p v-if="historyError" class="small" role="alert" style="color:var(--danger)">历史内容暂未加载：{{ historyError }}。可重试，当前对话会保留。</p>
+        </div>
         <template v-for="turn in turns" :key="turn.kind + ':' + turn.id">
           <div v-if="turn.kind === 'message' && turn.message.role === 'user'" class="turn turn--user">
             <div class="turn__bubble">{{ turn.message.content }}</div>
@@ -653,13 +863,14 @@ export const ConversationView = {
             <button v-if="canAnalyze" class="btn btn--sm" :disabled="generating[turn.run.id + ':report_html']" @click="generate(turn.run.id, 'report_html', '网页报告')"><Icon name="fileText" :size="14" />{{ generating[turn.run.id + ':report_html'] ? '生成中…' : '网页报告' }}</button>
             <button class="btn btn--sm" @click="navigate('library')"><Icon name="library" :size="14" />查看资料库</button>
             <span class="grow"></span>
-            <button class="icon-btn tip" data-tip="结果有帮助" aria-label="结果有帮助" :aria-pressed="feedback[turn.run.id] === 'up'" :disabled="!!feedback[turn.run.id]" @click="sendFeedback(turn.run.id, 'up')"><Icon name="thumbUp" :size="16" /></button>
-            <button class="icon-btn tip" data-tip="结果需要改进" aria-label="结果需要改进" :aria-pressed="feedback[turn.run.id] === 'down'" :disabled="!!feedback[turn.run.id]" @click="sendFeedback(turn.run.id, 'down')"><Icon name="thumbDown" :size="16" /></button>
+            <span v-if="feedback[turn.run.id]" class="xs muted">{{ feedback[turn.run.id].rating === 'correct' ? '已反馈：有帮助' : (feedback[turn.run.id].rating === 'partially_correct' ? '已反馈：部分正确' : '已反馈：需要改进') }}</span>
+            <button class="icon-btn tip" data-tip="结果有帮助" aria-label="结果有帮助" :aria-pressed="feedback[turn.run.id]?.rating === 'correct'" :disabled="!!feedbackBusy[turn.run.id]" @click="sendFeedback(turn.run.id, 'up')"><Icon name="thumbUp" :size="16" /></button>
+            <button class="icon-btn tip" data-tip="结果需要改进" aria-label="结果需要改进" :aria-pressed="['incorrect', 'partially_correct'].includes(feedback[turn.run.id]?.rating)" :disabled="!!feedbackBusy[turn.run.id]" @click="sendFeedback(turn.run.id, 'down')"><Icon name="thumbDown" :size="16" /></button>
           </div>
           </div>
         </template>
 
-        <ClarificationCard v-if="canAnalyze && pendingClarification" :contract="pendingClarification.contract" :busy="clarificationBusy || !!runOperations[pendingClarification.id]"
+        <ClarificationCard v-if="canAnalyze && pendingClarification" :key="pendingClarification.id" :contract="pendingClarification.contract" :scope-change="pendingClarification.scope_change" :busy="clarificationBusy || !!runOperations[pendingClarification.id]"
                            @submit="confirmClarification" @cancel="cancelClarification" />
 
         <div v-if="canAnalyze && pendingAnswer" class="card" style="margin:16px 0">
@@ -676,10 +887,30 @@ export const ConversationView = {
     </div>
 
     <div v-if="!loading" class="view__inner view__inner--reading" style="padding:0 28px 24px">
-      <Composer ref="composer" :disabled="running || submitting || !canAnalyze" placeholder="继续追问，或换一个问题…" @submit="ask" />
+      <p v-if="followupRun" class="small muted" style="margin-bottom:10px;overflow-wrap:anywhere">追问依据：{{ followupRun.contract?.payload?.objective || '当前分析' }}。沿用该分析的数据范围，可在下方调整。</p>
+      <Composer ref="composer" :disabled="loading || !!loadError || running || submitting || !canAnalyze" placeholder="继续追问，或换一个问题…" @submit="ask" />
       <p v-if="!canAnalyze" class="small muted">当前为只读权限，可查看已有内容；继续分析需要分析权限。</p>
       <button class="btn btn--sm" style="margin-top:10px" @click="navigate('trash', { collection: 'agent_runs' })"><Icon name="trash" :size="14" />恢复已删除分析</button>
     </div>
+
+    <Modal :open="!!feedbackTarget" title="反馈分析结果" size="small" @close="closeFeedback">
+      <div class="stack">
+        <label class="field"><span>结果评价</span>
+          <select v-model="feedbackRating" class="input" :disabled="!!feedbackBusy[feedbackTarget]" aria-label="结果评价">
+            <option value="incorrect">结果不正确</option><option value="partially_correct">结果部分正确</option>
+          </select>
+        </label>
+        <label class="field"><span>需要改进的问题</span>
+          <textarea v-model="feedbackComment" class="textarea" maxlength="2000" :disabled="!!feedbackBusy[feedbackTarget]" aria-label="需要改进的问题" placeholder="例如：时间范围不符、指标口径有误，或某项结论缺少依据。"></textarea>
+        </label>
+        <p class="xs muted">问题说明会与本次分析一起保存，供管理员复核。可重新打开修改反馈。</p>
+        <p v-if="feedbackError" class="small" role="alert" style="color:var(--danger)">{{ feedbackError }}</p>
+      </div>
+      <template #footer>
+        <button class="btn" :disabled="!!feedbackBusy[feedbackTarget]" @click="closeFeedback">取消</button>
+        <button class="btn btn--primary" :disabled="!!feedbackBusy[feedbackTarget] || !feedbackComment.trim()" @click="submitFeedback">{{ feedbackBusy[feedbackTarget] ? '正在提交…' : '提交反馈' }}</button>
+      </template>
+    </Modal>
 
     <Modal :open="!!deleteTarget" title="删除分析" size="small" @close="closeRunDelete">
       <p v-if="deleteTarget" class="small">将「{{ deleteTarget.contract?.payload?.objective || '这条分析' }}」移入回收站？会话中的提问和回答将隐藏，资料库成果和执行记录会保留，可在回收站恢复。</p>

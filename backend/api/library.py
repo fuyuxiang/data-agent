@@ -179,6 +179,17 @@ def library_detail(record_id: str):
     payload = _public(record)
     payload["source_ids"] = list(record.get("source_ids") or [])
     payload["manifest_id"] = record.get("manifest_id") or ""
+    if record.get("run_id"):
+        store = RunStore(db())
+        run = store.get_run(str(record["run_id"]), workspace_id=workspace_id(), include_archived=True)
+        session_record = db().get("sessions", run["session_id"], workspace_id=workspace_id(), include_archived=True) if run else None
+        # _resolve has checked ownership and current data authorization. Keep
+        # the original analysis identifiable even when it is in the trash.
+        payload["analysis"] = {
+            "id": run["id"], "session_id": run["session_id"],
+            "archived": bool(run.get("archived_at")),
+            "session_archived": bool((session_record or {}).get("archived_at")),
+        } if run else None
     return ok(item=payload)
 
 

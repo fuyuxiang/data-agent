@@ -14,7 +14,9 @@ test('空数据引导明确接入职责，载入演示数据不承诺自动开�
   await page.goto('/#/workbench');
   await expect(page.locator('.workbench__title')).toContainText('业务数据分析');
   await expect(page.locator('.workbench__hello')).not.toContainText('给出可核验的结论');
-  await expect(page.locator('.workbench .card')).toContainText('请联系管理员');
+  // 此处是本地管理员：应直接接入数据，而非要求其联系自己。
+  await expect(page.locator('.workbench .card')).toContainText('接入业务数据');
+  await expect(page.locator('.workbench .card')).not.toContainText('请联系管理员');
   await expect.poll(() => page.locator('.view').evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(2);
   await page.getByRole('button', { name: '使用演示数据', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('合成样例');

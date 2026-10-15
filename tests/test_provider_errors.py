@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from openai import APIConnectionError
 
 
@@ -12,6 +13,32 @@ def _stub_public_dns(monkeypatch):
         "backend.services.security.socket.getaddrinfo",
         lambda _hostname, port: [(None, None, None, None, ("8.8.8.8", port))],
     )
+
+
+@pytest.mark.parametrize('provider_id,enabled', [
+    ('disabled-explicit-provider', False), ('disabled-explicit-provider', 0),
+    ('environment-default', False),
+])
+def test_explicit_disabled_provider_is_rejected_before_building_an_external_client(app, client, monkeypatch, provider_id, enabled):
+    from backend.services.models import resolve_provider
+
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture-key-must-not-be-used')
+    monkeypatch.setattr('backend.services.models._provider_url', lambda value, **_kwargs: value)
+
+    def unexpected_client(**_kwargs):
+        raise AssertionError('disabled providers must not construct an external client')
+
+    monkeypatch.setattr('backend.services.models.OpenAI', unexpected_client)
+    app.extensions['meridian_db'].put('providers', {
+        'id': provider_id, 'name': '已停用模型', 'enabled': enabled,
+        'base_url': 'https://model.example.test/v1', 'model': 'fixture-model',
+    })
+    with app.app_context():
+        provider, sdk_client = resolve_provider(provider_id, 'default')
+    assert provider['id'] == provider_id and sdk_client is None
+    response = client.post(f'/api/providers/{provider_id}/test')
+    assert response.status_code == 403
+    assert '停用' in response.get_json()['error']
 
 
 def test_provider_connection_error_is_actionable(app, client, monkeypatch):

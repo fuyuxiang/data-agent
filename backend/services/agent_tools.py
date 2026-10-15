@@ -240,7 +240,9 @@ def _mcp_function_name(server_id: str, tool_name: str, used: set[str]) -> str:
 
 def _agent_policy(context: AgentToolContext) -> tuple[bool, bool]:
     session = context.database.get("sessions", context.session_id) or {}
-    return bool(session.get("agent_allow_mutations")), bool(session.get("agent_allow_mcp"))
+    # Published Agent bindings are a server-validated scope. Business users
+    # should not need to change an internal session flag to use that Agent.
+    return bool(session.get("agent_allow_mutations")), bool(session.get("agent_allow_mcp") or context.mcp_server_ids)
 
 
 def _allowed_agent_tool_names(context: AgentToolContext) -> set[str]:
@@ -397,6 +399,9 @@ def _search_mcp(context: AgentToolContext, query: str, limit: int, server_filter
         if server_filter and server_id != server_filter:
             continue
         server = context.database.get("mcp_servers", server_id) or {}
+        if context.run_id and (server.get("status") != "connected"
+                               or raw_name not in set(server.get("formal_read_tools") or [])):
+            continue
         tool = next((item for item in server.get("tools", []) if item.get("name") == raw_name), {})
         haystack = f"{raw_name} {tool.get('description', '')}".lower()
         score = sum(term in haystack for term in terms)
@@ -968,6 +973,11 @@ def execute_tool(name: str, args: dict, context: AgentToolContext) -> tuple[dict
             raise ValueError("MCP 服务不存在或不属于当前工作空间")
         if not server.get("enabled", True):
             raise PermissionError("MCP 服务已禁用")
+        if context.run_id:
+            if actor_role(context.database, context.workspace_id, context.actor_id) not in {"owner", "editor", "analyst"}:
+                raise PermissionError("当前用户已无权执行分析工具")
+            if server.get("status") != "connected" or raw_name not in set(server.get("formal_read_tools") or []):
+                raise PermissionError("MCP 工具授权或连接已变化，请联系管理员重新确认后重试")
         from .mcp import get_mcp_manager
 
         return get_mcp_manager().call_tool(server, raw_name, args), events

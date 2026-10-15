@@ -606,3 +606,11 @@
 .database-field-choice b { display: block; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .database-field-choice small { display: block; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .database-field-list { grid-template-columns: minmax(0, 1fr); } }
+.history-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px; text-align: left; }
+.history-item > svg { flex: none; color: var(--text-tertiary); }
+.history-item b { display: block; overflow-wrap: anywhere; }
+.history-item small { display: block; margin-top: 4px; }
+.history-item:hover { border-color: var(--brand-primary); }
+.workbench__empty { margin-top: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.workbench__empty > svg { flex: none; }
+.workbench__empty > .grow { flex: 1 1 180px; min-width: 0; }

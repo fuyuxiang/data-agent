@@ -450,6 +450,43 @@ def _run_knowledge_ids(database: Database, run: dict[str, Any]) -> list[str]:
     return sorted(ids)
 
 
+def _analysis_history(database: Database, run: dict[str, Any]) -> list[dict[str, str]]:
+    """A selected old result branches its context as well as its evidence."""
+    lineage = None
+    original_contract = None
+    if run.get("parent_run_id"):
+        lineage = [run["id"]]
+        ancestor = run
+        store = RunStore(database)
+        for _ in range(499):
+            parent_id = ancestor.get("parent_run_id")
+            if not parent_id or parent_id in lineage:
+                break
+            parent = store.get_run(parent_id, workspace_id=run["workspace_id"])
+            if (not parent or parent["actor_id"] != run["actor_id"] or parent["session_id"] != run["session_id"]
+                    or not _source_authorized(database, parent)):
+                break
+            if original_contract is None:
+                original_contract = (store.latest_contract(parent_id) or {}).get("payload")
+            lineage.append(parent_id)
+            ancestor = parent
+    history = [
+        {"role": item["role"], "content": item["content"]}
+        for item in database.messages(run["session_id"], 500, run_ids=lineage)
+        if item["role"] in {"system", "user", "assistant"}
+    ]
+    if original_contract:
+        # Keep the inherited constraints next to the current question so the
+        # context builder retains them before older narrative during compaction.
+        position = next((index for index in range(len(history) - 1, -1, -1)
+                         if history[index]["role"] == "user"), len(history))
+        history.insert(position, {"role": "system", "content": (
+            "本次追问指定的原分析口径（仅用于理解未变更的条件；目标、时间及统计口径以本次任务契约为准）：\n"
+            + json.dumps(original_contract, ensure_ascii=False)
+        )})
+    return history
+
+
 def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
     from .results.content import REPORT_SCHEMA
 
@@ -536,7 +573,7 @@ def build_executor(database: Database, run: dict[str, Any]) -> ToolExecutor:
     ), lambda arguments: _local_analysis_tool_with_events(database, run, arguments))
     registry.register(ToolSpec(
         id="reuse_analysis_result", description=(
-            "仅为整理报告复用本会话最近一次已发布分析的证据、口径和报告内容。"
+            "仅为整理报告复用所指定父分析的已发布证据、口径和报告内容；未指定父分析时使用本会话最近成果。"
             "不刷新数据；新范围或新统计必须重新查询。不能引用别人的分析或其他会话。"
         ), input_schema={"type": "object", "properties": {}}, mutability="read",
     ), lambda _arguments: _reuse_analysis_result(database, run))
@@ -628,14 +665,20 @@ def _reuse_analysis_result(database: Database, run: dict) -> dict:
     if not any((definition := registry.get(skill_id)) and definition.category == "报告"
                and definition.status == "published" for skill_id in skill_ids):
         raise PermissionError("仅报告整理技能可以复用已发布分析，请为新的分析问题执行当前查询")
+    if context.get("scope_change"):
+        raise ValueError("本次统计口径已调整，请重新查询，不能复用原分析的数据")
     with database.connect() as connection:
         row = connection.execute(
             "SELECT p.id,p.run_id,p.manifest_id,p.created_at FROM publications p JOIN agent_runs a ON a.id=p.run_id "
             "WHERE p.workspace_id=? AND a.session_id=? AND a.actor_id=? AND a.id<>? AND a.archived_at IS NULL "
+            "AND (? IS NULL OR a.id=?) "
             "ORDER BY p.created_at DESC,p.rowid DESC LIMIT 1",
-            (run["workspace_id"], run["session_id"], run["actor_id"], run["id"]),
+            (run["workspace_id"], run["session_id"], run["actor_id"], run["id"],
+             run.get("parent_run_id"), run.get("parent_run_id")),
         ).fetchone()
     if not row:
+        if run.get("parent_run_id"):
+            raise ValueError("指定的原分析暂无可复用的已发布结果，或已不可用；请恢复原分析或重新查询")
         raise ValueError("当前会话还没有可复用的已核验分析，请先完成分析")
     parent = RunStore(database).get_run(row["run_id"], workspace_id=run["workspace_id"])
     if not parent or not _source_authorized(database, parent) or not _source_authorized(database, run):
@@ -681,8 +724,11 @@ def _local_analysis_tool_with_events(
     ]
 
 
-def available_formal_tools(database: Database, workspace_id: str, session_id: str, source_ids: list[str]) -> list[str]:
-    context = AgentToolContext(database, workspace_id, session_id, list(source_ids))
+def available_formal_tools(
+    database: Database, workspace_id: str, session_id: str, source_ids: list[str],
+    *, mcp_server_ids: list[str] | None = None,
+) -> list[str]:
+    context = AgentToolContext(database, workspace_id, session_id, list(source_ids), mcp_server_ids=mcp_server_ids)
     discovered = {
         str((item.get("function") or {}).get("name") or "")
         for item in tool_schemas(context)
@@ -776,11 +822,7 @@ def _analysis_job_handler(app: Flask, spec: dict[str, Any], progress, cancel) ->
             "daily_model_budget_exceeded" if quota_limited else "model_budget_exceeded"
         ),
     )
-    history = [
-        {"role": item["role"], "content": item["content"]}
-        for item in database.messages(run["session_id"], 500)
-        if item["role"] in {"system", "user", "assistant"}
-    ]
+    history = _analysis_history(database, run)
     progress(15, "Agent 已开始动态规划与执行")
     analysis_context = database.get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
 

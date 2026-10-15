@@ -11,7 +11,7 @@ from flask import Blueprint, current_app, request, session as flask_session
 from werkzeug.datastructures import FileStorage
 
 from ..core.database import utcnow
-from ..services.authorization import actor_role, decide_source_access, filter_authorized_sessions, filter_authorized_sources
+from ..services.authorization import actor_role, decide_source_access, filter_authorized_sources
 from ..services.security import SecretVault
 from ..services.demo_sales import SAMPLE_SEED_ID, sample_questions
 from ..services.product import SUPER_AGENT_ID, product_status, seed_demo_workspace
@@ -76,10 +76,7 @@ def bootstrap():
     wid = workspace_id()
     product = product_status(db(), wid, current_user_id())
     features = set(product["entitlements"].get("features") or [])
-    sessions = filter_authorized_sessions(
-        db(), db().list("sessions", workspace_id=wid),
-        workspace_id=wid, actor_id=current_user_id(),
-    )
+    sessions = _session_page(wid, limit=500)["items"]
     active_session = next((item for item in sessions if item.get("status") == "active"), sessions[0] if sessions else None)
 
     available = available_resources(db(), wid, current_user_id())
@@ -619,12 +616,25 @@ def restore_file_version(version_id: str):
 
 
 @bp.get("/api/sessions")
+@api_errors
 def list_sessions():
     wid = workspace_id()
-    return ok(items=filter_authorized_sessions(
-        db(), db().list("sessions", workspace_id=wid),
-        workspace_id=wid, actor_id=current_user_id(),
+    return ok(**_session_page(
+        wid, page=int(request.args.get("page", "1")),
+        limit=int(request.args.get("limit", "500")), search=request.args.get("q", ""),
     ))
+
+
+def _session_page(wid: str, *, page: int = 1, limit: int = 30, search: str = "") -> dict:
+    if page < 1 or page > 1_000_000 or limit < 1 or limit > 500:
+        raise ValueError("会话页码须为正整数，每页数量须在 1 到 500 之间")
+    membership = workspace_membership(wid)
+    if not membership:
+        raise PermissionError("无权访问该工作空间")
+    return db().session_page(
+        workspace_id=wid, actor_id=current_user_id(),
+        include_legacy=membership.get("role") == "owner", page=page, limit=limit, search=search,
+    )
 
 
 @bp.post("/api/sessions")
@@ -639,7 +649,7 @@ def create_session():
     if provider_id and provider_id != "environment-default":
         require_workspace_record("providers", str(provider_id), wid)
     for session in db().list("sessions", workspace_id=wid):
-        if session.get("status") == "active":
+        if session.get("status") == "active" and session.get("owner_id") == current_user_id():
             db().patch("sessions", session["id"], {"status": "idle"})
     item = db().put(
         "sessions",
@@ -661,7 +671,12 @@ def create_session():
 @api_errors
 def get_session(session_id: str):
     item = require_session_access(session_id)
-    return ok(item=item, messages=db().messages(session_id))
+    limit = int(request.args.get("message_limit", "200"))
+    before = int(request.args["before"]) if "before" in request.args else None
+    if not 1 <= limit <= 1000 or (before is not None and before < 1):
+        raise ValueError("消息分页参数无效")
+    page = db().message_page(session_id, limit=limit, before=before)
+    return ok(item=item, messages=page.pop("items"), message_page=page)
 
 
 @bp.patch("/api/sessions/<session_id>")

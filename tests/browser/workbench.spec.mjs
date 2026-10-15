@@ -59,7 +59,9 @@ test('提问后进入对话并给出卡片式意图澄清', async ({ page }) => 
 });
 
 test('执行状态显示任务步骤而不暴露思维链', async ({ page }) => {
-  await page.locator('.composer__input').fill('本月销售额是多少？');
+  // Complex requests retain the confirmation stage. A simple query now starts
+  // immediately and correctly fails fast when this fixture has no model.
+  await page.locator('.composer__input').fill('为什么本月销售额变化？');
   await page.locator('.composer__send').click();
   const latest = page.locator('.execution').last();
   await expect(latest.locator('.execution__steps')).toBeVisible();

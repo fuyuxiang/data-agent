@@ -545,6 +545,45 @@ class Database:
             result.append(value)
         return result
 
+    def session_page(
+        self, *, workspace_id: str, actor_id: str, include_legacy: bool = False,
+        page: int = 1, limit: int = 30, search: str = "",
+    ) -> dict[str, Any]:
+        """Page visible conversations before applying the limit.
+
+        Keep this predicate aligned with authorization.require_session_access:
+        private sessions belong to their owner; workspace-visible sessions are
+        shared; only workspace owners can see legacy sessions without an owner.
+        """
+        size = max(1, min(int(limit), 500))
+        page = max(1, int(page))
+        where = [
+            "collection='sessions'", "workspace_id=?", "archived_at IS NULL",
+            "(json_extract(payload,'$.visibility')='workspace' "
+            "OR CAST(COALESCE(json_extract(payload,'$.owner_id'),'') AS TEXT)=? "
+            "OR (? AND COALESCE(json_extract(payload,'$.owner_id'),'')=''))",
+        ]
+        args: list[Any] = [workspace_id, actor_id, int(include_legacy)]
+        if search:
+            where.append("instr(lower(COALESCE(json_extract(payload,'$.name'),'')),?)>0")
+            args.append(str(search).strip().lower()[:200])
+        predicate = " AND ".join(where)
+        with self.connect() as connection:
+            # Predicates above are fixed SQL; all user input is parameterized.
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM records WHERE {predicate}", args,  # noqa: S608
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"SELECT payload FROM records WHERE {predicate} "  # noqa: S608
+                "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
+                [*args, size, (page - 1) * size],
+            ).fetchall()
+        return {
+            "items": [json.loads(row["payload"]) for row in rows],
+            "page": page, "limit": size, "total": total,
+            "has_more": page * size < total,
+        }
+
     def page(
         self, collection: str, *, workspace_id: str, limit: int = 100,
         cursor: str = "", search: str = "", category: str = "",
@@ -664,8 +703,35 @@ class Database:
             )
         return message
 
-    def messages(self, session_id: str, limit: int = 200, *, include_archived_runs: bool = False) -> list[dict]:
-        query = "SELECT m.* FROM messages m WHERE m.session_id=?"
+    def messages(
+        self, session_id: str, limit: int = 200, *, include_archived_runs: bool = False,
+        run_ids: list[str] | None = None,
+    ) -> list[dict]:
+        return self.message_page(session_id, limit=limit, include_archived_runs=include_archived_runs, run_ids=run_ids)["items"]
+
+    def message_page(
+        self, session_id: str, *, limit: int = 200, before: int | None = None,
+        include_archived_runs: bool = False,
+        run_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return the latest bounded page in reading order, with an older-page cursor."""
+        size = max(1, min(int(limit), 1000))
+        query = "SELECT m.*,m.rowid AS message_cursor FROM messages m WHERE m.session_id=?"
+        args: list[Any] = [session_id]
+        if run_ids is not None:
+            if not run_ids:
+                return {"items": [], "has_more": False, "next_before": None}
+            query += " AND json_extract(m.metadata,'$.run_id') IN (" + ",".join("?" for _ in run_ids) + ")"
+            args.extend(run_ids)
+        if before is not None:
+            with self.connect() as connection:
+                boundary = connection.execute(
+                    "SELECT created_at FROM messages WHERE session_id=? AND rowid=?", (session_id, before),
+                ).fetchone()
+            if not boundary:
+                raise ValueError("消息分页位置已失效，请重新加载会话")
+            query += " AND (m.created_at<? OR (m.created_at=? AND m.rowid<?))"
+            args.extend([boundary["created_at"], boundary["created_at"], before])
         if not include_archived_runs:
             # Saved-session copies can retain the original run_id. Only hide
             # messages in the run's own conversation, never an independent copy.
@@ -675,21 +741,26 @@ class Database:
                   AND a.session_id=m.session_id AND a.workspace_id=m.workspace_id
                   AND a.archived_at IS NOT NULL
             )"""
-        query += " ORDER BY m.created_at ASC,m.rowid ASC LIMIT ?"
+        query += " ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?"
+        args.append(size + 1)
         with self.connect() as connection:
-            rows = connection.execute(
-                query,
-                (session_id, max(1, min(limit, 1000))),
-            ).fetchall()
-        return [
+            rows = connection.execute(query, args).fetchall()
+        has_more = len(rows) > size
+        rows = list(reversed(rows[:size]))
+        items = [
             {
                 "id": row["id"], "session_id": row["session_id"], "role": row["role"],
                 "workspace_id": row["workspace_id"],
                 "content": row["content"], "metadata": json.loads(row["metadata"]),
                 "created_at": row["created_at"],
+                "cursor": row["message_cursor"],
             }
             for row in rows
         ]
+        return {
+            "items": items, "has_more": has_more,
+            "next_before": rows[0]["message_cursor"] if has_more else None,
+        }
 
     def remove_messages_for_run(self, session_id: str, run_id: str) -> int:
         """Remove the visible conversation turn for one analysis run."""

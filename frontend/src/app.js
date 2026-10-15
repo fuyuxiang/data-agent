@@ -26,6 +26,7 @@ import { SkillsView } from './views/admin-skills.js';
 import { SystemSettingsView, UsersView } from './views/admin-system.js';
 import { ConversationView } from './views/conversation.js';
 import { LibraryView } from './views/library.js';
+import { HistoryView } from './views/history.js';
 import { MetricsView } from './views/metrics.js';
 import { WorkbenchView } from './views/workbench.js';
 import { TrashView } from './views/trash.js';
@@ -36,7 +37,7 @@ const Shell = {
   name: 'Shell',
   components: {
     AgentsView, AgentBuilderView, ConversationView, DataView, EvaluationsView, Icon,
-    IntegrationsView, KnowledgeView, LibraryView, McpView, MetricsView, Modal, ModelsView,
+    IntegrationsView, KnowledgeView, LibraryView, HistoryView, McpView, MetricsView, Modal, ModelsView,
     RunsView, SkillsView, SystemSettingsView, Toasts, TrashView, UsersView, WorkbenchView,
   },
   setup() {
@@ -186,7 +187,10 @@ const Shell = {
     },
     async removeSession(session) {
       if (!window.confirm(`删除「${session.name}」？数据源和已发布成果不受影响。`)) return;
-      try { await deleteSession(session); }
+      try {
+        await deleteSession(session);
+        if (state.route === 'conversation' && state.routeParams.id === session.id) navigate('workbench');
+      }
       catch (error) { fail(error); }
     },
   },
@@ -239,6 +243,9 @@ const Shell = {
         </div>
 
         <footer class="sidebar__foot">
+          <button class="recent-item" aria-label="全部对话" title="全部对话" :class="{ active: state.route === 'history' }" @click="navigateTo('history')">
+            <Icon name="history" :size="15" /><span>全部对话</span>
+          </button>
           <button class="recent-item" aria-label="回收站" title="回收站" :class="{ active: state.route === 'trash' }" @click="navigateTo('trash')">
             <Icon name="trash" :size="15" /><span>回收站</span>
           </button>
@@ -284,10 +291,11 @@ const Shell = {
 
         <div class="view">
           <WorkbenchView v-if="state.route === 'workbench'" :key="JSON.stringify(state.routeParams)" />
-          <ConversationView v-else-if="state.route === 'conversation'" :key="JSON.stringify(state.routeParams)"
+          <ConversationView v-else-if="state.route === 'conversation'" :key="state.routeParams.id"
                             :session-id="state.routeParams.id" />
           <AgentsView v-else-if="state.route === 'agents'" />
           <LibraryView v-else-if="state.route === 'library'" />
+          <HistoryView v-else-if="state.route === 'history'" :key="JSON.stringify(state.routeParams)" />
           <MetricsView v-else-if="state.route === 'metrics'" />
           <TrashView v-else-if="state.route === 'trash'" :key="JSON.stringify(state.routeParams)" />
 

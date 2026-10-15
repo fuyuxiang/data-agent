@@ -135,6 +135,11 @@ def resolve_provider(
             provider = providers[0] if providers else None
     if not provider:
         return None, None
+    if not provider.get("enabled", True):
+        # An explicit id can outlive the owner's decision to disable a service.
+        # Preserve its identity for an actionable error, without using its key
+        # or silently choosing a different external destination.
+        return provider, None
     api_key = api_key_for(provider)
     base_url = provider.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = provider.get("model") or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -153,6 +158,8 @@ def test_provider(provider_id: str, workspace_id: str | None = None) -> dict:
     provider, client = resolve_provider(provider_id, workspace_id)
     if not provider:
         raise ValueError("模型配置不存在，请刷新模型列表后重新选择。")
+    if not provider.get("enabled", True):
+        raise PermissionError("模型服务已停用，请联系管理员启用或选择其他可用模型。")
     if not client:
         raise ValueError("模型配置没有可用的 API Key，请编辑模型服务，填写凭据后重新测试。")
     from .usage import ensure_quota, record_usage, response_usage

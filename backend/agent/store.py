@@ -161,8 +161,9 @@ class RunStore:
     def list_runs(
         self, workspace_id: str, *, session_id: str | None = None, limit: int = 100,
         include_archived: bool = False, actor_id: str | None = None, archived_only: bool = False,
+        offset: int = 0, before: int | None = None,
     ) -> list[dict]:
-        query = "SELECT * FROM agent_runs WHERE workspace_id=?"
+        query = "SELECT *,rowid AS history_cursor FROM agent_runs WHERE workspace_id=?"
         args: list[Any] = [workspace_id]
         if archived_only:
             query += " AND archived_at IS NOT NULL"
@@ -174,8 +175,22 @@ class RunStore:
         if session_id:
             query += " AND session_id=?"
             args.append(session_id)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        if before is not None:
+            # Archived boundary rows remain valid: deleting a loaded turn must
+            # not shift the next page past an unseen analysis.
+            with self.db.connect() as connection:
+                boundary = connection.execute(
+                    "SELECT created_at,session_id,actor_id FROM agent_runs WHERE workspace_id=? AND rowid=?",
+                    (workspace_id, int(before)),
+                ).fetchone()
+            if (not boundary or (session_id and boundary["session_id"] != session_id)
+                    or (actor_id is not None and boundary["actor_id"] != actor_id)):
+                raise ValueError("分析分页位置已失效，请重新加载会话")
+            query += " AND (created_at<? OR (created_at=? AND rowid<?))"
+            args.extend([boundary["created_at"], boundary["created_at"], int(before)])
+        query += " ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?"
         args.append(max(1, min(int(limit), 5000 if archived_only else 500)))
+        args.append(max(0, int(offset)))
         with self.db.connect() as connection:
             rows = connection.execute(query, args).fetchall()
         return [self._run(dict(row)) for row in rows]
@@ -335,6 +350,48 @@ class RunStore:
             "id": revision_id, "run_id": run_id, "version": version, "payload": payload,
             "confirmed_by": confirmed_by, "confirmed_at": confirmed_at, "created_at": now,
         }
+
+    def rollback_unsubmitted_confirmation(self, run_id: str, *, expected_version: int) -> bool:
+        """Restore a retryable draft only before any durable job accepts it.
+
+        Check acceptance, state and revision under the same SQLite write lock as
+        the rollback so a concurrent resume/cancel cannot be overwritten.
+        """
+        now = utcnow()
+        with self.db.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """SELECT r.*,c.payload AS confirmed_payload FROM agent_runs r
+                   JOIN task_contract_revisions c ON c.run_id=r.id AND c.version=r.contract_version
+                   WHERE r.id=? AND r.contract_version=? AND r.execution_status='queued'
+                     AND r.archived_at IS NULL AND c.confirmed_at IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM typed_jobs j WHERE j.run_id=r.id)""",
+                (run_id, int(expected_version)),
+            ).fetchone()
+            if not run:
+                return False
+            version = int(expected_version) + 1
+            connection.execute(
+                """INSERT INTO task_contract_revisions(
+                       id,run_id,version,payload,confirmed_by,confirmed_at,created_at
+                   ) VALUES(?,?,?,?,NULL,NULL,?)""",
+                (self.db.new_id("contract"), run_id, version, run["confirmed_payload"], now),
+            )
+            connection.execute(
+                "UPDATE agent_runs SET contract_version=?,execution_status='waiting_input',"
+                "version=version+1,updated_at=? WHERE id=?",
+                (version, now, run_id),
+            )
+            for event_type, payload in (
+                ("contract.revised", {"contract_version": version, "contract": _load(run["confirmed_payload"], {})}),
+                ("analysis.start_failed", {"retryable": True}),
+            ):
+                connection.execute(
+                    "INSERT INTO run_events(event_id,run_id,workspace_id,schema_version,event_type,payload,created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (self.db.new_id("event"), run_id, run["workspace_id"], 1, event_type, _json(payload), now),
+                )
+        return True
 
     def latest_contract(self, run_id: str) -> dict[str, Any] | None:
         with self.db.connect() as connection:

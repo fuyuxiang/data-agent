@@ -17,6 +17,7 @@ from ..services.authorization import require_sources_access
 from ..services.authorization import actor_role
 from ..services.jobs import get_job_manager
 from ..services.intent import suggest_contract
+from ..services.followup import TIME_CLARIFICATION, followup_payload, valid_time_range
 from ..services.knowledge import add_document
 from ..services.results.manifests import ResultService
 from ..services.product import assert_feature_enabled
@@ -88,6 +89,7 @@ def _snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "plan": _store().latest_plan(run["id"]), "publication": publication, "manifest": manifest,
         "agent_id": (analysis_context.get("agent_snapshot") or {}).get("id"),
         "agent_version": (analysis_context.get("agent_snapshot") or {}).get("version"),
+        "scope_change": analysis_context.get("scope_change"),
         "cancel_errors": cancel_errors,
     }
 
@@ -195,12 +197,32 @@ def _auto_confirm_requested(payload: dict[str, Any], objective: str) -> bool:
     mode = str(payload.get("execution_mode") or "auto")
     if mode == "deep":
         return False
-    if mode == "quick":
-        return True
-    if not payload.get("auto_confirm"):
+    if mode != "quick" and not payload.get("auto_confirm"):
         return False
-    complex_terms = ("为什么", "归因", "预测", "复盘", "完整报告", "方案", "深度", "建模")
-    return not any(term in objective for term in complex_terms)
+    complex_terms = (
+        "为什么", "原因", "归因", "预测", "复盘", "报告", "方案", "深度", "建模", "异常",
+        "不确定", "帮我决定", "删除", "修改数据", "更新数据", "发送", "发布", "导出", "ppt",
+        "why", "forecast", "predict", "report", "anomal", "delete", "update", "send", "publish", "export",
+    )
+    return not any(term in objective.lower() for term in complex_terms)
+
+
+def _require_ready_attachments(run: dict[str, Any]) -> None:
+    """Never enqueue a run before the evidence promised at creation is ready."""
+    context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    expected = context.get("attachment_count")
+    if expected is None:
+        return
+    attachments = [
+        item for item in db().list("analysis_attachments", workspace_id=run["workspace_id"], limit=5000)
+        if item.get("run_id") == run["id"] and item.get("owner_id") == current_user_id()
+    ]
+    if len(attachments) < expected:
+        raise ValueError("附件尚未全部准备完成，请等待上传完成或重新发起分析")
+    for attachment in attachments:
+        document = db().get("knowledge_documents", attachment["document_id"], workspace_id=run["workspace_id"])
+        if not document or not document.get("enabled", True) or not Path(str(document.get("path") or "")).is_file():
+            raise ValueError("附件内容已失效，请重新上传文件并发起分析")
 
 
 def _analysis_budget(payload: dict[str, Any]) -> dict[str, Any]:
@@ -225,20 +247,28 @@ def _analysis_budget(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _confirm_and_enqueue(run: dict[str, Any], contract: TaskContract, expected_version: int) -> tuple[dict, dict]:
+    _require_ready_attachments(run)
     confirmed = _store().add_contract(
         run["id"], contract, expected_version=expected_version, confirmed_by=current_user_id(),
     )
-    current = _store().get_run(run["id"]) or run
-    _store().add_plan(run["id"], {
-        "tasks": [{
-            "id": "evidence_driven_analysis", "title": "根据证据动态选择查询、验证与分析动作",
-            "status": "open", "depends_on": [],
-        }],
-    }, reason="contract_confirmed", expected_version=int(current["plan_version"]))
-    job = get_job_manager(current_app._get_current_object()).submit_spec(
-        workspace_id=run["workspace_id"], session_id=run["session_id"],
-        job_type="analysis_run", title=contract.objective[:100], spec={"run_id": run["id"]}, run_id=run["id"],
-    )
+    try:
+        current = _store().get_run(run["id"]) or run
+        _store().add_plan(run["id"], {
+            "tasks": [{
+                "id": "evidence_driven_analysis", "title": "根据证据动态选择查询、验证与分析动作",
+                "status": "open", "depends_on": [],
+            }],
+        }, reason="contract_confirmed", expected_version=int(current["plan_version"]))
+        job = get_job_manager(current_app._get_current_object()).submit_spec(
+            workspace_id=run["workspace_id"], session_id=run["session_id"],
+            job_type="analysis_run", title=contract.objective[:100], spec={"run_id": run["id"]}, run_id=run["id"],
+        )
+    except Exception:
+        # A full queue can reject submission after confirmation was committed.
+        # Restore an editable, retryable request only if no durable job accepted
+        # it; never reset a task that may already be executing.
+        _store().rollback_unsubmitted_confirmation(run["id"], expected_version=int(confirmed["version"]))
+        raise
     db().audit(
         "contract.confirmed", workspace_id=run["workspace_id"], actor=current_user_id(),
         object_type="agent_run", object_id=run["id"],
@@ -254,6 +284,33 @@ def create_analysis():
     require_workspace_access(wid)
     _require_analyzer(wid)
     assert_feature_enabled(db(), wid, "governed_agent")
+    attachment_count = payload.get("attachment_count")
+    if attachment_count is not None and (
+        isinstance(attachment_count, bool) or not isinstance(attachment_count, int) or not 0 <= attachment_count <= 20
+    ):
+        raise ValueError("分析附件数量必须是 0 到 20 的整数")
+    parent = None
+    parent_context = {}
+    scope_change = None
+    if payload.get("parent_run_id"):
+        parent = _require_run(str(payload["parent_run_id"]))
+        if str(payload.get("session_id") or "") != parent["session_id"]:
+            raise ValueError("追问必须属于原分析所在的会话")
+        parent_context = db().get("analysis_context", parent["id"], workspace_id=wid) or {}
+        parent_contract = (_store().latest_contract(parent["id"]) or {}).get("payload") or {}
+        same_sources = "source_ids" not in payload or set(payload.get("source_ids") or []) == set(parent["source_scope"])
+        same_agent = "agent_id" not in payload or str(payload.get("agent_id") or "") == str(
+            (parent_context.get("agent_snapshot") or {}).get("id") or ""
+        )
+        if same_sources and same_agent:
+            payload, scope_change = followup_payload(payload, parent_contract)
+        if same_agent and "knowledge_document_ids" not in payload and parent_context.get("knowledge_selection_explicit"):
+            payload["knowledge_document_ids"] = parent_context.get("knowledge_document_ids") or []
+        payload = {
+            "source_ids": list(parent["source_scope"]), "provider_id": parent.get("provider_id"),
+            "agent_id": (parent_context.get("agent_snapshot") or {}).get("id"),
+            **payload,
+        }
     # Validate the request before creating a new session, so denied Agent or
     # source selections do not leave empty conversations in the sidebar.
     session = _session(payload, wid) if payload.get("session_id") else {
@@ -313,7 +370,10 @@ def create_analysis():
     contract = _draft_contract(payload, source_ids)
     if not payload.get("session_id"):
         session = _session(payload, wid)
-    allowed_tools = available_formal_tools(db(), wid, session["id"], source_ids)
+    allowed_tools = available_formal_tools(
+        db(), wid, session["id"], source_ids,
+        mcp_server_ids=list(agent.get("mcp_server_ids") or []) if agent else None,
+    )
     idempotency_key = str(request.headers.get("Idempotency-Key") or payload.get("idempotency_key") or "") or None
     run, created = _store().create_run(
         workspace_id=wid, session_id=session["id"], actor_id=current_user_id(),
@@ -339,6 +399,10 @@ def create_analysis():
             "knowledge_selection_explicit": selected_knowledge is not None,
             "skill_ids": skill_ids,
             "requested_skill_ids": skill_ids,
+            "attachment_count": attachment_count,
+            "confirm_required": payload.get("confirm_required") is True,
+            "execution_mode": str(payload.get("execution_mode") or "auto"),
+            "scope_change": scope_change,
             "agent_snapshot": {
                 "id": agent["id"], "version": agent["version"],
                 "name": agent["name"], "instruction": agent.get("instruction") or "",
@@ -363,11 +427,50 @@ def create_analysis():
             "analysis.created", workspace_id=wid, actor=current_user_id(),
             object_type="agent_run", object_id=run["id"], detail={"source_ids": source_ids},
         )
-        if _auto_confirm_requested(payload, contract.objective):
+        if not attachment_count and not contract.unresolved and _auto_confirm_requested(payload, contract.objective):
             _confirmed, job = _confirm_and_enqueue(run, contract, expected_version=1)
             run = _store().get_run(run["id"]) or run
             return ok(item=_snapshot(run), created=True, auto_confirmed=True, job=job), 201
     return ok(item=_snapshot(run), created=created, auto_confirmed=False), 201 if created else 200
+
+
+@bp.post("/api/analyses/<run_id>/start")
+@api_errors
+def start_ready_analysis(run_id: str):
+    """Finish preparation, auto-starting only simple, unambiguous requests.
+
+    Uploads and library bindings happen while the contract is still editable.
+    Complex tasks keep the existing business confirmation card; tool approvals,
+    source authorization, optimistic versions and confirmation audit are shared
+    with the explicit confirmation endpoint.
+    """
+    run = _require_run(run_id)
+    _require_analyzer(run["workspace_id"])
+    require_sources_access(
+        db(), run.get("source_scope") or [], workspace_id=run["workspace_id"],
+        actor_id=current_user_id(), action="analyze",
+    )
+    assert_feature_enabled(db(), run["workspace_id"], "governed_agent")
+    latest = _store().latest_contract(run_id)
+    if not latest:
+        raise ValueError("任务契约不存在")
+    if latest.get("confirmed_at"):
+        return ok(item=_snapshot(run), auto_confirmed=True, already_confirmed=True)
+    if run["execution_status"] in {"finished", "cancelled", "failed"}:
+        raise ValueError("已结束任务不能重新启动，请重新发起分析")
+    if int(body().get("expected_version", -1)) != int(latest["version"]):
+        raise ValueError(f"任务契约版本冲突：当前为 {latest['version']}")
+    _require_ready_attachments(run)
+    contract = TaskContract.from_payload(latest["payload"])
+    context = db().get("analysis_context", run_id, workspace_id=run["workspace_id"]) or {}
+    automatic = _auto_confirm_requested({
+        "auto_confirm": True, "confirm_required": context.get("confirm_required"),
+        "execution_mode": context.get("execution_mode") or "auto",
+    }, contract.objective)
+    if contract.unresolved or not automatic:
+        return ok(item=_snapshot(run), auto_confirmed=False)
+    _confirmed, job = _confirm_and_enqueue(run, contract, int(latest["version"]))
+    return ok(item=_snapshot(_store().get_run(run_id) or run), auto_confirmed=True, job=job)
 
 
 @bp.post("/api/analyses/<run_id>/contract/suggest")
@@ -411,15 +514,28 @@ def suggest_analysis_contract(run_id: str):
 @bp.get("/api/analyses")
 @api_errors
 def list_analyses():
+    wid = workspace_id()
+    session_id = str(request.args.get("session_id") or "") or None
+    page_size = max(1, min(int(request.args.get("limit", 100)), 500))
+    offset = max(0, int(request.args.get("offset", 0)))
+    before = int(request.args["before"]) if "before" in request.args else None
+    if before is not None and (before < 1 or offset):
+        raise ValueError("分析分页位置无效")
+    include_archived = request.args.get("include_archived", "").lower() in {"1", "true"}
+    page = _store().list_runs(
+        wid, session_id=session_id, limit=page_size, offset=offset,
+        include_archived=include_archived, actor_id=current_user_id(), before=before,
+    )
     items = [
-        _snapshot(item) for item in _store().list_runs(
-            workspace_id(), session_id=str(request.args.get("session_id") or "") or None,
-            limit=int(request.args.get("limit", 100)),
-            include_archived=request.args.get("include_archived", "").lower() in {"1", "true"},
-            actor_id=current_user_id(),
-        ) if item.get("actor_id") == current_user_id() and _source_authorized(db(), item)
+        _snapshot(item) for item in page
+        if item.get("actor_id") == current_user_id() and _source_authorized(db(), item)
     ]
-    return ok(items=items)
+    has_more = bool(_store().list_runs(
+        wid, session_id=session_id, limit=1, before=page[-1]["history_cursor"],
+        include_archived=include_archived, actor_id=current_user_id(),
+    )) if len(page) == page_size else False
+    return ok(items=items, has_more=has_more, next_offset=offset + len(page) if has_more else None,
+              next_before=page[-1]["history_cursor"] if has_more else None)
 
 
 @bp.get("/api/analyses/<run_id>")
@@ -631,6 +747,13 @@ def confirm_contract(run_id: str):
     if expected != int(latest["version"]):
         raise ValueError(f"任务契约版本冲突：当前为 {latest['version']}")
     contract = TaskContract.from_payload(payload.get("contract") or latest["payload"])
+    context = db().get("analysis_context", run_id, workspace_id=run["workspace_id"]) or {}
+    if (context.get("scope_change") or {}).get("kind") == "time":
+        if not valid_time_range(contract.time_range):
+            raise ValueError(TIME_CLARIFICATION)
+        contract = TaskContract.from_payload({
+            **contract.to_dict(), "unresolved": [item for item in contract.unresolved if item != TIME_CLARIFICATION],
+        })
     if set(contract.source_scope) - set(run["source_scope"]):
         raise PermissionError("确认时不得扩大数据来源范围")
     _confirmed, job = _confirm_and_enqueue(run, contract, expected)
@@ -879,22 +1002,31 @@ def branch_analysis(run_id: str):
     if mode not in {"followup", "refresh", "reproduce", "reanalyze"}:
         raise ValueError("mode 无效")
     branch_payload = _branch(run, mode, str(payload.get("prompt") or "").strip())
+    scope_change = None
+    if payload.get("prompt") and mode in {"followup", "reanalyze"}:
+        updated, scope_change = followup_payload(
+            {"objective": branch_payload["contract"]["objective"]},
+            (_store().latest_contract(run["id"]) or {})["payload"],
+        )
+        branch_payload["contract"].update(updated["contract"])
     # Reuse the same validated endpoint implementation without issuing an internal HTTP request.
     source_ids = branch_payload["source_ids"]
     for source_id in source_ids:
         require_source_access(str(source_id), run["workspace_id"], action="analyze")
     contract = TaskContract.from_payload(branch_payload["contract"] | {"source_scope": source_ids})
+    parent_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
+    parent_agent = parent_context.get("agent_snapshot")
     child, _ = _store().create_run(
         workspace_id=run["workspace_id"], session_id=run["session_id"], actor_id=current_user_id(),
         source_scope=source_ids,
         allowed_tool_ids=sorted(set(run.get("allowed_tool_ids") or []) & set(available_formal_tools(
             db(), run["workspace_id"], run["session_id"], source_ids,
+            mcp_server_ids=list(parent_agent.get("mcp_server_ids") or []) if parent_agent else None,
         ))),
         provider_id=run.get("provider_id"), parent_run_id=run["id"], run_kind=mode,
         skill_id=run.get("skill_id"),
         require_session=True,
     )
-    parent_context = db().get("analysis_context", run["id"], workspace_id=run["workspace_id"]) or {}
     db().put("analysis_context", {
         "id": child["id"], "workspace_id": run["workspace_id"],
         "knowledge_document_ids": parent_context.get("knowledge_document_ids") or [],
@@ -902,6 +1034,8 @@ def branch_analysis(run_id: str):
         "skill_ids": parent_context.get("skill_ids") or ([run["skill_id"]] if run.get("skill_id") else []),
         "requested_skill_ids": parent_context.get("requested_skill_ids") or [],
         "agent_snapshot": parent_context.get("agent_snapshot"),
+        "scope_change": scope_change,
+        "confirm_required": bool(scope_change),
     }, workspace_id=run["workspace_id"])
     _store().add_contract(child["id"], contract, expected_version=0)
     db().add_message(run["session_id"], "user", contract.objective, {"run_id": child["id"], "parent_run_id": run["id"]})

@@ -251,8 +251,7 @@ export async function deleteSession(session) {
   await remove(`/api/sessions/${session.id}`);
   state.sessions = state.sessions.filter(item => item.id !== session.id);
   if (state.activeSessionId === session.id) {
-    if (state.sessions.length) state.activeSessionId = state.sessions[0].id;
-    else await newSession();
+    state.activeSessionId = state.sessions[0]?.id || '';
   }
 }
 

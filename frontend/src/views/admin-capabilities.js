@@ -20,9 +20,11 @@ const TOOL_RISK = {
 
 function riskOf(tool) {
   const text = `${tool.description || ''} ${(tool.name || '')}`.toLowerCase();
+  if (tool.annotations?.destructiveHint === true) return 'dangerous';
   if (/delete|drop|remove|删除|清除|truncate/.test(text)) return 'dangerous';
   if (/send|publish|notify|发送|推送|message|email/.test(text)) return 'external';
   if (/update|insert|write|create|修改|写入|新增/.test(text)) return 'write';
+  if (tool.annotations?.readOnlyHint === false) return 'write';
   return 'read';
 }
 
@@ -283,7 +285,8 @@ export const McpView = {
   },
   data() {
     return { servers: [], loading: true, loadError: '', editor: null, active: null, tools: [], testing: {},
-      saving: false, toolsLoading: false, toolsError: '', toolsVersion: 0, removeTarget: null, deleting: false };
+      saving: false, toolsLoading: false, toolsError: '', toolsVersion: 0, removeTarget: null, deleting: false,
+      approvedTools: [], approvalSaving: false, approvalError: '' };
   },
   async mounted() {
     await this.load();
@@ -350,9 +353,16 @@ export const McpView = {
       this.tools = [];
       this.toolsLoading = true;
       this.toolsError = '';
+      this.approvalError = '';
+      this.approvedTools = [];
       try {
         const response = await actions.get(`/api/mcp/servers/${server.id}/tools`);
-        if (version === this.toolsVersion) this.tools = response.items || response.tools || [];
+        if (version === this.toolsVersion) {
+          this.tools = response.items || response.tools || [];
+          this.approvedTools = [...(response.formal_read_tools || server.formal_read_tools || [])];
+          this.active = { ...server, status: response.status || server.status,
+            enabled: response.enabled ?? server.enabled, formal_read_tools: [...this.approvedTools] };
+        }
       } catch (error) {
         if (version === this.toolsVersion) this.toolsError = error.message;
       } finally {
@@ -360,8 +370,35 @@ export const McpView = {
       }
     },
     closeTools() {
+      if (this.approvalSaving) return;
       this.toolsVersion += 1;
       this.active = null;
+    },
+    async saveApproval() {
+      if (!this.canAuthorizeTools || !this.active || this.approvalSaving || this.toolsLoading) return;
+      const serverId = this.active.id;
+      this.approvalSaving = true;
+      this.approvalError = '';
+      try {
+        const response = await actions.patch(`/api/mcp/servers/${serverId}`, {
+          formal_read_tools: [...this.approvedTools],
+        });
+        this.servers = this.servers.map(item => item.id === serverId
+          ? { ...item, formal_read_tools: response.item.formal_read_tools || [] } : item);
+        if (this.active?.id === serverId) {
+          this.active = { ...this.active, formal_read_tools: response.item.formal_read_tools || [] };
+        }
+        toast('正式分析工具授权已保存', '完成');
+      } catch (error) {
+        this.approvalError = error.message;
+      } finally {
+        this.approvalSaving = false;
+      }
+    },
+    canSelectTool(tool) {
+      return this.canAuthorizeTools && !this.approvalSaving && this.active?.enabled !== false
+        && this.active?.status === 'connected'
+        && (riskOf(tool) === 'read' || this.approvedTools.includes(tool.name));
     },
     async remove(server) {
       if (!server || this.deleting) return;
@@ -429,6 +466,7 @@ export const McpView = {
           <div class="tag-row">
             <span class="badge">{{ item.transport || 'http' }}</span>
             <span v-if="item.tool_count !== undefined" class="badge">{{ item.tool_count }} 个工具</span>
+            <span class="badge">{{ (item.formal_read_tools || []).length }} 个已授权</span>
           </div>
           <div class="row" style="margin-top:12px">
             <button class="btn btn--sm" :disabled="testing[item.id]" @click="test(item)">
@@ -475,8 +513,10 @@ export const McpView = {
 
     <Modal :open="!!active" :title="(active?.name || '') + ' · 工具'" size="large" @close="closeTools">
       <p class="small muted" style="margin-bottom:12px">
-        查看服务提供的工具和用途，核对调用范围与操作风险。
+        选择可供正式分析使用的只读工具并保存，再在智能体中绑定此服务。请先核实工具实现和服务账号权限；风险标签仅作提示，工具返回内容仍需核验。
       </p>
+      <p v-if="!canAuthorizeTools" class="small muted">正式分析工具须由工作空间所有者授权。</p>
+      <p v-else-if="active?.status !== 'connected' || active?.enabled === false" class="small muted">请先启用服务并测试连接，再授权工具。</p>
       <div class="stack" style="display:flex;flex-direction:column;gap:8px">
         <p v-if="toolsLoading" class="small muted" role="status">正在读取工具清单…</p>
         <div v-else-if="toolsError" class="stack"><p role="alert" class="small" style="color:var(--danger)">{{ toolsError }}</p><button class="btn btn--sm" @click="open(active)">重试</button></div>
@@ -487,10 +527,27 @@ export const McpView = {
             <span class="badge" :class="riskLabel(tool).tone">{{ riskLabel(tool).label }}</span>
           </div>
           <p class="small muted" style="margin-top:4px">{{ tool.description || '无描述' }}</p>
+          <label class="row small" style="margin-top:10px">
+            <input v-model="approvedTools" type="checkbox" :value="tool.name"
+                   :disabled="!canSelectTool(tool)" :aria-label="'允许正式分析使用 ' + tool.name" />
+            允许正式分析使用
+          </label>
         </article>
       </div>
+      <p v-if="approvalError" role="alert" class="small" style="color:var(--danger);margin-top:12px">{{ approvalError }}</p>
+      <template #footer>
+        <button class="btn" :disabled="approvalSaving" @click="closeTools">关闭</button>
+        <button v-if="canAuthorizeTools" class="btn btn--primary"
+                :disabled="approvalSaving || toolsLoading || !!toolsError || !approvalChanged"
+                @click="saveApproval">{{ approvalSaving ? '保存中…' : '保存授权' }}</button>
+      </template>
     </Modal>`,
   computed: {
+    canAuthorizeTools() { return state.workspaceRole === 'owner'; },
+    approvalChanged() {
+      return JSON.stringify([...this.approvedTools].sort())
+        !== JSON.stringify([...(this.active?.formal_read_tools || [])].sort());
+    },
     argumentText: {
       get() { return (this.editor?.args || []).join('\n'); },
       set(value) { if (this.editor) this.editor.args = String(value || '').split('\n'); },

@@ -27,7 +27,7 @@ export const WorkbenchView = {
     return { navigate, state, toast };
   },
   data() {
-    return { demoOpen: false, seeding: false, submitting: false };
+    return { demoOpen: false, seeding: false, submitting: false, submissionStage: '', requestKey: '', requestFingerprint: '' };
   },
   mounted() {
     const agent = state.agents.find(item => item.id === state.routeParams.agent);
@@ -54,7 +54,10 @@ export const WorkbenchView = {
       return SUGGESTED;
     },
     needsData() {
-      return !state.sources.length;
+      return !state.sources.some(item => item.status === 'ready');
+    },
+    canManageData() {
+      return ['owner', 'editor'].includes(state.workspaceRole);
     },
     canAnalyze() {
       return ['owner', 'editor', 'analyst'].includes(state.workspaceRole);
@@ -80,6 +83,7 @@ export const WorkbenchView = {
     async submit(payload) {
       if (this.submitting || !this.canAnalyze) return;
       this.submitting = true;
+      this.submissionStage = '正在保存问题…';
       try {
         if (!this.sessionReady) {
           const created = await actions.post('/api/sessions', {
@@ -89,41 +93,67 @@ export const WorkbenchView = {
           state.sessions.unshift(created.item);
           state.activeSessionId = created.item.id;
         }
+        const fingerprint = JSON.stringify({
+          session: state.activeSessionId, text: payload.text, sources: payload.sourceIds, agent: payload.agentId,
+          files: payload.files.map(file => [file.name, file.size, file.lastModified]), library: state.routeParams.file,
+        });
+        if (!this.requestKey || this.requestFingerprint !== fingerprint) {
+          this.requestKey = crypto.randomUUID();
+          this.requestFingerprint = fingerprint;
+        }
         const created = await actions.post('/api/analyses', {
           session_id: state.activeSessionId,
           objective: payload.text,
           source_ids: payload.sourceIds,
           agent_id: payload.agentId || undefined,
           skill_id: payload.skillHint || undefined,
+          attachment_count: payload.files.length + (state.routeParams.file ? 1 : 0),
+          idempotency_key: this.requestKey,
         });
         if (payload.files.length) {
+          this.submissionStage = '正在上传并读取附件…';
           try {
             await actions.uploadAttachments(created.item.id, payload.files);
           } catch (error) {
+            this.requestKey = '';
             await actions.post(`/api/analyses/${created.item.id}/control`, { action: 'cancel' }).catch(() => {});
             throw error;
           }
         }
         if (state.routeParams.file) {
+          this.submissionStage = '正在关联资料…';
           try {
             await actions.post(`/api/analyses/${created.item.id}/attachments/library`, {
               record_id: state.routeParams.file,
             });
           } catch (error) {
+            this.requestKey = '';
             await actions.post(`/api/analyses/${created.item.id}/control`, { action: 'cancel' }).catch(() => {});
             throw error;
           }
         }
+        this.submissionStage = '正在开始分析…';
+        try {
+          await actions.post(`/api/analyses/${created.item.id}/start`, {
+            expected_version: created.item.contract.version,
+          });
+        } catch (error) {
+          // Preparation is saved. Opening the conversation leaves the original
+          // confirmation/retry control available even if the network drops here.
+          toast(error.message, '问题已保存，请在对话中确认或重试', 'error');
+        }
+        this.requestKey = '';
         this.$refs.composer.reset();
         navigate('conversation', { id: state.activeSessionId });
       } catch (error) {
         toast(error.message, '无法开始分析', 'error');
       } finally {
         this.submitting = false;
+        this.submissionStage = '';
       }
     },
     async seed() {
-      if (this.seeding) return;
+      if (this.seeding || !this.canManageData) return;
       this.seeding = true;
       try {
         await loadDemo();
@@ -146,6 +176,7 @@ export const WorkbenchView = {
         </div>
 
         <Composer ref="composer" :disabled="seeding || submitting || !canAnalyze" @submit="submit" />
+        <p v-if="submitting" class="small muted" role="status">{{ submissionStage }}</p>
         <p v-if="!canAnalyze" class="small muted">当前为只读权限，可查看已有内容；发起分析需要分析权限。</p>
 
         <div class="workbench__capabilities">
@@ -155,14 +186,16 @@ export const WorkbenchView = {
           </div>
         </div>
 
-        <div v-if="needsData" class="card" style="margin-top:22px;display:flex;align-items:center;gap:14px">
+        <div v-if="needsData" class="card workbench__empty">
           <Icon name="database" :size="22" class="muted" />
           <div class="grow">
             <b>还没有可分析的数据</b>
-            <p class="small muted">请联系管理员接入业务数据，或载入演示数据了解查询与分析流程。</p>
+            <p class="small muted">{{ canManageData ? '接入业务数据，或载入演示数据了解查询与分析流程；也可以直接上传文件提问。' : canAnalyze ? '请联系管理员接入数据并授权；也可以直接上传文件提问。' : '请联系管理员接入数据并授权。你可以浏览已授权的指标和资料。' }}</p>
           </div>
-          <button class="btn btn--sm" @click="navigate('admin/data')">接入数据</button>
-          <button class="btn btn--primary btn--sm" @click="demoOpen = true">使用演示数据</button>
+          <div v-if="canManageData" class="row" style="flex-wrap:wrap">
+            <button class="btn btn--sm" @click="navigate('admin/data')">接入数据</button>
+            <button class="btn btn--primary btn--sm" @click="demoOpen = true">使用演示数据</button>
+          </div>
         </div>
 
         <div v-else-if="questions.length" class="workbench__suggest">

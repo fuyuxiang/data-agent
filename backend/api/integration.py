@@ -156,7 +156,7 @@ def create_mcp_server():
     requested_id = str(payload.get("server_id") or "").strip()
     if requested_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", requested_id):
         raise ValueError("server_id 只能包含字母、数字、点、下划线和连字符")
-    item = db().put(
+    item, created = db().put_if_absent(
         "mcp_servers",
         {
             "id": requested_id or db().new_id("mcp"), "workspace_id": wid,
@@ -168,6 +168,8 @@ def create_mcp_server():
         },
         workspace_id=wid,
     )
+    if not created:
+        raise ValueError("MCP 服务标识已存在；请编辑现有服务，或从回收站恢复")
     public = _public_mcp(item)
     return ok(item=public, server_id=item["id"], message="MCP 服务已添加"), 201
 
@@ -183,6 +185,8 @@ def update_mcp_server(server_id: str):
         names = payload["formal_read_tools"]
         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
             raise ValueError("正式 Agent 工具授权必须是工具名称数组")
+        if names and (not server.get("enabled", True) or server.get("status") != "connected"):
+            raise ValueError("请先启用服务并测试连接，再授权正式分析工具")
         discovered = {str(tool.get("name") or "") for tool in server.get("tools") or []}
         if set(names) - discovered:
             raise ValueError("只能授权当前服务已发现的工具")
@@ -200,6 +204,12 @@ def update_mcp_server(server_id: str):
             "headers": headers if headers is not None else current_secret.get("headers", {}),
             "env": environment if environment is not None else current_secret.get("env", {}),
         })
+    connection_changed = any(
+        key in payload and payload[key] != server.get(key)
+        for key in ("url", "transport", "command", "args", "credential")
+    )
+    if connection_changed and payload.get("formal_read_tools"):
+        raise ValueError("连接配置变更后须先保存并测试连接，再重新授权正式分析工具")
     with db().transaction():
         if "enabled" in payload and not payload["enabled"]:
             from ..services.agent_definitions import agent_references
@@ -207,6 +217,13 @@ def update_mcp_server(server_id: str):
             if agent_references(db(), server["workspace_id"], "mcp_server_ids", server_id):
                 raise ValueError("MCP 服务仍被智能体的草稿或已发布版本使用，请解除绑定并发布后再停用")
         server.update({key: value for key, value in payload.items() if key in {"name", "url", "transport", "command", "args", "enabled", "credential", "formal_read_tools"}})
+        if connection_changed:
+            # Discovery and owner approval belong to the tested connection,
+            # never to a replacement endpoint that happens to reuse its id.
+            server.update({
+                "status": "configured", "tools": [], "formal_read_tools": [],
+                "server_info": {}, "last_error": "", "last_connected_at": None,
+            })
         item = db().put("mcp_servers", server, workspace_id=server["workspace_id"])
     if "formal_read_tools" in payload:
         db().audit(
@@ -258,7 +275,9 @@ def mcp_tools(server_id: str):
     server = require_workspace_record("mcp_servers", server_id)
     assert_feature_enabled(db(), server["workspace_id"], "mcp_integrations")
     items = server.get("tools", [])
-    return ok(items=items, server_id=server_id, tools=items)
+    return ok(items=items, server_id=server_id, tools=items,
+              formal_read_tools=server.get("formal_read_tools") or [],
+              status=server.get("status"), enabled=server.get("enabled", True))
 
 
 @bp.post("/api/mcp/servers/<server_id>/tools/<tool_name>/call")

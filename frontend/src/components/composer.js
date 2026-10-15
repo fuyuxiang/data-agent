@@ -176,7 +176,10 @@ export const Composer = {
         sourceIds: this.visibleSources,
         agentId: this.agentId,
         files: [...this.pendingFiles],
-        skillHint: this.resolution?.selected?.[0]?.id || '',
+        // The preview is advisory. Sending its first match as an explicit
+        // skill would suppress other automatically resolved capabilities.
+        // Explicit @ mentions remain in the question for server resolution.
+        skillHint: '',
       };
       this.$emit('submit', payload);
       this.mentionQuery = null;
@@ -317,6 +320,7 @@ export const Composer = {
                   @click="removeFile(index)"><Icon name="close" :size="12" /></button>
         </span>
       </div>
+      <p v-if="pendingFiles.length" class="small muted" style="padding:0 14px 8px">附件会在发送时读取，作为本次分析及后续追问的私有资料。</p>
 
       <textarea ref="area" class="composer__input" rows="1" :value="text" :disabled="disabled"
                 :placeholder="placeholder" aria-label="分析问题" @input="onInput" @keydown="onKeydown"
@@ -365,7 +369,7 @@ export const Composer = {
           </span>
         </label>
         <p v-if="!availableSources.length" class="muted small">
-          {{ agentId ? '当前智能体没有可用数据。请联系管理员检查数据源和智能体配置，并重新发布智能体。' : '暂无可用数据源。请联系管理员接入业务数据，或在工作台载入演示数据。' }}
+          {{ agentId ? '当前智能体没有可用数据。请联系管理员检查数据源和智能体配置，并重新发布智能体。' : '暂无可用数据源。请联系管理员接入业务数据并授权；有分析权限时也可以直接上传文件提问。' }}
         </p>
       </Drawer>
 

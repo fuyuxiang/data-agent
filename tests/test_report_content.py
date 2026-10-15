@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import zipfile
+from dataclasses import replace
 
 import pytest
 from docx import Document
@@ -365,6 +366,96 @@ def test_result_reuse_respects_session_scope_and_new_time_range(app, client):
             _reuse_analysis_result(store.db, changed_time)
         with pytest.raises(ValueError, match='当前会话'):
             _reuse_analysis_result(store.db, other_session)
+
+
+def test_old_result_followup_reuses_its_parent_through_publication_and_export(app, client, monkeypatch):
+    from backend.services.advanced_agent import _prepare_run_skills, _reuse_analysis_result
+
+    store, original, original_report = run_report(app, client)
+    contract = store.latest_contract(original['id'])['payload']
+    newer, _ = store.create_run(
+        workspace_id='default', session_id=original['session_id'], actor_id='local-default',
+        source_scope=original['source_scope'], allowed_tool_ids=original['allowed_tool_ids'],
+    )
+    store.add_contract(newer['id'], TaskContract.from_payload({
+        **contract, 'objective': '只统计B组', 'coverage': '仅B组记录',
+    }), expected_version=0, confirmed_by='local-default')
+
+    class NewerReportModel(ReportModel):
+        def complete(self, *args, **kwargs):
+            stage = self.stage
+            response = super().complete(*args, **kwargs)
+            if stage == 0:
+                calls = []
+                for call in response.tool_calls:
+                    sql = call.arguments['sql']
+                    sql = sql.replace(' GROUP BY', ' WHERE "group"=\'B\' GROUP BY') if ' GROUP BY' in sql else sql + ' WHERE "group"=\'B\''
+                    calls.append(replace(call, arguments={'sql': sql}))
+                return replace(response, tool_calls=tuple(calls))
+            return replace(response, content='合计为 15。B 组的 amount 为 15。') if stage >= 2 else response
+
+    with app.app_context():
+        outcome = AgentLoop(store=store, model=NewerReportModel(store, newer), tools=build_executor(store.db, newer),
+                            finalizer=ResultService(store.db).finalize).run(newer['id'], runner_id='newer-report', history=[])
+    assert outcome.outcome == 'complete'
+    child = client.post('/api/analyses', json={
+        'objective': '把原分析整理成报告', 'session_id': original['session_id'], 'parent_run_id': original['id'],
+        'source_ids': original['source_scope'], 'skill_id': 'report',
+    }).get_json()['item']
+    with app.app_context():
+        reused = _reuse_analysis_result(store.db, child)
+    assert reused['source_analysis_id'] == original['id']
+    assert reused['report_input'] == original_report
+    assert next(item['data'][0]['total'] for item in reused['results'] if 'total' in item['columns']) == 25
+
+    class ParentReportModel:
+        protocol, model, stage = 'fixture', 'fixture', 0
+
+        def complete(self, _messages, _schemas, **_kwargs):
+            self.stage += 1
+            if self.stage == 1:
+                calls = (ModelToolCall('reuse', 'reuse_analysis_result', {}),)
+            elif self.stage == 2:
+                calls = (ModelToolCall('report', 'submit_analysis_report', reused['report_input']),)
+            else:
+                return ModelResponse('fixture', 'fixture', '合计为 25。B 组的 amount 为 15。', (), 'stop', None, {'total_tokens': 20})
+            return ModelResponse('fixture', 'fixture', '', calls, 'tool_calls', None, {'total_tokens': 20})
+
+    store.add_contract(child['id'], TaskContract.from_payload(child['contract']['payload']), expected_version=1, confirmed_by='local-default')
+    monkeypatch.setattr('backend.services.datasets.execute_query', lambda *_a, **_k: pytest.fail('报告不应重新取数'))
+    with app.app_context():
+        skills = _prepare_run_skills(store.db, child, {'skill_ids': ['report']}, child['allowed_tool_ids'])
+        outcome = AgentLoop(store=store, model=ParentReportModel(), tools=build_executor(store.db, child),
+                            finalizer=ResultService(store.db).finalize).run(child['id'], runner_id='old-result-report', history=[], skills=skills)
+    assert outcome.outcome == 'complete'
+    published = client.get(f"/api/analyses/{child['id']}/results").get_json()['manifest']['payload']
+    assert published['kpis'][0]['value'] == 25
+    exported = client.post(f"/api/analyses/{child['id']}/artifacts", json={'kinds': ['data_xlsx']})
+    assert exported.status_code == 201, exported.get_json()
+    artifact = store.db.get('artifacts', exported.get_json()['items'][0]['id'])
+    assert load_workbook(artifact['path'], read_only=True)['验证数据']['A2'].value == 25
+
+
+@pytest.mark.parametrize('unavailable', ['unpublished', 'archived', 'other_actor', 'other_session'])
+def test_explicit_parent_cannot_fall_back_to_an_unrelated_publication(app, client, unavailable):
+    from backend.services.advanced_agent import _reuse_analysis_result
+
+    store, published, _report = run_report(app, client)
+    _store, run = report_followup(app, published)
+    parent, _ = store.create_run(
+        workspace_id='default', session_id=published['session_id'], actor_id='local-default',
+        source_scope=published['source_scope'], allowed_tool_ids=published['allowed_tool_ids'],
+    )
+    if unavailable == 'archived':
+        store.update_status(parent['id'], 'failed')
+        store.archive_run(parent['id'], workspace_id='default', session_id=parent['session_id'])
+    elif unavailable in {'other_actor', 'other_session'}:
+        key = 'actor_id' if unavailable == 'other_actor' else 'session_id'
+        with store.db.transaction() as connection:
+            connection.execute(f'UPDATE agent_runs SET {key}=? WHERE id=?', ('another', parent['id']))
+    run['parent_run_id'] = parent['id']
+    with app.app_context(), pytest.raises((ValueError, PermissionError), match='原分析'):
+        _reuse_analysis_result(store.db, run)
 
 
 def test_reference_payload_rejects_paths_and_is_not_injected_whole_into_model(app):

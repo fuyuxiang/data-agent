@@ -75,6 +75,7 @@ export const TITLES = {
   'admin/settings': '系统设置',
   'admin/trash': '回收站',
   trash: '回收站',
+  history: '全部对话',
 };
 
 const LEGACY = {
@@ -86,7 +87,7 @@ const LEGACY = {
 };
 
 // 对话页是可达但不进导航的路由：它由提问动作进入，不在侧栏里出现。
-const HIDDEN = ['conversation', 'trash'];
+const HIDDEN = ['conversation', 'trash', 'history'];
 
 const KNOWN = new Set([
   ...USER_NAV.map(item => item.key),
@@ -156,6 +157,7 @@ export function commandItems() {
   return [
     ...pages,
     { name: 'trash', label: '回收站', icon: 'trash', kind: '页面' },
+    { name: 'history', label: '全部对话', icon: 'history', kind: '页面' },
     { name: 'new', label: '新建对话', icon: 'plus', kind: '动作' },
     { name: 'workbench', label: '回到工作台', icon: 'home', kind: '动作' },
     { name: 'theme', label: '切换深浅色', icon: state.theme === 'dark' ? 'sun' : 'moon', kind: '动作' },

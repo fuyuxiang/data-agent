@@ -185,8 +185,10 @@ def evaluations():
          "count": sum(1 for item in feedback if key in (item.get("reasons") or []))}
         for key, label in FEEDBACK_REASONS
     ]
-    positive = sum(1 for item in feedback if item.get("rating") in {"up", "positive", 1, True})
-    negative = sum(1 for item in feedback if item.get("rating") in {"down", "negative", -1, False})
+    positive = sum(1 for item in feedback if item.get("rating") in {"correct", "up", "positive", 1, True})
+    negative = sum(1 for item in feedback if item.get("rating") in {
+        "partially_correct", "incorrect", "down", "negative", -1, False,
+    })
 
     runs = RunStore(db()).list_runs(wid, limit=1000, include_archived=True)
     failures: dict[str, int] = {}

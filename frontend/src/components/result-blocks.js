@@ -304,17 +304,20 @@ export const ResultView = {
 export const ClarificationCard = {
   name: 'ClarificationCard',
   components: { Icon },
-  props: { contract: Object, busy: Boolean },
+  props: { contract: Object, scopeChange: Object, busy: Boolean },
   emits: ['submit', 'cancel'],
   data() {
     return {
       choices: {
         period: null,
         focus: null,
-        start: '',
-        end: '',
+        start: this.contract?.payload?.time_range?.start || '',
+        end: this.contract?.payload?.time_range?.end || '',
+        coverage: this.contract?.payload?.coverage || '',
+        dimensions: (this.contract?.payload?.dimensions || []).join('、'),
+        metrics: (this.contract?.payload?.metrics || []).join('、'),
       },
-      expanded: false,
+      expanded: this.scopeChange?.kind === 'scope',
     };
   },
   computed: {
@@ -334,6 +337,10 @@ export const ClarificationCard = {
       return (this.contract?.payload?.deliverables || []).map(value => labels[value] || '按需求交付').join('、');
     },
     dateError() {
+      if (this.scopeChange?.kind === 'time' && !this.choices.period
+        && !(this.contract?.payload?.time_range?.start && this.contract?.payload?.time_range?.end)) {
+        return '请选择本次分析的时间范围';
+      }
       if (this.choices.period !== '自定义') return '';
       if (!this.choices.start || !this.choices.end) return '请选择开始和结束日期';
       return this.choices.start > this.choices.end ? '结束日期不能早于开始日期' : '';
@@ -348,6 +355,11 @@ export const ClarificationCard = {
           <p class="clarify__desc">确认后将按所选口径开始分析；如需调整问题，请选择「重新描述」。</p>
         </div>
       </div>
+
+      <p v-if="scopeChange?.message" class="small muted" role="status" style="margin-top:12px">{{ scopeChange.message }}</p>
+      <ul v-if="contract?.payload?.unresolved?.length" class="small muted" style="margin-top:8px;padding-left:18px">
+        <li v-for="item in contract.payload.unresolved" :key="item">{{ item }}</li>
+      </ul>
 
       <div class="clarify__group">
         <div class="clarify__label">分析时间</div>
@@ -376,8 +388,9 @@ export const ClarificationCard = {
       <div v-if="expanded" class="clarify__group">
         <div class="clarify__label">统计范围</div>
         <dl class="definition">
-          <dt>数据范围</dt><dd>{{ contract?.payload?.coverage || '所选数据的授权范围' }}</dd>
-          <dt>分析维度</dt><dd>{{ (contract?.payload?.dimensions || ['整体']).join('、') }}</dd>
+          <dt>数据范围</dt><dd><textarea v-model="choices.coverage" class="textarea" :disabled="busy" aria-label="统计范围" maxlength="4000"></textarea></dd>
+          <dt>分析维度</dt><dd><input v-model="choices.dimensions" class="input" :disabled="busy" aria-label="分析维度" placeholder="多个维度用顿号分隔" /></dd>
+          <dt>分析指标</dt><dd><input v-model="choices.metrics" class="input" :disabled="busy" aria-label="分析指标" placeholder="可选，多个指标用顿号分隔" /></dd>
           <dt>输出形式</dt><dd>{{ deliverables }}</dd>
           <template v-if="contract?.payload?.confirmed_assumptions?.length">
             <dt>已确认口径</dt><dd>{{ contract.payload.confirmed_assumptions.join('；') }}</dd>
@@ -390,7 +403,7 @@ export const ClarificationCard = {
           {{ expanded ? '收起口径' : '查看口径' }}
         </button>
         <button class="btn btn--sm" :disabled="busy" @click="$emit('cancel')">重新描述</button>
-        <button class="btn btn--primary" :disabled="busy || !!dateError" @click="$emit('submit', { ...choices })">
+        <button class="btn btn--primary" :disabled="busy || !!dateError || !choices.coverage.trim() || !choices.dimensions.trim()" @click="$emit('submit', { ...choices })">
           <Icon name="play" :size="15" />{{ busy ? '正在提交…' : '开始分析' }}
         </button>
       </div>

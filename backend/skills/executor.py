@@ -66,6 +66,10 @@ def effective_tool_set(
         tools = set(_ALWAYS_ALLOWED) | _DATA_TOOLS
     if _DATA_TOOLS & tools:
         tools |= {"list_semantic_metrics", "query_metric"}
+    if available is not None and "search_mcp_tools" in tools:
+        # A skill can request MCP discovery without hardcoding generated tool
+        # names. Only the run's approved, Agent-scoped tools can ride along.
+        tools.update(name for name in available if name.startswith("mcp__"))
     if available is not None:
         tools &= set(available) | _ALWAYS_ALLOWED
     return frozenset(tools)
