@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1170" viewBox="0 0 1500 1170" role="img" aria-labelledby="title desc">
+  <title id="title">数擎 Data Agent 系统架构</title>
+  <desc id="desc">当前实现的组件与部署边界。Vue 浏览器客户端通过 HTTP 和 SSE 连接单节点 Flask 应用。应用包含 API、AgentLoop、Skill Runtime、ToolExecutor、指标知识、结果核验交付及数据访问组件，连接 SQLite WAL 和本地文件。本地审核分析在受限子进程执行；模型、MCP、业务数据源、可选的 Trino 和 Livy Spark 为外部依赖。连线表示主要调用关系，箭头指向被调用方；虚线表示可选连接。</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #182b43; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 20px; fill: #617089; }
+      .eyebrow { font-size: 17px; font-weight: 600; letter-spacing: 2px; fill: #64748b; }
+      .heading { font-size: 25px; font-weight: 650; }
+      .body { font-size: 20px; fill: #526279; }
+      .small { font-size: 18px; fill: #617089; }
+      .label { font-size: 18px; fill: #435774; paint-order: stroke; stroke: #fff; stroke-width: 7px; stroke-linejoin: round; }
+      .node { fill: #fff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #526987; stroke-width: 2; marker-end: url(#arrow); }
+      .optional { stroke-dasharray: 7 6; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M1 1 L9 5 L1 9 Z" fill="#526987"/>
+    </marker>
+  </defs>
+  <rect width="1500" height="1170" fill="#fff"/>
+  <rect x="40" y="38" width="6" height="38" rx="3" fill="#5065e9"/>
+  <text x="62" y="68" class="title">数擎 Data Agent</text>
+  <text x="62" y="101" class="subtitle">系统架构 · 当前实现的组件与部署边界</text>
+  <text x="1110" y="68" class="eyebrow">EXTERNAL SYSTEMS</text>
+  <text x="1110" y="100" class="subtitle">按实际配置连接的外部系统</text>
+
+  <!-- Browser process: separate from the application node. -->
+  <rect x="40" y="137" width="1000" height="112" rx="10" class="node"/>
+  <rect x="40" y="137" width="7" height="112" rx="3" fill="#5065e9"/>
+  <text x="72" y="177" class="heading">Web 客户端</text>
+  <text x="72" y="216" class="body">Vue 3 · 业务工作台 / 指标中心 / 资料库 / 管理后台</text>
+  <text x="1010" y="176" text-anchor="end" class="small">浏览器进程</text>
+  <path d="M540 249 V370" class="flow"/>
+  <text x="560" y="282" class="label">HTTP / JSON · SSE 事件流</text>
+
+  <!-- All boxes inside this boundary are modules in one Flask process. -->
+  <rect x="40" y="315" width="1000" height="555" rx="12" fill="#f6f8fc" stroke="#9baec7" stroke-width="1.5" stroke-dasharray="8 5"/>
+  <text x="70" y="349" class="heading">应用节点</text>
+  <text x="1010" y="349" text-anchor="end" class="body">Python · Flask / Waitress · 单进程</text>
+  <path d="M540 315 V370" class="flow"/>
+
+  <rect x="70" y="377" width="940" height="87" rx="8" class="node"/>
+  <text x="94" y="413" class="heading">API 与访问控制</text>
+  <text x="94" y="445" class="body">身份认证 · 工作空间与资源授权 · 请求校验 · HTTP / SSE 接口</text>
+  <path d="M540 464 V514" class="flow"/>
+
+  <rect x="70" y="514" width="940" height="116" rx="8" fill="#edf0ff" stroke="#a8b3f2" stroke-width="1.5"/>
+  <text x="94" y="553" class="heading">Agent 与技能运行时</text>
+  <text x="94" y="586" class="body">AgentLoop · Skill Runtime · ToolExecutor</text>
+  <text x="94" y="612" class="small">任务契约 / 计划 / 动作 / 事件 · 进程内任务线程池 · 执行预算与取消</text>
+
+  <!-- Shared dispatch to the three service groups, not a pipeline. -->
+  <path d="M540 630 V704" class="flow"/>
+  <path d="M540 659 H215 V704" class="flow"/>
+  <path d="M540 659 H870 V704" class="flow"/>
+  <text x="565" y="687" class="small">调用业务服务</text>
+
+  <rect x="70" y="712" width="290" height="113" rx="8" class="node"/>
+  <text x="94" y="750" class="heading">指标与业务知识</text>
+  <text x="94" y="782" class="body">语义模型 · 指标编译</text>
+  <text x="94" y="808" class="body">业务规则 · 知识检索</text>
+
+  <rect x="395" y="712" width="290" height="113" rx="8" class="node"/>
+  <text x="419" y="750" class="heading">结果核验与交付</text>
+  <text x="419" y="782" class="body">完整性 / 证据 / 发布校验</text>
+  <text x="419" y="808" class="body">版本化成果 · 多格式导出</text>
+
+  <rect x="720" y="712" width="290" height="113" rx="8" class="node"/>
+  <text x="744" y="750" class="heading">数据访问与计算</text>
+  <text x="744" y="782" class="body">只读查询 · 数据引用</text>
+  <text x="744" y="808" class="body">资源限制 · 执行路由</text>
+
+  <!-- External boundaries and protocols. -->
+  <rect x="1110" y="514" width="350" height="103" rx="8" class="node"/>
+  <text x="1134" y="553" class="heading">模型服务</text>
+  <text x="1134" y="587" class="body">OpenAI 兼容 API</text>
+  <path d="M1010 554 H1110" class="flow"/>
+  <text x="1060" y="539" text-anchor="middle" class="label">HTTPS</text>
+
+  <rect x="1110" y="652" width="350" height="103" rx="8" class="node optional"/>
+  <text x="1134" y="691" class="heading">MCP 工具服务</text>
+  <text x="1134" y="725" class="body">可选 · 工具调用与风险分级</text>
+  <path d="M1010 602 H1060 V704 H1110" class="flow optional"/>
+  <text x="1084" y="689" text-anchor="middle" class="label">MCP</text>
+
+  <rect x="1110" y="790" width="350" height="103" rx="8" class="node"/>
+  <text x="1134" y="829" class="heading">业务数据源</text>
+  <text x="1134" y="863" class="body">数据库 / HTTP API</text>
+  <path d="M1010 776 H1080 V841 H1110" class="flow"/>
+  <text x="1110" y="775" class="label">SQL 驱动 / HTTP</text>
+
+  <!-- Local storage and the separate reviewed-analysis process. -->
+  <path d="M370 870 V937" class="flow"/>
+  <text x="390" y="908" class="label">应用读写</text>
+  <rect x="70" y="938" width="615" height="112" rx="8" fill="#f0f6fa" stroke="#bfcedb" stroke-width="1.5"/>
+  <line x1="375" y1="958" x2="375" y2="1030" stroke="#c4d1df" stroke-width="1.5"/>
+  <text x="94" y="978" class="heading">SQLite WAL</text>
+  <text x="94" y="1013" class="body">配置 · 任务 · 事件 · 审计</text>
+  <text x="399" y="978" class="heading">本地文件</text>
+  <text x="399" y="1013" class="body">上传 · 索引 · 交付物</text>
+
+  <path d="M865 825 V937" class="flow"/>
+  <text x="883" y="908" class="label">有界输入</text>
+  <rect x="720" y="938" width="290" height="112" rx="8" class="node"/>
+  <text x="744" y="978" class="heading">本地审核分析</text>
+  <text x="744" y="1013" class="body">受限子进程 · 固定方法</text>
+
+  <rect x="1110" y="938" width="350" height="112" rx="8" class="node optional"/>
+  <text x="1134" y="978" class="heading">Trino / Livy · Spark</text>
+  <text x="1134" y="1013" class="body">可选 · 部署方提供计算环境</text>
+  <path d="M990 825 V908 H1060 V994 H1110" class="flow optional"/>
+  <text x="1134" y="923" class="label">HTTP · 远端计算适配器</text>
+
+  <line x1="40" y1="1086" x2="1460" y2="1086" stroke="#dde4ee"/>
+  <path d="M43 1118 H90" class="flow"/>
+  <text x="104" y="1125" class="small">主要调用 / 读写</text>
+  <path d="M330 1118 H377" class="flow optional"/>
+  <text x="391" y="1125" class="small">可选连接</text>
+  <text x="1460" y="1125" text-anchor="end" class="small">同机持久化 · 每个 storage 目录仅允许一个应用实例</text>
+  <text x="43" y="1154" class="small">组件视图，省略部分内部调用和持久化连线；并列模块不代表顺序执行。箭头指向被调用方。</text>
+</svg>

@@ -1,0 +1,33 @@
+{
+  "dataset": "POST /api/demo/seed; synthetic retail sales; rolling 24-month window",
+  "external_model": false,
+  "screenshots": [
+    {
+      "file": "workbench.png",
+      "route": "/#/workbench",
+      "description": "工作台与真实演示数据推荐问题；未配置模型。",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "file": "metric-trial.png",
+      "route": "/#/metrics",
+      "description": "销售额按区域试算；图表来自本地合成数据上的真实指标查询。",
+      "viewport": {
+        "width": 1440,
+        "height": 1800
+      }
+    },
+    {
+      "file": "agents.png",
+      "route": "/#/admin/agents",
+      "description": "管理后台的智能体编辑器与发布入口。",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      }
+    }
+  ]
+}
