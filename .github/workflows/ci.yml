@@ -63,8 +63,10 @@ jobs:
           MERIDIAN_TEST_POSTGRES_URL: postgresql+psycopg2://meridian:meridian-ci-password@127.0.0.1:5432/meridian
           MERIDIAN_TEST_MYSQL_URL: mysql+pymysql://meridian:MeridianCI2026_Pass@127.0.0.1:3306/meridian
         run: pytest -q -m database_integration tests/test_database_integration.py
-      - name: Audit locked production dependencies
-        run: pip-audit -r requirements.lock --no-deps --disable-pip
+      - name: Audit locked Python dependencies
+        run: |
+          pip-audit -r requirements.lock --require-hashes --disable-pip
+          pip-audit -r requirements-dev.lock --require-hashes --disable-pip
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

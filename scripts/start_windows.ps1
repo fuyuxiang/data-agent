@@ -108,7 +108,7 @@ function New-VirtualEnvironment {
     return
   }
 
-  throw "Python was not found. Please install Python 3.10+ and run this script again."
+  throw "Python was not found. Please install Python 3.11+ and run this script again."
 }
 
 function Test-RequiredPythonPackages {

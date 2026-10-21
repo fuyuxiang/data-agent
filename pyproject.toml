@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "meridian-analytics-workbench"
 version = "1.0.0"
 description = "Vue 3 and Python Meridian analytics workbench"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -16,5 +16,5 @@ markers = ["database_integration: requires disposable external database services
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["backend/analysis_modules", "backend/data_cleaning"]

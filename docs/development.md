@@ -23,7 +23,8 @@ pytest -q -m "not database_integration" \
   --cov=backend/agent --cov=backend/api --cov=backend/core --cov=backend/services \
   --cov-report=term --cov-fail-under=60
 coverage report --include='backend/agent/*' --fail-under=85
-pip-audit -r requirements.lock --no-deps --disable-pip
+pip-audit -r requirements.lock --require-hashes --disable-pip
+pip-audit -r requirements-dev.lock --require-hashes --disable-pip
 ```
 
 ## 前端检查与构建

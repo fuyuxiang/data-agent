@@ -140,7 +140,10 @@ def ci() -> list[Result]:
             sys.executable, "-m", "coverage", "report", "--include=backend/agent/*", "--fail-under=85",
         ]),
         *database_integration(),
-        command("python-dependency-audit", ["pip-audit", "-r", "requirements.lock", "--no-deps", "--disable-pip"]),
+        command("python-dependency-audit", ["pip-audit", "-r", "requirements.lock", "--require-hashes", "--disable-pip"]),
+        command("python-development-dependency-audit", [
+            "pip-audit", "-r", "requirements-dev.lock", "--require-hashes", "--disable-pip",
+        ]),
         command("frontend-check", ["npm", "run", "check"]),
         command("frontend-build", ["npm", "run", "build"]),
         command("frontend-dependency-audit", ["npm", "audit", "--audit-level=high"]),

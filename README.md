@@ -7,7 +7,7 @@
 用自然语言查询业务数据，基于统一指标口径开展分析，生成可追溯的结论与报告。
 
 [![CI](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/fuyuxiang/data-agent/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3-000000?logo=flask&logoColor=white)
 
@@ -64,7 +64,7 @@
 
 ### 环境要求
 
-- Python 3.10+（CI 使用 3.11）和 Git。
+- Python 3.11+（CI 使用 3.11）和 Git。
 - Node.js 20+：用于前端开发、检查与生产构建；直接运行源码界面时无需安装。
 - 连接 SQL Server 时，需要在运行主机安装 Microsoft ODBC Driver 18。
 
