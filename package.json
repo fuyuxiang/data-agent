@@ -14,5 +14,6 @@
   },
   "devDependencies": {
     "@playwright/test": "1.63.0"
-  }
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
 }

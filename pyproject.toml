@@ -3,6 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
+license = { text = "PolyForm-Noncommercial-1.0.0" }
 name = "meridian-analytics-workbench"
 version = "1.0.0"
 description = "Vue 3 and Python Meridian analytics workbench"
