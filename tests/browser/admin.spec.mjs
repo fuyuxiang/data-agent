@@ -128,8 +128,8 @@ test('指标删除先提示依赖，移除依赖后可完成删除', async ({ pa
   const dependent = (await dependentResponse.json()).item;
 
   await page.goto('/#/admin/metrics');
-  await page.locator('article.card:has(b:text-is("delete_review_base"))')
-    .getByRole('button', { name: '删除指标' }).click();
+  await page.locator('article.card:has(b:text-is("delete_review_base"))').click();
+  await page.locator('.metric-layout > aside').getByRole('button', { name: '删除指标' }).click();
   const dialog = page.getByRole('dialog', { name: '删除指标' });
   await expect(dialog).toContainText('delete_review_derived');
   await expect(dialog.getByRole('button', { name: '确认删除' })).toHaveCount(0);
@@ -137,8 +137,8 @@ test('指标删除先提示依赖，移除依赖后可完成删除', async ({ pa
 
   expect((await page.request.delete(`/api/semantic/metrics/${dependent.id}`)).ok()).toBeTruthy();
   await page.reload();
-  await page.locator('article.card:has(b:text-is("delete_review_base"))')
-    .getByRole('button', { name: '删除指标' }).click();
+  await page.locator('article.card:has(b:text-is("delete_review_base"))').click();
+  await page.locator('.metric-layout > aside').getByRole('button', { name: '删除指标' }).click();
   await expect(dialog.getByRole('button', { name: '确认删除' })).toBeEnabled();
   await dialog.getByRole('button', { name: '确认删除' }).click();
   await expect(page.locator('article.card:has(b:text-is("delete_review_base"))')).toHaveCount(0);

@@ -10,6 +10,7 @@ import { Icon } from '../components/icons.js';
 import { DataTable, EmptyState, Modal, SearchInput, Tabs, Status } from '../components/ui.js';
 import { actions, canAdmin, state, toast } from '../store.js';
 import { navigate } from '../router.js';
+import { metricFormatter } from '../metric-format.js';
 
 const METRIC_TYPES = {
   atomic: '原子指标',
@@ -188,7 +189,7 @@ export const MetricsView = {
           ? await actions.patch(`/api/semantic/metrics/${this.editor.id}`, body)
           : await actions.post('/api/semantic/metrics', body);
         this.metrics = this.metrics.filter(item => item.id !== response.item.id).concat(response.item);
-        if (this.selected?.id === response.item.id) this.selected = response.item;
+        if (this.selected?.id === response.item.id) this.select(response.item);
         this.editor = null;
         toast('指标已保存为草稿', '完成');
       } catch (error) {
@@ -406,6 +407,7 @@ export const MetricsView = {
           ? await actions.patch(`/api/semantic/models/${this.modelEditor.id}`, this.modelEditor)
           : await actions.post('/api/semantic/models', this.modelEditor);
         this.models = this.models.filter(item => item.id !== response.item.id).concat(response.item);
+        if (this.selected?.model_id === response.item.id) this.invalidateTrial();
         this.modelEditor = null;
         toast('语义模型已保存，可以继续新建指标', '完成');
       } catch (error) {
@@ -433,6 +435,7 @@ export const MetricsView = {
       try {
         await actions.patch(`/api/semantic/metrics/${metric.id}`, { status: 'deprecated' });
         metric.status = 'deprecated';
+        if (this.selected?.id === metric.id) this.invalidateTrial();
         toast('指标已停用', '完成');
       } catch (error) {
         toast(error.message, '操作失败', 'error');
@@ -456,9 +459,10 @@ export const MetricsView = {
         title: `${valueLabel}${this.selected.unit ? '（' + this.selected.unit + '）' : ''} · ${labels.map(name => this.supportedDimensions.find(item => item.name === name)?.label || name).join(' / ')}`,
         type: labels.length === 1 && /日期|时间|月份|年月|date|time|month|year/i.test(labels[0]) ? 'line' : 'bar',
         available: true,
+        valueFormat: this.selected.format,
         encoding: {
           x: rows.slice(0, 20).map(row => labels.map(name => row[name] ?? '—').join(' / ')),
-          series: [{ name: valueLabel, values: rows.slice(0, 20).map(row => row[value] === null || row[value] === undefined || row[value] === '' ? null : Number(row[value])) }],
+          series: [{ name: valueLabel, values: rows.slice(0, 20).map(row => row[value] == null || row[value] === '' ? null : row[value]) }],
         },
       };
     },
@@ -490,7 +494,7 @@ export const MetricsView = {
         ]" />
 
         <div v-if="tab === 'metrics'" class="metric-layout" style="margin-top:18px">
-          <div>
+          <div class="metric-catalog">
             <div class="toolbar">
               <SearchInput v-model="query" placeholder="搜索指标名称、口径或同义词" />
               <div class="segmented">
@@ -510,7 +514,6 @@ export const MetricsView = {
             <div v-else class="metric-list">
               <article v-for="item in filtered" :key="item.id" class="card card--interactive metric-item"
                        :class="{ 'metric-item--selected': selected?.id === item.id }"
-                       style="display:flex;align-items:center;gap:12px;text-align:left;width:100%"
                        role="button" tabindex="0" @click="select(item)"
                        @keydown.enter.self="select(item)" @keydown.space.self.prevent="select(item)">
                 <span class="agent-card__mark" style="width:34px;height:34px">
@@ -521,16 +524,14 @@ export const MetricsView = {
                     <b>{{ item.label || item.name }}</b>
                     <Status :status="item.status" />
                   </span>
-                  <span class="small muted truncate" style="display:block">
+                  <span class="small muted truncate" style="display:block" :title="item.expression || item.measure">
                     {{ typeLabel(item) }} · {{ item.expression || item.measure || '—' }}
                     <template v-if="item.unit"> · {{ item.unit }}</template>
                   </span>
-                  <span class="xs faint truncate" style="display:block;margin-top:2px">
+                  <span class="xs faint truncate" style="display:block;margin-top:2px" :title="item.description">
                     {{ item.description || '暂无业务定义' }}
                   </span>
                 </span>
-                <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm" style="color:var(--danger)"
-                        @click.stop="openMetricDelete(item)">删除指标</button>
               </article>
             </div>
           </div>
@@ -614,7 +615,7 @@ export const MetricsView = {
                   </div>
                 </div>
 
-                <div class="stack" style="display:flex;flex-direction:column;gap:12px">
+                <div class="metric-trial-form">
                   <div v-if="supportedDimensions.length">
                     <div class="small muted" style="margin-bottom:6px">按哪些维度查看</div>
                     <div class="tag-row">
@@ -669,14 +670,15 @@ export const MetricsView = {
                   </button>
                 </div>
 
-                <div v-if="trialResult" class="stack" style="margin-top:16px;display:flex;flex-direction:column;gap:12px">
+                <div v-if="trialResult" class="metric-trial-result">
                   <p class="small muted" role="status">{{ selected.label || selected.name }} · 返回 {{ (trialResult.data || []).length }} 行<span v-if="selected.unit"> · 单位：{{ selected.unit }}</span><span v-if="trialResult.truncated"> · 已达到行数上限，部分数据未展示</span></p>
                   <div v-if="trialChart()" class="small muted">
                     <ChartCard :spec="trialChart()" />
                     <p v-if="(trialResult.data || []).length > 20" class="xs faint">图表展示前 20 组，全部返回数据见下方表格。</p>
                   </div>
-                  <DataTable :rows="trialResult.data || []" :columns="(trialResult.columns || []).map(c => ({ key: c, label: c }))"
+                  <DataTable :rows="trialResult.data || []" :columns="trialColumns"
                              max-height="280px" />
+                  <p v-if="selected.format" class="xs faint">数值按指标格式展示，悬停单元格可查看原始值。</p>
                   <details v-if="trialPlan">
                     <summary class="small muted" style="cursor:pointer">查看 SQL 与口径</summary>
                     <pre style="margin-top:8px">{{ trialPlan.sql }}</pre>
@@ -893,6 +895,17 @@ export const MetricsView = {
       </template>
     </Modal>`,
   computed: {
+    trialColumns() {
+      return (this.trialResult?.columns || []).map(key => {
+        if (key !== this.trial.metric) return {
+          key, label: this.supportedDimensions.find(item => item.name === key)?.label || key,
+        };
+        return {
+          key, label: `${this.selected?.label || key}${this.selected?.unit ? '（' + this.selected.unit + '）' : ''}`,
+          format: metricFormatter(this.selected?.format),
+        };
+      });
+    },
     canAnalyze() {
       return ['owner', 'editor', 'analyst'].includes(state.workspaceRole);
     },

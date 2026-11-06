@@ -7,7 +7,8 @@
     "dev": "python3 app.py",
     "build": "node scripts/build.mjs",
     "check": "node scripts/check-vendor.mjs && node scripts/check-ui.mjs && node --check frontend/src/app.js && node --check frontend/src/store.js && node --check frontend/src/router.js && node --check frontend/src/api.js",
-    "test:browser": "npm run build && playwright test"
+    "test:browser": "npm run build && playwright test",
+    "test:frontend": "node --test tests/frontend/*.test.mjs"
   },
   "engines": {
     "node": ">=20"

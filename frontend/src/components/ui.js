@@ -152,22 +152,25 @@ export function useDismissable(open, close, root) {
 export const Modal = {
   name: 'Modal',
   components: { Icon },
-  props: { open: Boolean, title: String, wide: Boolean, size: { type: String, default: 'medium' } },
+  props: {
+    open: Boolean, title: String, wide: Boolean, size: { type: String, default: 'medium' },
+    dismissible: { type: Boolean, default: true },
+  },
   emits: ['close'],
   setup(props, { emit }) {
     const root = ref(null);
-    useDismissable(computed(() => props.open), () => emit('close'), root);
+    useDismissable(computed(() => props.open), () => { if (props.dismissible) emit('close'); }, root);
     return { root };
   },
   template: `
     <Teleport to="body">
       <Transition name="fade">
-        <div v-if="open" class="overlay overlay--center" @mousedown.self="$emit('close')">
+        <div v-if="open" class="overlay overlay--center" @mousedown.self="dismissible && $emit('close')">
           <section ref="root" class="modal" :class="{ 'modal--wide': wide }" :data-size="size"
                    role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
             <header class="modal__head">
               <h2>{{ title }}</h2>
-              <button class="icon-btn" @click="$emit('close')" aria-label="关闭"><Icon name="close" /></button>
+              <button class="icon-btn" :disabled="!dismissible" @click="$emit('close')" aria-label="关闭"><Icon name="close" /></button>
             </header>
             <div class="modal__body"><slot /></div>
             <footer v-if="$slots.footer" class="modal__foot"><slot name="footer" /></footer>
@@ -267,6 +270,10 @@ export const DataTable = {
       if (typeof value === 'object') return JSON.stringify(value);
       return String(value);
     },
+    cell(value, column) {
+      if (value != null && value !== '' && typeof column?.format === 'function') return column.format(value);
+      return this.format(value);
+    },
     date(value) {
       return typeof value === 'string' && /^\d{4}[-/]\d{2}[-/]\d{2}(?:[T ][\d:.+Z-]+)?$/.test(value);
     },
@@ -286,7 +293,7 @@ export const DataTable = {
           <tr v-for="(row, index) in rows" :key="index">
             <td v-for="column in shownColumns" :key="key(column)"
                 :class="{ 'is-numeric': numericColumns.has(key(column)) }"
-                :title="format(row[key(column)])"><span class="table__value" :class="{ 'is-date': date(row[key(column)]) }">{{ format(row[key(column)]) }}</span></td>
+                :title="format(row[key(column)])"><span class="table__value" :class="{ 'is-date': date(row[key(column)]) }">{{ cell(row[key(column)], column) }}</span></td>
           </tr>
         </tbody>
       </table>

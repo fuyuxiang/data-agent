@@ -297,7 +297,7 @@ const Shell = {
           <LibraryView v-else-if="state.route === 'library'" />
           <HistoryView v-else-if="state.route === 'history'" :key="JSON.stringify(state.routeParams)" />
           <MetricsView v-else-if="state.route === 'metrics'" />
-          <TrashView v-else-if="state.route === 'trash'" :key="JSON.stringify(state.routeParams)" />
+          <div v-else-if="state.route === 'trash'" class="view--page"><TrashView :key="JSON.stringify(state.routeParams)" /></div>
 
           <div v-else-if="state.route.startsWith('admin/')" class="view--page">
             <div class="admin">

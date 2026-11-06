@@ -81,7 +81,7 @@ def bootstrap():
 
     available = available_resources(db(), wid, current_user_id())
     skill_registry = SkillRegistry(db(), wid)
-    skills = filter_visible(skill_registry.definitions(include_disabled=False), available)
+    skills = filter_visible(skill_registry.published(), available)
     agents = []
     for item in published_agents(db(), wid):
         if item.get("visibility", "workspace") == "private" and item.get("created_by") != current_user_id():

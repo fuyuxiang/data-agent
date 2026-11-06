@@ -106,6 +106,7 @@ export const readySources = computed(
 /* ------------------------------------------------------------------ 会话 */
 
 export async function bootstrap({ quiet = false } = {}) {
+  sourceRevision += 1;
   if (!quiet) state.authChecking = true;
   state.bootstrapError = '';
   try {
@@ -265,12 +266,48 @@ export async function loadDemo() {
 
 /* ------------------------------------------------------------------ 通用动作 */
 
+let sourceRevision = 0;
+
+/** Read every authorized page before replacing the shared analysis scope. */
+async function refreshSources() {
+  const revision = ++sourceRevision;
+  const workspace = state.workspaceId;
+  const actor = state.user?.id;
+  const current = () => revision === sourceRevision && workspace === state.workspaceId
+    && actor === state.user?.id && !state.authRequired;
+  const items = new Map();
+  const cursors = new Set();
+  let cursor = '';
+  do {
+    const page = await get(`/api/sources${cursor ? '?cursor=' + encodeURIComponent(cursor) : ''}`);
+    if (!current()) return null;
+    for (const item of page.items || []) items.set(item.id, item);
+    cursor = page.next_cursor || '';
+    if (cursor && cursors.has(cursor)) throw new Error('数据源分页未能继续，请重新加载');
+    cursors.add(cursor);
+  } while (cursor);
+  state.sources = [...items.values()];
+  return state.sources;
+}
+
 export const actions = {
   get: (path) => get(path),
   post: (path, body) => post(path, body),
   put: (path, body) => put(path, body),
   patch: (path, body) => patch(path, body),
   remove: (path, body) => remove(path, body),
+  refreshSources,
+  updateSource(item) {
+    if (state.authRequired || item.workspace_id && item.workspace_id !== state.workspaceId) return;
+    sourceRevision += 1;
+    // A delayed catalog refresh must not reinsert a source deleted meanwhile.
+    state.sources = state.sources.map(source => source.id === item.id ? item : source);
+  },
+  forgetSource(id, workspace = state.workspaceId) {
+    if (state.authRequired || workspace !== state.workspaceId) return;
+    sourceRevision += 1;
+    state.sources = state.sources.filter(source => source.id !== id);
+  },
   download,
   uploadAttachments(runId, files) {
     const form = new FormData();

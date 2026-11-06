@@ -376,7 +376,7 @@ export const AgentBuilderView = {
       </template>
     </Modal>
 
-    <Modal :open="!!editing" :title="editing ? (editing.isNew ? '新建智能体' : editing.name) : ''" size="editor"
+    <Modal :open="!!editing" :title="editing ? (editing.isNew ? '新建智能体' : editing.name) : ''" size="editor" :dismissible="!saving && !publishing"
            @close="closeEditor">
       <div v-if="draft" class="builder">
         <nav class="builder__rail">

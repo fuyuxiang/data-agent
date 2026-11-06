@@ -5,6 +5,8 @@
  * prefers-reduced-motion、深浅色跟随 CSS 变量，不做彩虹配色与 3D。
  */
 
+import { metricFormatter } from '../metric-format.js';
+
 const { nextTick, onBeforeUnmount, onMounted, ref, watch } = Vue;
 
 const PALETTE_SLOTS = 6;
@@ -45,8 +47,9 @@ function cartesian(spec, palette) {
   const categories = spec.encoding?.x || [];
   const series = spec.encoding?.series || [];
   const type = BASE_TYPE[spec.type] || 'bar';
+  const valueFormatter = metricFormatter(spec.valueFormat, formatValue);
   return {
-    tooltip: { ...baseOption(palette).tooltip, trigger: type === 'scatter' ? 'item' : 'axis', valueFormatter: formatValue },
+    tooltip: { ...baseOption(palette).tooltip, trigger: type === 'scatter' ? 'item' : 'axis', valueFormatter },
     legend: { bottom: 0, itemWidth: 10, itemHeight: 10, textStyle: { color: palette.secondary, fontSize: 12 } },
     grid: { left: 8, right: 16, top: 20, bottom: 44, containLabel: true },
     xAxis: {
@@ -58,7 +61,7 @@ function cartesian(spec, palette) {
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: palette.secondary, fontSize: 12, formatter: (value) => formatValue(value) },
+      axisLabel: { color: palette.secondary, fontSize: 12, formatter: valueFormatter },
       splitLine: { lineStyle: { color: palette.line, type: 'dashed' } },
     },
     series: series.map((item, index) => ({

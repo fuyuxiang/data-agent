@@ -53,6 +53,7 @@ export const SkillsView = {
       section: 'basic',
       saving: false,
       publishing: false,
+      disabling: false,
       generating: false,
       opening: 0,
       testVersion: 0,
@@ -66,6 +67,9 @@ export const SkillsView = {
     };
   },
   computed: {
+    editorBusy() {
+      return this.saving || this.publishing || this.disabling;
+    },
     filtered() {
       const keyword = this.query.trim().toLowerCase();
       return this.items.filter(item => {
@@ -146,6 +150,9 @@ export const SkillsView = {
       try {
         const response = await actions.get('/api/skills');
         this.items = response.items || [];
+        // The list is already permission-filtered; drafts and disabled skills
+        // must never stay in the business composer's mention candidates.
+        state.skills = this.items.filter(item => item.status === 'published');
         this.unavailable = response.unavailable || [];
         this.categories = response.categories || [];
         this.canManage = !!response.can_manage;
@@ -209,7 +216,7 @@ export const SkillsView = {
       }
     },
     closeEditor() {
-      if (this.saving || this.publishing) return;
+      if (this.editorBusy) return;
       this.opening += 1;
       this.testVersion += 1;
       this.testing = false;
@@ -222,7 +229,7 @@ export const SkillsView = {
       this.detailError = '';
     },
     async save({ silent = false } = {}) {
-      if (!this.editor || this.saving) return null;
+      if (!this.editor || this.saving || this.disabling) return null;
       if (!this.editor.name?.trim() || !this.editor.description?.trim()) {
         this.section = 'basic';
         toast('请填写技能名称和描述', '信息不完整', 'error');
@@ -251,7 +258,7 @@ export const SkillsView = {
       }
     },
     async publish() {
-      if (this.publishing || this.saving || !this.editor) return;
+      if (this.editorBusy || !this.editor) return;
       this.publishing = true;
       try {
         if (!await this.save({ silent: true })) return;
@@ -275,11 +282,25 @@ export const SkillsView = {
       }
     },
     async disable(skill) {
+      if (!skill || this.editorBusy) return;
+      this.disabling = true;
       try {
-        await actions.patch(`/api/skills/${skill.id}`, { status: 'disabled' });
+        const response = await actions.patch(`/api/skills/${skill.id}`, { status: 'disabled' });
+        const unsaved = this.editor?.id === skill.id && this.editorDirty ? this.editor : null;
+        if (this.editor?.id === skill.id) {
+          const saved = { ...response.item, isNew: false };
+          this.editor = unsaved ? {
+            ...saved, ...unsaved, status: saved.status, version: saved.version,
+            updated_at: saved.updated_at, published_at: saved.published_at,
+          } : saved;
+          this.savedEditorSignature = editorSignature(saved);
+        }
         await this.load();
+        toast(unsaved ? '技能已停用，未保存的修改已保留，请继续保存。' : '技能已停用，不再提供给业务分析使用', '完成');
       } catch (error) {
         toast(error.message, '操作失败', 'error');
+      } finally {
+        this.disabling = false;
       }
     },
     async generate() {
@@ -474,10 +495,11 @@ export const SkillsView = {
       </template>
     </Modal>
 
-    <Modal :open="!!editor || !!openingSkill" :title="editor ? (editor.isNew ? '新建技能' : editor.name) : openingSkill?.name || '技能详情'" size="editor"
+    <Modal :open="!!editor || !!openingSkill" :title="editor ? (editor.isNew ? '新建技能' : editor.name) : openingSkill?.name || '技能详情'" size="editor" :dismissible="!editorBusy"
            @close="closeEditor">
       <div v-if="detailLoading" class="stack"><p class="small muted" role="status">正在读取技能配置…</p><div class="skeleton" style="height:120px"></div></div>
       <div v-else-if="detailError" class="stack"><p role="alert" class="small" style="color:var(--danger)">{{ detailError }}</p><button class="btn btn--sm" @click="open(openingSkill)">重试</button></div>
+      <p v-if="editor && !editor.isNew && editorDirty" class="small muted" role="status" style="margin-bottom:12px">有未保存的修改，请保存以保留新配置。</p>
       <div v-if="editor" class="builder">
         <nav class="builder__rail">
           <button v-for="tab in sectionTabs" :key="tab.key" class="admin__nav-item"
@@ -486,7 +508,7 @@ export const SkillsView = {
           </button>
         </nav>
 
-        <fieldset class="stack" :disabled="saving || publishing || (!editor.isNew && !editor.editable)" style="border:0;padding:0;margin:0;min-width:0">
+        <fieldset class="stack" :disabled="editorBusy || (!editor.isNew && !editor.editable)" style="border:0;padding:0;margin:0;min-width:0">
           <template v-if="section === 'basic'">
             <label class="field"><span>名称<em> *</em></span>
               <input v-model.trim="editor.name" class="input" placeholder="门店经营分析" /></label>
@@ -559,7 +581,7 @@ export const SkillsView = {
           <p class="xs faint" style="margin-bottom:10px">检查已保存的配置和问题匹配情况；此测试不执行实际数据分析。编辑后请先保存。</p>
           <div class="stack" style="display:flex;flex-direction:column;gap:10px">
             <textarea v-model="testQuestion" class="textarea" rows="3" placeholder="输入一个测试问题"></textarea>
-            <button class="btn btn--primary btn--sm" :disabled="testing || saving || publishing || editor.isNew || editorDirty" @click="test">
+            <button class="btn btn--primary btn--sm" :disabled="testing || editorBusy || editor.isNew || editorDirty" @click="test">
               <Icon name="play" :size="14" />{{ testing ? '测试中…' : '校验配置' }}
             </button>
             <p v-if="editor.isNew" class="xs faint">先保存技能，才能运行测试。</p>
@@ -587,10 +609,11 @@ export const SkillsView = {
       </div>
 
       <template #footer>
-        <button class="btn" :disabled="saving || publishing" @click="closeEditor">关闭</button>
-        <button v-if="editor?.isNew || editor?.editable" class="btn" :disabled="saving || publishing" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+        <button class="btn" :disabled="editorBusy" @click="closeEditor">关闭</button>
+        <button v-if="editor?.isNew || editor?.editable" class="btn" :disabled="editorBusy" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+        <button v-if="editor?.editable && editor?.status === 'published'" class="btn" :disabled="editorBusy" @click="disable(editor)">{{ disabling ? '停用中…' : '停用' }}</button>
         <button v-if="!editor?.isNew && editor?.editable && editor?.status !== 'published'"
-                class="btn btn--primary" :disabled="saving || publishing" @click="publish">{{ publishing ? '发布中…' : '发布' }}</button>
+                class="btn btn--primary" :disabled="editorBusy" @click="publish">{{ publishing ? '发布中…' : '发布' }}</button>
       </template>
     </Modal>`,
 };

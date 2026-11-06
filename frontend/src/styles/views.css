@@ -62,6 +62,23 @@
 
 .workbench__suggest { margin-top: 34px; }
 
+.workbench__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand-primary);
+  border-radius: var(--radius-card);
+  background: var(--brand-softer);
+  font-size: var(--text-sm);
+}
+.workbench__notice > svg { flex: none; color: var(--brand-primary); }
+.workbench__notice > .grow { flex: 1 1 260px; }
+.workbench__notice p { margin-top: 2px; color: var(--text-secondary); }
+
 .suggest-title {
   display: flex;
   align-items: center;
@@ -90,6 +107,7 @@
 
 .suggest:hover { border-color: var(--border-strong); box-shadow: var(--shadow-2); }
 .suggest svg { color: var(--text-tertiary); flex: none; }
+.suggest .grow { overflow-wrap: anywhere; }
 
 /* ---------- Composer ---------- */
 .composer {
@@ -461,11 +479,18 @@
 }
 
 /* ---------- 指标中心 ---------- */
-.metric-layout { display: grid; grid-template-columns: minmax(280px, .85fr) minmax(360px, 1fr); gap: 20px; align-items: start; }
+.metric-layout { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 20px; align-items: start; }
 .metric-layout > * { min-width: 0; }
-.metric-list { display: flex; flex-direction: column; gap: 10px; }
-.metric-item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; }
+.metric-catalog { position: sticky; top: calc(var(--header-height) + 16px); }
+.metric-catalog .search-field { width: 100%; }
+.metric-catalog .segmented { width: 100%; }
+.metric-catalog .segmented button { flex: 1; }
+.metric-list { display: flex; flex-direction: column; gap: 8px; max-height: clamp(240px, calc(100dvh - 360px), 720px); overflow-y: auto; padding: 3px; }
+.metric-item { display: flex; align-items: center; gap: 10px; padding: 12px; cursor: pointer; text-align: left; width: 100%; }
+.metric-item b { overflow-wrap: anywhere; }
 .metric-item--selected { border-color: var(--brand-primary); background: var(--brand-softer); }
+.metric-trial-form, .metric-trial-result { display: flex; flex-direction: column; gap: 12px; }
+.metric-trial-result { margin-top: 16px; }
 .knowledge-entry__actions { margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .definition { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 10px 16px; font-size: var(--text-body); }

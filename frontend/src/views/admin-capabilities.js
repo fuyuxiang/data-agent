@@ -58,6 +58,7 @@ export const ModelsView = {
       try {
         const response = await actions.get('/api/providers');
         this.providers = response.items || [];
+        state.providers = this.providers;
       } catch (error) {
         this.loadError = error.message;
       } finally {
@@ -92,6 +93,7 @@ export const ModelsView = {
           : await actions.post('/api/providers', this.editor);
         this.providers = this.providers
           .filter(item => item.id !== response.item.id).concat(response.item);
+        state.providers = this.providers;
         delete this.result[response.item.id];
         this.editor = null;
         toast('模型服务已保存', '完成');
@@ -143,6 +145,7 @@ export const ModelsView = {
       try {
         await actions.remove(`/api/providers/${provider.id}`);
         this.providers = this.providers.filter(item => item.id !== provider.id);
+        state.providers = this.providers;
         this.removeTarget = null;
         this.detail = null;
         toast('模型服务已删除', '完成');

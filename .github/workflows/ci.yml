@@ -80,6 +80,7 @@ jobs:
           (cd frontend/vendor && sha256sum --check SHA256SUMS)
           npm audit --audit-level=high
           npm run check
+          npm run test:frontend
           npm run build
           npm run test:browser
           node --check frontend/dist/src/app.js

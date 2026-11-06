@@ -365,7 +365,7 @@ export const Composer = {
                  @change="toggleSource(item.id)" />
           <span class="grow">
             <b>{{ item.name }}</b>
-            <small class="faint" style="display:block">{{ item.kind }} · {{ item.status }}</small>
+            <small class="faint" style="display:block">{{ { file: '文件', database: '数据库', http: 'API 数据' }[item.kind] || '数据源' }} · 可分析</small>
           </span>
         </label>
         <p v-if="!availableSources.length" class="muted small">

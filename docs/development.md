@@ -34,11 +34,16 @@ npm ci
 npx playwright install chromium
 npm audit --audit-level=high
 npm run check
+npm run test:frontend
 npm run build
 npm run test:browser
 ```
 
 `npm run check` 会验证本地前端依赖完整性和 JavaScript 语法；`npm run build` 会生成不包含开发时动态模板编译器的 `frontend/dist/` 生产静态资产。完整产品仍需要 Python API 服务。
+
+`npm run test:frontend` 覆盖指标展示的十进制精度、百分比、舍入、缺失值和未定义格式，以及完整数据源分页、失败保留范围、跨空间和删除后的旧响应。浏览器回归另验证实际分页与失败重试、技能草稿与发布边界、停用时保留编辑，以及图表实际提示与表格的一致性。
+
+浏览器测试允许隔离服务用 120 秒完成冷启动，不改变单个测试的 30 秒超时。在资源受限的机器上，可通过 `MERIDIAN_BROWSER_STARTUP_TIMEOUT_MS` 调整服务启动等待时间。
 
 ## 集成测试
 

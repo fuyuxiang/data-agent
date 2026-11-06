@@ -62,6 +62,9 @@ export const WorkbenchView = {
     canAnalyze() {
       return ['owner', 'editor', 'analyst'].includes(state.workspaceRole);
     },
+    needsAnalysisSetup() {
+      return !state.providers.some(item => item.enabled !== false && item.has_api_key);
+    },
     /** 有正在进行或刚建好的对话就直接续用，不必每次新建。 */
     sessionReady() {
       return Boolean(state.activeSessionId);
@@ -179,6 +182,18 @@ export const WorkbenchView = {
         <p v-if="submitting" class="small muted" role="status">{{ submissionStage }}</p>
         <p v-if="!canAnalyze" class="small muted">当前为只读权限，可查看已有内容；发起分析需要分析权限。</p>
 
+        <div v-if="canAnalyze && needsAnalysisSetup" class="workbench__notice" role="note" aria-label="分析服务提示">
+          <Icon name="info" :size="18" />
+          <div class="grow">
+            <b>自主分析尚未启用</b>
+            <p>{{ state.workspaceRole === 'owner' ? '完成分析服务配置后即可提问。' : '请联系工作空间所有者启用分析服务。' }}<template v-if="!needsData">你可以先到指标中心查看口径、试算数据。</template></p>
+          </div>
+          <div class="row">
+            <button v-if="!needsData" class="btn btn--sm" @click="navigate('metrics')">先试算指标<Icon name="arrowRight" :size="14" /></button>
+            <button v-if="state.workspaceRole === 'owner'" class="btn btn--sm btn--ghost" @click="navigate('admin/models')">启用自主分析</button>
+          </div>
+        </div>
+
         <div class="workbench__capabilities">
           <div v-for="item in capabilities" :key="item.label" class="capability">
             <Icon :name="item.icon" :size="19" />
@@ -203,7 +218,7 @@ export const WorkbenchView = {
           <div class="suggest-list">
             <button v-for="item in questions" :key="item.text" class="suggest" @click="suggest(item.text)">
               <Icon :name="item.icon" :size="15" />
-              <span class="grow truncate">{{ item.text }}</span>
+              <span class="grow" :title="item.text">{{ item.text }}</span>
               <Icon name="arrowRight" :size="15" />
             </button>
           </div>

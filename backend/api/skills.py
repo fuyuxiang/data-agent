@@ -197,7 +197,8 @@ def update_skill(skill_id: str):
         payload = skill_to_record(merged, wid)
         payload.update({
             "version": str(int(item.get("version") or 1) + 1),
-            "status": "draft" if item.get("status") == "published" else item.get("status", "draft"),
+            "status": "disabled" if merged.status == "disabled"
+            else "draft" if item.get("status") == "published" else item.get("status", "draft"),
             "published_at": None,
             "updated_at": utcnow(),
         })
@@ -299,20 +300,25 @@ def test_skill(skill_id: str):
     question = str(body().get("question") or "")
     resolution: dict[str, Any] | None = None
     if question.strip():
-        resolution = _resolve(wid, question).to_public()
+        resolution = _resolve(wid, question, include_drafts=True).to_public()
     return ok(evaluation=report.to_public(), resolution=resolution)
 
 
-def _resolve(wid: str, question: str, *, explicit: list[str] | None = None):
+def _resolve(
+    wid: str, question: str, *, explicit: list[str] | None = None, include_drafts: bool = False,
+):
     actor = current_user_id()
     registry = _registry(wid)
     available = available_resources(db(), wid, actor)
-    visible = filter_visible(registry.definitions(include_disabled=False), available)
+    # Business preview follows the same publication and resource rules as runs.
+    # Draft matching is only exposed by the dedicated editor test endpoint.
+    definitions = registry.definitions(include_disabled=False) if include_drafts else registry.published()
+    visible = filter_visible(definitions, available)
     resolver = SkillResolver(visible)
     resolution = resolver.resolve(question, explicit=explicit)
     rejected = [
         {"id": item.id, "name": item.name, "reason": unavailable_reason(item, available)}
-        for item in registry.definitions()
+        for item in definitions
         if item not in visible and unavailable_reason(item, available)
     ]
     return ResolutionWithRejected(resolution, rejected)

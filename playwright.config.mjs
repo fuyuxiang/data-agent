@@ -23,7 +23,7 @@ export default defineConfig({
   webServer: {
     command: 'python3 -m scripts.run_browser_fixture',
     url: `http://127.0.0.1:${fixturePort}/api/ready`,
-    timeout: 30_000,
+    timeout: Number(process.env.MERIDIAN_BROWSER_STARTUP_TIMEOUT_MS || 120_000),
     reuseExistingServer: false,
   },
 });

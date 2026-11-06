@@ -1,0 +1,627 @@
+{
+  "baseline_commit": "0948d6934d7004b9227b844d0aef8e5ff37b90b9",
+  "dataset": "POST /api/demo/seed; synthetic retail; 24 months; 4320 rows; 8 metrics",
+  "external_model_used": false,
+  "browser": "Playwright Chromium",
+  "observations": {
+    "before": {
+      "errors": [],
+      "failed": [],
+      "layouts": [
+        {
+          "route": "workbench",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "agents",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "library",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "metrics",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1137
+        },
+        {
+          "route": "history",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "trash",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/agents",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/skills",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1190
+        },
+        {
+          "route": "admin/data",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/metrics",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1137
+        },
+        {
+          "route": "admin/knowledge",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/models",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/mcp",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/integrations",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/runs",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/evaluations",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1071
+        },
+        {
+          "route": "admin/users",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/settings",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/trash",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "workbench",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "agents",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "library",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "metrics",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1137
+        },
+        {
+          "route": "history",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "trash",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "admin/agents",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/skills",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1232
+        },
+        {
+          "route": "admin/data",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/metrics",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1180
+        },
+        {
+          "route": "admin/knowledge",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 796
+        },
+        {
+          "route": "admin/models",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/mcp",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/integrations",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/runs",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/evaluations",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1071
+        },
+        {
+          "route": "admin/users",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/settings",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/trash",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        }
+      ]
+    },
+    "after": {
+      "errors": [],
+      "failed": [],
+      "layouts": [
+        {
+          "route": "workbench",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "agents",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "library",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "metrics",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "history",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "trash",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/agents",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/skills",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1190
+        },
+        {
+          "route": "admin/data",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/metrics",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/knowledge",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/models",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/mcp",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/integrations",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/runs",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/evaluations",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 1071
+        },
+        {
+          "route": "admin/users",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/settings",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "admin/trash",
+          "width": 1440,
+          "height": 900,
+          "scrollWidth": 1440,
+          "scrollHeight": 900
+        },
+        {
+          "route": "workbench",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 764
+        },
+        {
+          "route": "agents",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "library",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "metrics",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "history",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "trash",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 720
+        },
+        {
+          "route": "admin/agents",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/skills",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1232
+        },
+        {
+          "route": "admin/data",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/metrics",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/knowledge",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 796
+        },
+        {
+          "route": "admin/models",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/mcp",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/integrations",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/runs",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/evaluations",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 1071
+        },
+        {
+          "route": "admin/users",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/settings",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        },
+        {
+          "route": "admin/trash",
+          "width": 1280,
+          "height": 720,
+          "scrollWidth": 1280,
+          "scrollHeight": 722
+        }
+      ]
+    }
+  },
+  "file_verification": {
+    "status": "PASS",
+    "formats": [
+      ".pptx",
+      ".docx",
+      ".xlsx",
+      ".html"
+    ],
+    "checks": [
+      "总计 25",
+      "B 组 15",
+      "四种格式的发现、口径、建议与局限一致",
+      "网页内嵌图表，可离线查看",
+      "Excel 两份查询分表保存"
+    ],
+    "slides": 8,
+    "sheets": [
+      "成果说明",
+      "验证数据",
+      "验证数据 2",
+      "发现与解释",
+      "行动建议",
+      "数据质量说明",
+      "分析方法",
+      "口径与假设",
+      "指标与字段说明"
+    ]
+  },
+  "backend_regression": {
+    "passed": 513,
+    "external_database_tests_deselected": 2,
+    "coverage_total_percent": 74,
+    "coverage_agent_percent": 91
+  },
+  "security_compatibility": {
+    "passed": 80,
+    "dependency_smoke": {
+      "status": "PASS",
+      "versions": {
+        "filelock": "4.2.9",
+        "oauthlib": "4.0.1",
+        "pyasn1": "0.6.5",
+        "pypdf": "6.21.4",
+        "setuptools": "84.2.1",
+        "msgpack": "1.2.4"
+      },
+      "checks": [
+        "file lock exclusion",
+        "OAuth request construction",
+        "ASN.1 DER roundtrip",
+        "MessagePack roundtrip",
+        "PDF upload and indexed retrieval"
+      ]
+    }
+  },
+  "targeted_browser_regression": {
+    "passed": 9,
+    "failed": 0
+  },
+  "dependency_audit": {
+    "production": "No known vulnerabilities found",
+    "development": "No known vulnerabilities found",
+    "npm": "found 0 vulnerabilities"
+  },
+  "full_browser_regression": {
+    "passed": 187,
+    "failed": 0,
+    "duration_minutes": 10.9
+  },
+  "final_persisted_delivery_recheck": {
+    "formats": 4,
+    "errors": [],
+    "failed_requests": [],
+    "duplicates": 0
+  }
+}

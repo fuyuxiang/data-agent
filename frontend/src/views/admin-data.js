@@ -35,6 +35,7 @@ export const DataView = {
       sources: [],
       loading: true,
       loadError: '',
+      loadRequest: 0,
       query: '',
       kind: '',
       active: null,
@@ -138,6 +139,7 @@ export const DataView = {
     await this.load();
   },
   beforeUnmount() {
+    this.loadRequest += 1;
     this.schemaRequest += 1;
     this.previewRequest += 1;
     this.profileRequest += 1;
@@ -179,15 +181,16 @@ export const DataView = {
       this.active = null;
     },
     async load() {
+      const request = ++this.loadRequest;
       this.loading = true;
       this.loadError = '';
       try {
-        const response = await actions.get('/api/sources');
-        this.sources = response.items || [];
+        const sources = await actions.refreshSources();
+        if (request === this.loadRequest && sources) this.sources = sources;
       } catch (error) {
-        this.loadError = error.message;
+        if (request === this.loadRequest) this.loadError = error.message;
       } finally {
-        this.loading = false;
+        if (request === this.loadRequest) this.loading = false;
       }
     },
     async open(source) {
@@ -296,6 +299,7 @@ export const DataView = {
       try {
         const response = await actions.post(`/api/sources/${sourceId}/refresh`, {});
         this.sources = this.sources.map(source => source.id === sourceId ? response.item : source);
+        actions.updateSource(response.item);
         if (this.active?.id === sourceId) await this.open(response.item);
         toast('目录已刷新，字段将在查看时重新读取', '完成');
       } catch (error) {
@@ -487,6 +491,7 @@ export const DataView = {
       try {
         await actions.remove(`/api/sources/${source.id}`);
         this.sources = this.sources.filter(item => item.id !== source.id);
+        actions.forgetSource(source.id, source.workspace_id || state.workspaceId);
         this.active = null;
         toast('数据源已移入回收站', '完成');
       } catch (error) {

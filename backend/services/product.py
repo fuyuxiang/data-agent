@@ -44,14 +44,18 @@ def onboarding_status(database: Database, workspace_id: str) -> dict[str, Any]:
     from ..services.models import public_provider
 
     model_ready = False
-    for provider in database.list("providers", workspace_id=workspace_id, limit=5000):
-        if provider.get("enabled", True) and str(public_provider(provider).get("status") or "") == "ready":
+    for provider in database.list("providers", limit=5000):
+        if provider.get("id") != "environment-default" and provider.get("workspace_id", "default") != workspace_id:
+            continue
+        # Configuration readiness does not attest to network connectivity.
+        # Providers have no persisted "ready" status, even after a test.
+        if provider.get("enabled", True) and public_provider(provider).get("has_api_key"):
             model_ready = True
             break
     steps = [
         {
             "id": "connect_model", "name": "连接模型",
-            "description": "配置模型并测试连接，以启用自主分析。",
+            "description": "配置模型凭据以启用自主分析；连接是否可用请运行测试确认。",
             "done": model_ready, "route": "admin/models",
         },
         {
