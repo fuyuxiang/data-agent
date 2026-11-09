@@ -74,6 +74,26 @@ python app.py
 
 `app.py` 在非 debug 模式下使用 Waitress。生产环境禁止启用 `MERIDIAN_DEBUG=1`，且会拒绝不完整的前端产物或弱密钥配置。有界分析以本地子进程执行固定审核方法；生成的任意 Python 代码会被拒绝。生产部署还应使用专用低权限系统账号和进程管理器。
 
+### 打包和升级
+
+在安装了 Python 3.11 和 Node.js 20 的构建机上，从要发布的 Git 提交生成发布包。
+
+```bash
+git fetch origin main
+python3 scripts/package_release.py --revision origin/main --output /tmp/data-agent-release.tar.gz
+```
+
+脚本在临时目录构建前端，排除各层目录中的 macOS `._*` 文件，并在包内写入完整提交号和 SHA-256 清单。将发布包传到服务器后，解压到新的空发布目录，在该目录执行 `sha256sum --check --quiet .release-sha256`。校验通过后，在新目录创建 Python 虚拟环境并执行 `python -m pip install --require-hashes -r requirements.lock`。将服务切换到新目录及其虚拟环境后重启。升级沿用现有配置、密钥和数据目录，并保留上一发布目录以便回滚。
+
+切换后，通过公网 HTTPS 地址用具备目标工作空间访问权限的验证账号登录并检查初始化接口。验证账号可使用工作空间只读成员角色。
+
+```bash
+MERIDIAN_DEPLOY_USERNAME=deploy-check \
+  python3 scripts/verify_deployment.py https://analytics.example.com --workspace-id default
+```
+
+脚本会交互读取密码。自动化可从密钥管理工具注入 `MERIDIAN_DEPLOY_PASSWORD`。省略 `--workspace-id` 时检查登录返回的活动工作空间。只有登录和携带会话 Cookie 的 `GET /api/bootstrap` 均返回 HTTP 200，且初始化响应包含目标工作空间及技能列表，才算验收通过。脚本失败时返回非零退出码，并在收到 HTTP 错误时输出请求 ID，便于查询日志。验收失败时将服务切回上一发布目录并重新验证。
+
 ### 运行边界
 
 > [!WARNING]
